@@ -8,3 +8,6 @@
 /docs/superpowers/
 # Isolated feature worktrees
 /.worktrees/
+/test/agent/artifacts/
+/test/agent/runtime/
+/build/agent-desktop/
