@@ -120,10 +120,11 @@ that Flathub intentionally signs.
 Flathub remote, but its behavior changes:
 
 1. If `flathub` is absent, add it from the pinned local `.flatpakrepo` file.
-2. If `flathub` already exists, disable it before repair. In one modification,
-   set its URL to the descriptor's canonical URL, replace its trusted-key set
-   with the pinned public key, and explicitly enable GPG verification. Repair
-   must not add the pinned key to an existing unreviewed keyring.
+2. If `flathub` already exists, disable it before repair. As the target user,
+   remove only that disabled remote's trusted-key file, then use Flatpak to set
+   the descriptor's canonical URL when needed, import the pinned public key,
+   and explicitly enable GPG verification. Repair must not add the pinned key
+   to an existing unreviewed keyring or delete and recreate the remote.
 3. Re-read the disabled remote and require the canonical URL with no
    `no-gpg-verify` option, then enable it and assert the same state again.
 
