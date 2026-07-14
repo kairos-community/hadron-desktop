@@ -94,6 +94,7 @@ static gboolean write_all(gint fd, const gchar *contents, gsize length)
             return FALSE;
         }
         if (written == 0) {
+            errno = EIO;
             return FALSE;
         }
         contents += written;
@@ -108,23 +109,28 @@ static void persist_state(const Fixture *fixture)
     gchar *contents = fixture_state_json(fixture);
     gchar *temporary_path = g_strdup_printf("%s.XXXXXX", STATE_PATH);
     gint fd = g_mkstemp_full(temporary_path, O_WRONLY | O_CLOEXEC, 0600);
-    gboolean saved = FALSE;
+    gint error_number = 0;
 
-    if (fd >= 0) {
-        saved = write_all(fd, contents, strlen(contents));
-        if (saved && fsync(fd) != 0) {
-            saved = FALSE;
+    if (fd < 0) {
+        error_number = errno;
+    } else {
+        if (!write_all(fd, contents, strlen(contents))) {
+            error_number = errno;
+        } else if (fsync(fd) != 0) {
+            error_number = errno;
         }
-        if (close(fd) != 0) {
-            saved = FALSE;
+        if (close(fd) != 0 && error_number == 0) {
+            error_number = errno;
         }
-        if (saved && g_rename(temporary_path, STATE_PATH) != 0) {
-            saved = FALSE;
+        if (error_number == 0 && g_rename(temporary_path, STATE_PATH) != 0) {
+            error_number = errno;
         }
     }
 
-    if (!saved) {
-        g_warning("unable to atomically write %s: %s", STATE_PATH, g_strerror(errno));
+    if (error_number != 0) {
+        g_warning("unable to atomically write %s: %s",
+                  STATE_PATH,
+                  g_strerror(error_number));
         g_unlink(temporary_path);
     }
 
@@ -240,12 +246,15 @@ static void on_drag_data_received(GtkWidget *widget,
                                   gpointer user_data)
 {
     Fixture *fixture = user_data;
-    gboolean accepted = gtk_selection_data_get_length(selection_data) > 0;
+    guchar *payload = gtk_selection_data_get_text(selection_data);
+    gboolean accepted = payload != NULL &&
+        strcmp((const gchar *)payload, "hadron-cua-fixture") == 0;
 
     (void)widget;
     (void)x;
     (void)y;
     (void)info;
+    g_free(payload);
     fixture->dragged = accepted;
     gtk_label_set_text(GTK_LABEL(fixture->drag_target_label),
                        accepted ? "Drag target: dropped" : "Drag target: waiting");
