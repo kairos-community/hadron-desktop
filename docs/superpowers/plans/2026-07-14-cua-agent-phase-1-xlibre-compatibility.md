@@ -33,6 +33,7 @@
 - `test/agent/fixtures/chromium/index.html` — stateful Chromium page.
 - `test/agent/fixtures/chromium.commit` — immutable Flathub commit exercised by the gates.
 - `test/agent/rootfs/etc/i3/config.d/99-cua-compat.conf` — starts fixtures/probe.
+- `test/agent/rootfs/usr/local/libexec/cua-compat-collect` — session-scoped diagnostics collector.
 - `test/agent/rootfs/etc/systemd/system/cua-compat-report.service` — serial/artifact reporter.
 - `test/agent/rootfs/usr/local/libexec/cua-compat-report` — reporter script.
 - `test/agent/frame_compare.py` — PNG/PPM comparison.
@@ -200,6 +201,8 @@ git commit -m "test(agent): add GTK and Chromium Cua fixtures"
 
 - [ ] In `Dockerfile.compat`, create locked UID 1000 `agent` in groups `audio,video,render,input,bluetooth,seat,hadron-agent-control` and explicitly exclude `admin`, `sudo`, and `docker`.
 
+- [ ] Build pinned `xprop` 1.2.8 and `xrandr` 1.5.4 from the official X.Org `https://www.x.org/releases/individual/app/` tarballs, verifying SHA-256 digests `d689e2adb7ef7b439f6469b51cda8a7daefc83243854c2a3b8f84d0f029d67ee` and `2cafccb2aaf2491a4068676117a0d4f90ab307724b96fffc54cd1da953779400`, then copy only the resulting binaries into the compatibility test image.
+
 - [ ] Set Ly values `auto_login_user = agent`, `auto_login_session = i3`, and `auto_login_service = ly-autologin`. A test-only unit drop-in clears the normal live-mode condition and then retains `ConditionKernelCommandLine=!install-mode`. Ly must still own tty1 and XLibre.
 
 - [ ] Create `99-cua-compat.conf`:
@@ -208,18 +211,22 @@ git commit -m "test(agent): add GTK and Chromium Cua fixtures"
 exec --no-startup-id /usr/local/libexec/hadron-cua-gtk-fixture
 exec --no-startup-id flatpak run --filesystem=/opt/hadron-agent-fixtures:ro org.chromium.Chromium --disable-gpu --ozone-platform=x11 --no-first-run --new-window file:///opt/hadron-agent-fixtures/chromium/index.html
 exec --no-startup-id /usr/local/libexec/cua-compat-probe
+exec --no-startup-id /usr/local/libexec/cua-compat-collect
 ```
 
-- [ ] Implement `cua-compat-report`. It waits 240 seconds for `/run/user/1000/hadron-cua-compat/result.json`, emits only `CUACOMPAT: BEGIN/PASS/FAIL/DONE` serial markers, gathers result JSON, Cua PNG, GTK state, Chromium commit, `cua-driver doctor --json`, `xprop -root`, `xrandr`, and the user journal, redacts environment keys containing `TOKEN`, and writes a tar at offset zero of `/dev/disk/by-id/virtio-hadronagentartifacts`.
+- [ ] Implement `cua-compat-collect`. It runs as UID 1000, requires inherited `DISPLAY`, `XAUTHORITY`, and `DBUS_SESSION_BUS_ADDRESS`, writes `collection.started`, waits for `result.json`, `result.status`, and `cua-desktop.png`, runs `cua-driver doctor --json`, `xprop -root`, and `xrandr` with telemetry and update checks disabled, redacts any environment key containing `TOKEN`, case-insensitively, and atomically writes `collection.status` as `PASS` only when the inherited session and all diagnostics succeed.
+
+- [ ] Implement `cua-compat-report`. It waits at most 60 seconds for `collection.started`, then at most 240 seconds for `result.status`, then at most 30 seconds for `collection.status`, emits only `CUACOMPAT: BEGIN/PASS/FAIL/DONE` serial markers, stages result JSON, Cua PNG, GTK state, Chromium commit, collector outputs, and the UID 1000 journal, and writes a tar at offset zero of `/dev/disk/by-id/virtio-hadronagentartifacts`.
 
 - [ ] Validate shell syntax and account isolation, then commit:
 
 ```bash
+sh -n test/agent/rootfs/usr/local/libexec/cua-compat-collect
 sh -n test/agent/rootfs/usr/local/libexec/cua-compat-report
 docker build -f test/agent/Dockerfile.compat \
   --build-arg BASE_IMAGE=hadron-agent:compat -t hadron-agent-compat:test .
 docker run --rm hadron-agent-compat:test sh -c \
-  'id agent; ! id -nG agent | grep -Eq "(^| )(admin|sudo|docker)( |$)"'
+  'command -v xprop >/dev/null && command -v xrandr >/dev/null && id agent; ! id -nG agent | grep -Eq "(^| )(admin|sudo|docker)( |$)"'
 git add test/agent/Dockerfile.compat test/agent/rootfs
 git commit -m "test(agent): boot a visible XLibre compatibility session"
 ```
@@ -231,6 +238,8 @@ git commit -m "test(agent): boot a visible XLibre compatibility session"
 - [ ] Spawn `/usr/bin/cua-driver mcp --no-daemon-relaunch` through `internal/cua`. Append the two opt-out variables plus `CUA_DRIVER_RS_A11Y_ADVERTISE_MODE=all`. Fail `environment` unless the three inherited session variables and their Xauthority/bus endpoints work.
 
 - [ ] Exercise `get_desktop_state`, `list_windows`, `get_window_state`, `bring_to_front`, `click`, `double_click`, `drag`, `scroll`, `type_text`, and `press_key`. Set `delivery_mode: foreground` on every mutation. Assert GTK only through its state file. Assert Chromium through a fresh AT-SPI tree and visible state text, never JavaScript or DevTools.
+
+- [ ] Atomically write `/run/user/1000/hadron-cua-compat/result.json`, `/run/user/1000/hadron-cua-compat/result.status`, and `/run/user/1000/hadron-cua-compat/cua-desktop.png`. `result.status` must contain exactly `PASS` or `FAIL` and be written last; a missing PNG is only acceptable when both the typed result and status are `FAIL`.
 
 - [ ] Build the probe statically in `golang:1.25.0-alpine3.22` with `CGO_ENABLED=0`, copy it only into the test image, run `cd agent && go test ./...`, rebuild the test image, and confirm the probe is executable.
 
