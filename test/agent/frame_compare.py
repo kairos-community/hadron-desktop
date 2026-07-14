@@ -244,11 +244,43 @@ def main(argv):
 
     cua_path, qmp_path, out_path = argv[1], argv[2], argv[3]
 
+    # Decode each input independently so a failure on either side still lets
+    # us report whatever dimensions were recovered from the other side.
+    cua_w = cua_h = qmp_w = qmp_h = None
+    cua_rgb = qmp_rgb = None
+    decode_errors = []
+
     try:
         cua_w, cua_h, cua_rgb = decode_png(cua_path)
+    except (OSError, ValueError, zlib.error) as exc:
+        decode_errors.append(str(exc))
+
+    try:
         qmp_w, qmp_h, qmp_rgb = decode_ppm(qmp_path)
     except (OSError, ValueError, zlib.error) as exc:
-        print(f"frame_compare: decode failed: {exc}", file=sys.stderr)
+        decode_errors.append(str(exc))
+
+    if decode_errors:
+        # Downstream (Task 7) still needs frame-compare.json to exist and
+        # exit non-zero on a decode failure, not just a stderr message that
+        # leaves no artifact behind. Keep the same six keys as the PASS path;
+        # unknown dimensions stay null rather than being guessed at.
+        error_msg = "; ".join(decode_errors)
+        print(f"frame_compare: decode failed: {error_msg}", file=sys.stderr)
+        result = {
+            "cua_width": cua_w,
+            "cua_height": cua_h,
+            "qmp_width": qmp_w,
+            "qmp_height": qmp_h,
+            "error": error_msg,
+            "passed": False,
+        }
+        try:
+            with open(out_path, "w", encoding="utf-8") as fh:
+                json.dump(result, fh, indent=2)
+                fh.write("\n")
+        except OSError as exc:
+            print(f"frame_compare: cannot write {out_path}: {exc}", file=sys.stderr)
         return 1
 
     result = {

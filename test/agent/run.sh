@@ -323,6 +323,26 @@ wait "$QEMU_PID" 2>/dev/null
 # to offset 0 of this disk, so entries are top-level (./result.json,
 # ./cua-desktop.png, ...). Extracting into $ART lands result.json and
 # cua-desktop.png directly at $ART/result.json and $ART/cua-desktop.png.
+#
+# Guard against stale-artifact spurious PASS: result.json / cua-desktop.png /
+# frame-compare.json (and every other file a prior run's guest tar dropped
+# into $ART, e.g. environment.txt, cua-driver-doctor.json, xprop-root.txt,
+# xrandr.txt, collection.status, report.log, gtk-state.json, chromium.commit,
+# user-journal.log) are ONLY ever produced by this extraction step or by the
+# frame-compare step right after it. SKIP_BUILD=1/SKIP_ISO=1 reuse the same
+# $ART across runs, so if extraction silently fails below but the serial still
+# shows PASS/DONE, a leftover result.json/cua-desktop.png from a previous run
+# would make the checks further down pass on stale data. Clear every
+# guest/derived artifact now, before extraction, so this run starts clean.
+# Host-side captures that were freshly (re)written earlier in THIS run
+# (console log, qemu log, the QMP PPM) are preserved.
+log "Clearing stale guest artifacts from $ART before extraction"
+find "$ART" -mindepth 1 -maxdepth 1 \
+  ! -name "$(basename "$CONSOLE")" \
+  ! -name "$(basename "$QEMU_LOG")" \
+  ! -name "$(basename "$PPM")" \
+  -exec rm -rf {} +
+
 if tar -tf "$ARTDISK" >/dev/null 2>&1; then
   if tar -xf "$ARTDISK" -C "$ART" 2>/dev/null; then
     log "Extracted guest artifacts to $ART"
