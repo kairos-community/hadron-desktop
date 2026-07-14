@@ -129,6 +129,8 @@ RUN mkdir -p /cua/usr/bin && \
 
 
 FROM ${BASE_IMAGE} AS agent
+ENV CUA_DRIVER_RS_TELEMETRY_ENABLED=false \
+    CUA_DRIVER_RS_UPDATE_CHECK=false
 COPY --from=agent-runtime-build /agent-runtime/ /
 COPY --from=cua-build /cua/ /
 RUN glib-compile-schemas /usr/share/glib-2.0/schemas && \
