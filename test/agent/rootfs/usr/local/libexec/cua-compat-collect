@@ -1,0 +1,129 @@
+#!/bin/sh
+
+set -u
+
+runtime_dir=/run/user/1000/hadron-cua-compat
+collection_status=FAIL
+
+umask 077
+install -d -m 0700 "$runtime_dir" || exit 1
+exec >>"$runtime_dir/collector.log" 2>&1
+
+# Invoked indirectly by the EXIT trap below.
+# shellcheck disable=SC2329
+write_collection_status() {
+    status_tmp="$runtime_dir/.collection.status.$$"
+    if printf '%s\n' "$collection_status" > "$status_tmp"; then
+        mv -f "$status_tmp" "$runtime_dir/collection.status"
+    else
+        rm -f "$status_tmp"
+    fi
+}
+
+trap write_collection_status EXIT
+trap 'exit 1' HUP INT TERM
+
+rm -f "$runtime_dir/collection.started" \
+    "$runtime_dir/collection.status"
+started_tmp="$runtime_dir/.collection.started.$$"
+printf 'STARTED\n' > "$started_tmp"
+mv -f "$started_tmp" "$runtime_dir/collection.started"
+
+if ! env | sort | awk -F= '
+    {
+        key = $1
+        if (tolower(key) ~ /token/) {
+            print key "=<redacted>"
+        } else {
+            print
+        }
+    }
+' > "$runtime_dir/environment.txt"; then
+    exit 1
+fi
+
+if [ "$(id -u)" -ne 1000 ]; then
+    printf 'collector must run as UID 1000\n'
+    exit 1
+fi
+if [ -z "${DISPLAY:-}" ]; then
+    printf 'DISPLAY is not inherited\n'
+    exit 1
+fi
+if [ -z "${XAUTHORITY:-}" ]; then
+    printf 'XAUTHORITY is not inherited\n'
+    exit 1
+fi
+if [ ! -r "$XAUTHORITY" ]; then
+    printf 'XAUTHORITY is not readable\n'
+    exit 1
+fi
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    printf 'DBUS_SESSION_BUS_ADDRESS is not inherited\n'
+    exit 1
+fi
+
+remaining=240
+while [ "$remaining" -gt 0 ]; do
+    if [ -s "$runtime_dir/result.json" ] && \
+       [ -s "$runtime_dir/result.status" ] && \
+       [ -s "$runtime_dir/cua-desktop.png" ]; then
+        break
+    fi
+    sleep 1
+    remaining=$((remaining - 1))
+done
+if [ ! -s "$runtime_dir/result.json" ] || \
+   [ ! -s "$runtime_dir/result.status" ] || \
+   [ ! -s "$runtime_dir/cua-desktop.png" ]; then
+    printf 'timed out waiting for probe artifacts\n'
+    exit 1
+fi
+
+case "$(cat "$runtime_dir/result.status")" in
+    PASS|FAIL) ;;
+    *)
+        printf 'invalid result.status\n'
+        exit 1
+        ;;
+esac
+
+export CUA_DRIVER_RS_TELEMETRY_ENABLED=false
+export CUA_DRIVER_RS_UPDATE_CHECK=false
+diagnostics_ok=1
+
+run_diagnostic() {
+    output=$1
+    error_output=$2
+    status_file=$3
+    shift 3
+    if "$@" > "$output" 2> "$error_output"; then
+        printf '0\n' > "$status_file"
+    else
+        printf '%s\n' "$?" > "$status_file"
+        diagnostics_ok=0
+        printf 'diagnostic failed: %s\n' "$*"
+    fi
+}
+
+run_diagnostic "$runtime_dir/cua-driver-doctor.json" \
+    "$runtime_dir/cua-driver-doctor.stderr" \
+    "$runtime_dir/cua-driver-doctor.status" \
+    cua-driver doctor --json
+run_diagnostic "$runtime_dir/xprop-root.txt" \
+    "$runtime_dir/xprop-root.stderr" \
+    "$runtime_dir/xprop-root.status" \
+    xprop -root
+run_diagnostic "$runtime_dir/xrandr.txt" \
+    "$runtime_dir/xrandr.stderr" \
+    "$runtime_dir/xrandr.status" \
+    xrandr
+
+if [ "$diagnostics_ok" -eq 1 ] && \
+   [ -s "$runtime_dir/cua-driver-doctor.json" ] && \
+   [ -s "$runtime_dir/xprop-root.txt" ] && \
+   [ -s "$runtime_dir/xrandr.txt" ]; then
+    collection_status=PASS
+fi
+
+exit 0

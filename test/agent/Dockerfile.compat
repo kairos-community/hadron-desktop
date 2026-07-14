@@ -9,14 +9,40 @@ COPY --from=fixture-runtime /usr/include/ /usr/include/
 COPY --from=fixture-runtime /usr/lib/ /usr/lib/
 COPY --from=fixture-runtime /usr/share/pkgconfig/ /usr/share/pkgconfig/
 ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:/usr/share/pkgconfig
+ARG XPROP_VERSION=1.2.8
+ARG XPROP_SHA256=d689e2adb7ef7b439f6469b51cda8a7daefc83243854c2a3b8f84d0f029d67ee
+ARG XRANDR_VERSION=1.5.4
+ARG XRANDR_SHA256=2cafccb2aaf2491a4068676117a0d4f90ab307724b96fffc54cd1da953779400
 COPY test/agent/fixtures/gtk3/main.c /src/main.c
 RUN mkdir -p /out
 RUN cc -O2 -Wall -Wextra $(pkg-config --cflags gtk+-3.0) \
   /src/main.c -o /out/hadron-cua-gtk-fixture \
   $(pkg-config --libs gtk+-3.0)
+RUN curl -fL --retry 5 \
+      "https://www.x.org/releases/individual/app/xprop-${XPROP_VERSION}.tar.xz" \
+      -o /tmp/xprop.tar.xz && \
+    printf '%s  %s\n' "$XPROP_SHA256" /tmp/xprop.tar.xz | \
+      sha256sum -c - && \
+    tar -C /tmp -xf /tmp/xprop.tar.xz && \
+    cd "/tmp/xprop-${XPROP_VERSION}" && \
+    ./configure --prefix=/usr && \
+    make -j"$(nproc)" && \
+    install -Dm755 xprop /out/xprop
+RUN curl -fL --retry 5 \
+      "https://www.x.org/releases/individual/app/xrandr-${XRANDR_VERSION}.tar.xz" \
+      -o /tmp/xrandr.tar.xz && \
+    printf '%s  %s\n' "$XRANDR_SHA256" /tmp/xrandr.tar.xz | \
+      sha256sum -c - && \
+    tar -C /tmp -xf /tmp/xrandr.tar.xz && \
+    cd "/tmp/xrandr-${XRANDR_VERSION}" && \
+    ./configure --prefix=/usr && \
+    make -j"$(nproc)" && \
+    install -Dm755 xrandr /out/xrandr
 
 FROM ${BASE_IMAGE} AS test
 COPY --from=fixture-build /out/hadron-cua-gtk-fixture /usr/local/libexec/hadron-cua-gtk-fixture
+COPY --from=fixture-build /out/xprop /usr/bin/xprop
+COPY --from=fixture-build /out/xrandr /usr/bin/xrandr
 COPY test/agent/fixtures/chromium/index.html /opt/hadron-agent-fixtures/chromium/index.html
 COPY test/agent/fixtures/chromium.commit /src/chromium.commit
 RUN commit="$(cat /src/chromium.commit)" && \
@@ -57,3 +83,56 @@ RUN commit="$(cat /src/chromium.commit)" && \
       $3 != "flathub" { bad=1 } \
       END { exit (NR == 0 || bad) }' \
       /etc/hadron-agent-test/flatpak-refs.tsv
+COPY test/agent/rootfs/ /
+RUN uid_owner="$(awk -F: '$3 == 1000 { print $1 }' /etc/passwd)" && \
+    if [ -n "$uid_owner" ]; then \
+      printf 'UID 1000 already belongs to %s\n' "$uid_owner" >&2; \
+      exit 1; \
+    fi && \
+    for group in audio video render input bluetooth seat \
+      hadron-agent-control; do \
+      grep -Eq "^${group}:" /etc/group || groupadd "$group"; \
+    done && \
+    grep -Eq '^agent:' /etc/group || groupadd agent && \
+    useradd --create-home --uid 1000 --gid agent --shell /bin/sh \
+      --groups audio,video,render,input,bluetooth,seat,hadron-agent-control \
+      agent && \
+    test "$(id -u agent)" -eq 1000 && \
+    test "$(id -gn agent)" = agent && \
+    awk -F: '$1 == "agent" { found = 1; if ($2 ~ /^[!*]/) ok = 1 } \
+      END { exit !(found && ok) }' /etc/shadow && \
+    groups="$(id -nG agent)" && \
+    test "$(printf '%s\n' "$groups" | wc -w)" -eq 8 && \
+    for group in agent audio video render input bluetooth seat \
+      hadron-agent-control; do \
+      case " $groups " in *" $group "*) ;; *) exit 1 ;; esac; \
+    done && \
+    ! printf '%s\n' "$groups" | grep -Eq \
+      '(^| )(admin|sudo|docker)( |$)' && \
+    sed -i \
+      -e 's/^auto_login_user = .*/auto_login_user = agent/' \
+      -e 's/^auto_login_session = .*/auto_login_session = i3/' \
+      -e 's/^auto_login_service = .*/auto_login_service = ly-autologin/' \
+      /etc/ly/config.ini && \
+    grep -Fx 'auto_login_user = agent' /etc/ly/config.ini && \
+    grep -Fx 'auto_login_session = i3' /etc/ly/config.ini && \
+    grep -Fx 'auto_login_service = ly-autologin' /etc/ly/config.ini && \
+    grep -Fx 'x_cmd = /usr/bin/X -keeptty' /etc/ly/config.ini && \
+    grep -Fx '[Unit]' \
+      /etc/systemd/system/ly@tty1.service.d/10-conditions.conf && \
+    grep -Fx 'ConditionPathExists=' \
+      /etc/systemd/system/ly@tty1.service.d/10-conditions.conf && \
+    grep -Fx 'ConditionKernelCommandLine=' \
+      /etc/systemd/system/ly@tty1.service.d/10-conditions.conf && \
+    grep -Fx 'ConditionKernelCommandLine=!install-mode' \
+      /etc/systemd/system/ly@tty1.service.d/10-conditions.conf && \
+    test "$(readlink \
+      /etc/systemd/system/multi-user.target.wants/ly@tty1.service)" = \
+      /usr/lib/systemd/system/ly@.service && \
+    chmod 0755 /usr/local/libexec/cua-compat-collect \
+      /usr/local/libexec/cua-compat-report && \
+    ln -s ../cua-compat-report.service \
+      /etc/systemd/system/multi-user.target.wants/cua-compat-report.service && \
+    ldd /usr/bin/xprop /usr/bin/xrandr > /tmp/x11-diagnostics-ldd.txt && \
+    ! grep -q 'not found' /tmp/x11-diagnostics-ldd.txt && \
+    rm /tmp/x11-diagnostics-ldd.txt
