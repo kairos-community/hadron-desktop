@@ -6,3 +6,5 @@
 /test/artifacts/*.ppm
 # Internal design specs (not part of the repo)
 /docs/superpowers/
+# Isolated feature worktrees
+/.worktrees/
