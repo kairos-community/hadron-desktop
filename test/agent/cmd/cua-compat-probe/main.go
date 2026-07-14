@@ -261,9 +261,8 @@ type windowStateOutput struct {
 
 func (p *prober) windowState(w windowRecord) (windowStateOutput, error) {
 	res, err := p.call("get_window_state", map[string]any{
-		"pid":                w.PID,
-		"window_id":          w.WindowID,
-		"include_screenshot": false,
+		"pid":       w.PID,
+		"window_id": w.WindowID,
 	})
 	if err != nil {
 		return windowStateOutput{}, err
