@@ -15,11 +15,12 @@
 - Verify every new source archive and `flathub.flatpakrepo` against the exact SHA-256 values below before extraction or installation.
 - The final runtime includes `gpg`, `gpgv`, `gpgconf`, `gpg-agent`, `dirmngr`, and `keyboxd`; omit GPGSM, smartcard, WKS, documentation, and localization components.
 - Ship no private key, general-user GnuPG trust database, keyserver configuration, enabled GnuPG service, or additional privilege.
-- Install `/usr/share/hadron/flathub.flatpakrepo` with SHA-256 `3371dd250e61d9e1633630073fefda153cd4426f72f4afa0c3373ae2e8fea03a` and `/usr/share/hadron/flathub.gpg` with primary fingerprint `6E5C05D979C76DAF93C081354184DD4D907A7CAE`.
+- Install `/usr/share/hadron/flathub.flatpakrepo` with SHA-256 `3371dd250e61d9e1633630073fefda153cd4426f72f4afa0c3373ae2e8fea03a` and `/usr/share/hadron/flathub.gpg` with SHA-256 `8bdc20abc4e19c0796460beb5bfe0e7aa4138716999e19c6f2dbdd78cc41aeaa` and primary fingerprint `6E5C05D979C76DAF93C081354184DD4D907A7CAE`.
 - Keep the complete new runtime artifact, including SQLite and Flathub bootstrap files, at or below 20 MiB (20,971,520 bytes) uncompressed.
 - Never use `--no-gpg-verify` in production setup or the Cua fixture. The only permitted occurrence is the migration integration test that constructs an intentionally insecure legacy remote.
 - Repair existing `flathub` remotes in place: disable first, set canonical URL `https://dl.flathub.org/repo/`, import the pinned key, enable GPG verification, assert while disabled, and only then re-enable.
 - A failed add or repair must return nonzero; any pre-existing insecure remote must remain disabled, with no unsigned fallback.
+- Treat remote discovery as present, absent, or error; never interpret a failed Flatpak query as absence. Replace an existing remote's trusted-key set rather than importing additively, and validate both exact bootstrap-file digests immediately before use.
 - Keep Chromium application commit `eba0ee8ff9359eacd8470be0c6c684498e002956dc4c32d378f021f3d33ee14d`; Flatpak 1.16.6 requires stable install followed by `flatpak update --commit` and an exact equality assertion.
 - Address all open Task 3 review findings: signed remote trust, precise GTK error reporting, exact GTK drag payload validation, and correct Chromium drag-source semantics.
 
@@ -620,6 +621,32 @@ Run:
 git add Dockerfile rootfs/usr/bin/hadron-user-setup test/flatpak/check-user-setup.sh
 git commit -m "fix: require signed Flathub remotes"
 ```
+
+### Task 2 review corrections (binding before acceptance)
+
+The first independent review found two security gaps not covered by the four
+nominal scenarios. Apply these corrections test-first before Task 2 is closed:
+
+- Capture `flatpak remotes` status before parsing. Distinguish an absent remote
+  from a query error; on query error, make a best-effort disable attempt and
+  return nonzero.
+- Route an initial disable failure through the same cleanup path so a transient
+  first failure is retried. Assert disabled state whenever discovery is usable.
+- Do not allocate the temporary GnuPG home before existing remotes are
+  disabled. Check both `mktemp` and `chmod` failures.
+- Validate the exact descriptor and decoded-key SHA-256 values above, not only
+  the first `fpr` record.
+- Replace any existing trusted-key set while the remote is disabled; do not
+  add the pinned key to a keyring that may contain other primary keys.
+- Add focused fault-injection regressions for a failed remote query and a
+  failed first disable, plus valid extra-key regressions for clean and repair
+  paths. These supplement, rather than replace, the four real Flatpak cases.
+- Add a two-user aggregation case and use a line-preserving passwd loop.
+
+Expected: injected failures return nonzero and the real Flatpak state is
+disabled; tampered bootstrap inputs return nonzero; successful repair leaves
+only the pinned trust material; one user's failure does not prevent processing
+the other user.
 
 ## Task 3: Close the Cua fixture review on the shared signed path
 

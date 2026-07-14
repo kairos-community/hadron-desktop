@@ -97,6 +97,12 @@ and installs the exact descriptor as
 embedded `GPGKey` into `/usr/share/hadron/flathub.gpg` for idempotent repair of
 existing remotes. The build asserts primary-key fingerprint
 `6E5C05D979C76DAF93C081354184DD4D907A7CAE` as well as the descriptor checksum.
+Per-user setup revalidates both exact bootstrap files before use: descriptor
+SHA-256 `3371dd250e61d9e1633630073fefda153cd4426f72f4afa0c3373ae2e8fea03a`
+and decoded-key SHA-256
+`8bdc20abc4e19c0796460beb5bfe0e7aa4138716999e19c6f2dbdd78cc41aeaa`.
+Matching only the first primary fingerprint is insufficient because an
+otherwise-valid file could append another trusted primary key.
 
 This makes the reviewed image contents, rather than a network response during
 each boot, the trust bootstrap. Flatpak still uses the canonical repository URL
@@ -115,8 +121,9 @@ Flathub remote, but its behavior changes:
 
 1. If `flathub` is absent, add it from the pinned local `.flatpakrepo` file.
 2. If `flathub` already exists, disable it before repair. In one modification,
-   set its URL to the descriptor's canonical URL, import the pinned public key,
-   and explicitly enable GPG verification.
+   set its URL to the descriptor's canonical URL, replace its trusted-key set
+   with the pinned public key, and explicitly enable GPG verification. Repair
+   must not add the pinned key to an existing unreviewed keyring.
 3. Re-read the disabled remote and require the canonical URL with no
    `no-gpg-verify` option, then enable it and assert the same state again.
 
@@ -125,6 +132,13 @@ also never falls back to `--no-gpg-verify`. A failed repair leaves the old
 remote disabled. Any failed add, repair, or assertion leaves the setup service
 failed and emits a useful diagnostic; desktop boot may continue, but Hadron
 must not report Flathub as configured successfully.
+
+Remote discovery is tri-state: present, absent, or query error. A query error
+must never be treated as absence. On a discovery, disable, validation, repair,
+or assertion error, setup makes a final best-effort disable attempt and returns
+nonzero. Bootstrap temporary-state creation happens only after an existing
+remote has been disabled, so a local GnuPG initialization failure cannot leave
+a known legacy remote enabled.
 
 The migration repairs existing installations in place so installed Flatpak
 deployments keep their `flathub` origin. It does not delete user applications
