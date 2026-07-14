@@ -1,0 +1,34 @@
+ARG BASE_IMAGE=hadron-agent:compat
+FROM ${BASE_IMAGE} AS fixture-runtime
+
+FROM ghcr.io/kairos-io/hadron-toolchain:main AS fixture-build
+# Match the production agent build: the runtime has the canonical firmware
+# symlink, while the toolchain begins with an empty directory at this path.
+RUN rmdir /usr/lib/firmware
+COPY --from=fixture-runtime /usr/include/ /usr/include/
+COPY --from=fixture-runtime /usr/lib/ /usr/lib/
+COPY --from=fixture-runtime /usr/share/pkgconfig/ /usr/share/pkgconfig/
+ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:/usr/share/pkgconfig
+COPY test/agent/fixtures/gtk3/main.c /src/main.c
+RUN mkdir -p /out
+RUN cc -O2 -Wall -Wextra $(pkg-config --cflags gtk+-3.0) \
+  /src/main.c -o /out/hadron-cua-gtk-fixture \
+  $(pkg-config --libs gtk+-3.0)
+
+FROM ${BASE_IMAGE} AS test
+COPY --from=fixture-build /out/hadron-cua-gtk-fixture /usr/local/libexec/hadron-cua-gtk-fixture
+COPY test/agent/fixtures/chromium/index.html /opt/hadron-agent-fixtures/chromium/index.html
+COPY test/agent/fixtures/chromium.commit /src/chromium.commit
+RUN commit="$(cat /src/chromium.commit)" && \
+    test "${#commit}" -eq 64 && \
+    printf '%s\n' "$commit" | grep -Eq '^[0-9a-f]{64}$' && \
+    flatpak --system remote-add --if-not-exists --no-gpg-verify \
+      flathub https://dl.flathub.org/repo/ && \
+    flatpak install --system --noninteractive -y \
+      flathub org.chromium.Chromium//stable && \
+    flatpak update --commit="$(cat /src/chromium.commit)" \
+      --system --noninteractive -y org.chromium.Chromium && \
+    test "$(flatpak info --show-commit org.chromium.Chromium)" = \
+      "$(cat /src/chromium.commit)" && \
+    install -Dm644 /src/chromium.commit \
+      /etc/hadron-agent-test/chromium-commit
