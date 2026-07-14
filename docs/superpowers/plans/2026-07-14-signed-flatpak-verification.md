@@ -862,9 +862,13 @@ printf "%s\n" "$details" | awk -F "\t" '
   $3 !~ /no-gpg-verify/ { found=1 }
   END { exit !found }
 '
-test "$(flatpak info --system --show-commit org.chromium.Chromium)" =
+test "$(flatpak info --system --show-commit org.chromium.Chromium)" = \
   "$(cat /etc/hadron-agent-test/chromium-commit)"
-test -s /etc/hadron-agent-test/flatpak-refs.tsv
+awk -F "\t" 'NF != 4 || $2 !~ /^[0-9a-f]{64}$/ ||
+  $3 != "flathub" { bad=1 }
+  END { exit (NR == 0 || bad) }' \
+  /etc/hadron-agent-test/flatpak-refs.tsv
+cat /etc/hadron-agent-test/flatpak-refs.tsv
 flatpak info --system org.chromium.Chromium
 CONTAINER
 ```
@@ -895,12 +899,15 @@ IMAGE=hadron-signed-flatpak:i3 test/flatpak/check-user-setup.sh
 IMAGE=hadron-signed-flatpak:sway test/flatpak/check-runtime.sh
 IMAGE=hadron-signed-flatpak:sway test/flatpak/check-user-setup.sh
 test/agent/check-fixtures.sh
-docker run --rm hadron-agent-compat:test sh -eu -c '
-  test -x /usr/local/libexec/hadron-cua-gtk-fixture
-  test "$(flatpak info --system --show-commit org.chromium.Chromium)" =
-    "$(cat /etc/hadron-agent-test/chromium-commit)"
-  test -s /etc/hadron-agent-test/flatpak-refs.tsv
-'
+docker run --rm -i hadron-agent-compat:test sh -eu -s <<'CONTAINER'
+test -x /usr/local/libexec/hadron-cua-gtk-fixture
+test "$(flatpak info --system --show-commit org.chromium.Chromium)" = \
+  "$(cat /etc/hadron-agent-test/chromium-commit)"
+awk -F "\t" 'NF != 4 || $2 !~ /^[0-9a-f]{64}$/ ||
+  $3 != "flathub" { bad=1 }
+  END { exit (NR == 0 || bad) }' \
+  /etc/hadron-agent-test/flatpak-refs.tsv
+CONTAINER
 git diff --check 96f730b..HEAD
 ```
 
