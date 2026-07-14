@@ -35,18 +35,28 @@ The initial compatibility baseline is:
 
 | Component | Version | SHA-256 for new source archive |
 |---|---:|---|
-| libgpg-error | 1.51 | existing, retained |
+| libgpg-error | 1.56 | `82c3d2deb4ad96ad3925d6f9f124fe7205716055ab50e291116ef27975d169c0` |
 | libassuan | 3.0.2 | existing, retained |
 | GPGME | 1.24.3 | existing, retained |
 | libgcrypt | 1.12.2 | `7ce33c2492221a0436f96a8500215e9f3e3dcb5fd26a757cd415e7a843babd5e` |
 | libksba | 1.8.0 | `296b9db9095749f2aa104202d7ab7fd09ad10710e00780a709c9754b1a1d9292` |
 | npth | 1.8 | `8bd24b4f23a3065d6e5b26e98aba9ce783ea4fd781069c1b35d149694e90ca3e` |
+| NTBTLS | 0.3.2 | `bdfcb99024acec9c6c4b998ad63bb3921df4cfee4a772ad6c0ca324dbbf2b07c` |
 | SQLite | 3.49.2 | `5c6d8697e8a32a1512a9be5ad2b2e7a891241c334f56f8b0fb4fc6051e1652e8` |
 | GnuPG | 2.4.9 | `dd17ab2e9a04fd79d39d853f599cbc852062ddb9ab52a4ddeb4176fd8b302964` |
 
 Every new source archive and the Flathub descriptor must come from its official
 HTTPS distribution URL and pass a repository-pinned SHA-256 check before it is
 unpacked or installed. Version and checksum changes are reviewed together.
+
+Hadron's former libgpg-error 1.51 pin is upgraded to 1.56 because libgcrypt
+1.12.2 requires that minimum. The existing libassuan, GPGME, OSTree, and
+Flatpak stages rebuild against the upgraded ABI-compatible library.
+
+GnuPG's `dirmngr` requires a TLS backend. Hadron uses the GnuPG project's
+small NTBTLS 0.3.2 library, which is built on libgcrypt and libksba, instead of
+adding GnuTLS and its larger dependency closure. NTBTLS is included in the
+same closed runtime artifact and size budget.
 
 GnuPG 2.4.9 is chosen as the mature 2.4-series baseline that matches the
 working Alpine 3.22 package family used for the size experiment. Hadron does

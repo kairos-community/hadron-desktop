@@ -6,7 +6,7 @@
 
 **Architecture:** Source-build the missing GnuPG dependency closure into one size-bounded runtime artifact copied by the common desktop target. Ship a checksummed Flathub descriptor and public key in that artifact, migrate each user's remote through an idempotent shell routine, and exercise the same files from the Cua system-wide fixture image.
 
-**Tech Stack:** Hadron musl toolchain, GnuPG 2.4.9, libgcrypt 1.12.2, libksba 1.8.0, npth 1.8, SQLite 3.49.2, GPGME 1.24.3, Flatpak 1.16.6, POSIX shell integration tests, Docker BuildKit, GTK 3.24.43, Chromium Flatpak.
+**Tech Stack:** Hadron musl toolchain, GnuPG 2.4.9, libgpg-error 1.56, libgcrypt 1.12.2, libksba 1.8.0, npth 1.8, NTBTLS 0.3.2, SQLite 3.49.2, GPGME 1.24.3, Flatpak 1.16.6, POSIX shell integration tests, Docker BuildKit, GTK 3.24.43, Chromium Flatpak.
 
 ## Global Constraints
 
@@ -52,7 +52,7 @@
 
 **Interfaces:**
 
-- Consumes: existing `libgpg-error` 1.51, `libassuan` 3.0.2, GPGME 1.24.3, `${COMMON_CONFIGURE_ARGS}`, and the common `default` image target.
+- Consumes: existing `libassuan` 3.0.2, GPGME 1.24.3, `${COMMON_CONFIGURE_ARGS}`, and the common `default` image target; upgrades the shared libgpg-error stage from 1.51 to the libgcrypt-required minimum 1.56.
 - Produces: Docker stage `signed-flatpak-runtime` rooted at `/signed-flatpak-runtime`, runtime size file `/usr/share/hadron/gnupg-runtime-size`, descriptor `/usr/share/hadron/flathub.flatpakrepo`, and key `/usr/share/hadron/flathub.gpg`.
 
 - [ ] **Step 1: Add the image-level runtime contract before changing the image**
@@ -95,6 +95,7 @@ for omitted in gpgsm scdaemon gpg-wks-client gpg-card sqlite3; do
 done
 test ! -e /usr/lib/gnupg/scdaemon
 test ! -e /usr/lib/gnupg/tpm2daemon
+test ! -e /usr/lib/gnupg/gpg-wks-client
 
 : > /tmp/gnupg-ldd
 for program in gpg gpgv gpgconf gpg-agent dirmngr; do
@@ -137,6 +138,21 @@ Expected: exit 1 with `missing required program: gpg`.
 Add these versions, hashes, and source URLs next to the existing GPGME stages in `Dockerfile`:
 
 ```dockerfile
+FROM toolchain AS libgpg-error
+ARG LIBGPGERROR_VERSION=1.56
+ARG LIBGPGERROR_SHA256=82c3d2deb4ad96ad3925d6f9f124fe7205716055ab50e291116ef27975d169c0
+RUN mkdir -p /libgpg-error
+WORKDIR /build
+RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+      https://gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-${LIBGPGERROR_VERSION}.tar.bz2 \
+      -o source.tar.bz2 && \
+    echo "${LIBGPGERROR_SHA256}  source.tar.bz2" | sha256sum -c - && \
+    tar -xf source.tar.bz2 && rm source.tar.bz2 && mv libgpg-error-* src
+WORKDIR /build/src
+RUN ./configure ${COMMON_CONFIGURE_ARGS} --disable-doc --disable-tests \
+      --enable-install-gpg-error-config
+RUN make -j"$(nproc)" && make DESTDIR=/libgpg-error install
+
 FROM toolchain AS libgcrypt
 COPY --from=libgpg-error /libgpg-error /
 ARG LIBGCRYPT_VERSION=1.12.2
@@ -196,6 +212,23 @@ RUN CFLAGS="-O2 -pipe -flto" ./configure --prefix=/usr \
       --host=x86_64-hadron-linux-musl --build=x86_64-hadron-linux-musl \
       --enable-shared --disable-static --disable-readline --disable-static-shell
 RUN make -j"$(nproc)" && make DESTDIR=/sqlite-gnupg install
+
+FROM toolchain AS ntbtls
+COPY --from=libgpg-error /libgpg-error /
+COPY --from=libgcrypt /libgcrypt /
+COPY --from=libksba /libksba /
+ARG NTBTLS_VERSION=0.3.2
+ARG NTBTLS_SHA256=bdfcb99024acec9c6c4b998ad63bb3921df4cfee4a772ad6c0ca324dbbf2b07c
+RUN mkdir -p /ntbtls
+WORKDIR /build
+RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+      https://gnupg.org/ftp/gcrypt/ntbtls/ntbtls-${NTBTLS_VERSION}.tar.bz2 \
+      -o source.tar.bz2 && \
+    echo "${NTBTLS_SHA256}  source.tar.bz2" | sha256sum -c - && \
+    tar -xf source.tar.bz2 && rm source.tar.bz2 && mv ntbtls-* src
+WORKDIR /build/src
+RUN ./configure ${COMMON_CONFIGURE_ARGS}
+RUN make -j"$(nproc)" && make DESTDIR=/ntbtls install
 ```
 
 - [ ] **Step 4: Build GnuPG with only the approved component boundary**
@@ -209,8 +242,8 @@ COPY --from=libassuan /libassuan /
 COPY --from=libgcrypt /libgcrypt /
 COPY --from=libksba /libksba /
 COPY --from=npth /npth /
+COPY --from=ntbtls /ntbtls /
 COPY --from=sqlite-gnupg /sqlite-gnupg /
-RUN ldconfig
 ARG GNUPG_VERSION=2.4.9
 ARG GNUPG_SHA256=dd17ab2e9a04fd79d39d853f599cbc852062ddb9ab52a4ddeb4176fd8b302964
 RUN mkdir -p /gnupg
@@ -226,12 +259,16 @@ RUN ./configure ${COMMON_CONFIGURE_ARGS} --libexecdir=/usr/lib/gnupg \
       --disable-card-support --disable-tpm2d \
       --disable-doc --disable-nls --disable-ldap --disable-libdns \
       --disable-bzip2
-RUN make -j"$(nproc)" && make DESTDIR=/gnupg install
+RUN make -j"$(nproc)" && make DESTDIR=/gnupg install && \
+    rm -f /gnupg/usr/bin/gpg-card /gnupg/usr/bin/gpg-wks-client \
+      /gnupg/usr/lib/gnupg/gpg-wks-client
 RUN test -x /gnupg/usr/bin/gpg && test -x /gnupg/usr/bin/gpgv && \
     test -x /gnupg/usr/bin/gpgconf && test -x /gnupg/usr/bin/gpg-agent && \
     test -x /gnupg/usr/bin/dirmngr && \
     test -x /gnupg/usr/lib/gnupg/keyboxd && \
     test ! -e /gnupg/usr/bin/gpgsm && test ! -e /gnupg/usr/bin/gpg-card && \
+    test ! -e /gnupg/usr/bin/gpg-wks-client && \
+    test ! -e /gnupg/usr/lib/gnupg/gpg-wks-client && \
     test ! -e /gnupg/usr/lib/gnupg/scdaemon && \
     test ! -e /gnupg/usr/lib/gnupg/tpm2daemon
 ```
@@ -247,14 +284,16 @@ COPY --from=libassuan /libassuan /
 COPY --from=libgcrypt /libgcrypt /
 COPY --from=libksba /libksba /
 COPY --from=npth /npth /
+COPY --from=ntbtls /ntbtls /
 COPY --from=sqlite-gnupg /sqlite-gnupg /
 COPY --from=gnupg /gnupg /
 COPY --from=gnupg /gnupg /signed-flatpak-runtime
-RUN ldconfig && mkdir -p /signed-flatpak-runtime/usr/lib \
+RUN mkdir -p /signed-flatpak-runtime/usr/lib \
       /signed-flatpak-runtime/usr/share/hadron && \
     cp -a /usr/lib/libgcrypt.so* /signed-flatpak-runtime/usr/lib/ && \
     cp -a /usr/lib/libksba.so* /signed-flatpak-runtime/usr/lib/ && \
     cp -a /usr/lib/libnpth.so* /signed-flatpak-runtime/usr/lib/ && \
+    cp -a /usr/lib/libntbtls.so* /signed-flatpak-runtime/usr/lib/ && \
     cp -a /usr/lib/libsqlite3.so* /signed-flatpak-runtime/usr/lib/ && \
     rm -rf /signed-flatpak-runtime/usr/share/doc \
       /signed-flatpak-runtime/usr/share/info \
