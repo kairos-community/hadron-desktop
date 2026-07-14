@@ -1,0 +1,138 @@
+ARG BASE_IMAGE=i3-desktop:dev
+FROM ${BASE_IMAGE} AS xlibre-desktop
+FROM rust:1.97.0-alpine3.22 AS rust-toolchain
+FROM ghcr.io/kairos-io/hadron-toolchain:main AS agent-native
+# The desktop root has the canonical /usr/lib/firmware symlink while the
+# toolchain has an empty directory at that path; normalize it before overlay.
+RUN rmdir /usr/lib/firmware
+COPY --from=xlibre-desktop /usr/include/ /usr/include/
+COPY --from=xlibre-desktop /usr/lib/ /usr/lib/
+# Xorg protocol packages install their pkg-config metadata under share rather
+# than lib; the copied X11 .pc files depend on these records.
+COPY --from=xlibre-desktop /usr/share/pkgconfig/ /usr/share/pkgconfig/
+# Meson invokes GLib's generators while building the schemas, AT-SPI, and GTK.
+# Keep the tools matched to the copied GLib libraries from the desktop image.
+COPY --from=xlibre-desktop /usr/bin/glib-* /usr/bin/
+COPY --from=xlibre-desktop /usr/bin/gdbus-codegen /usr/bin/gdbus-codegen
+COPY --from=xlibre-desktop /usr/bin/gio-querymodules /usr/bin/gio-querymodules
+COPY --from=xlibre-desktop /usr/bin/gdk-pixbuf-pixdata /usr/bin/gdk-pixbuf-pixdata
+COPY --from=xlibre-desktop /usr/share/glib-2.0/codegen/ /usr/share/glib-2.0/codegen/
+# Hadron and Alpine are both musl-based. Hadron intentionally omits the
+# musl-utils ldconfig helper, so borrow the helper from the pinned Rust image.
+COPY --from=rust-toolchain /sbin/ldconfig /sbin/ldconfig
+# Alpine's helper returns the status of its final zero-argument test; make the
+# no-argument form requested here a successful musl no-op.
+RUN sed -i '$a exit 0' /sbin/ldconfig
+RUN ldconfig
+ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:/usr/share/pkgconfig
+ARG LIBXTST_VERSION=1.2.5
+ARG GSETTINGS_SCHEMAS_VERSION=47.1
+ARG ATSPI_VERSION=2.54.0
+ARG GTK3_VERSION=3.24.43
+ARG CUA_COMMIT=3cadb5f82e7d2ed071a2082764276ec872a52135
+
+
+FROM agent-native AS agent-runtime-build
+RUN pip3 install meson ninja packaging
+RUN mkdir -p /agent-runtime /build && \
+    install -Dm755 /sbin/ldconfig /agent-runtime/usr/bin/ldconfig
+WORKDIR /build
+
+# XTest is Cua's native foreground keyboard and pointer injection path on X11.
+RUN curl -fL --retry 5 \
+      https://www.x.org/releases/individual/lib/libXtst-${LIBXTST_VERSION}.tar.xz \
+      -o libXtst.tar.xz && \
+    tar -xf libXtst.tar.xz && \
+    cd libXtst-${LIBXTST_VERSION} && \
+    ./configure --prefix=/usr --libdir=/usr/lib --disable-static && \
+    make -j"$(nproc)" && \
+    make install && \
+    make install DESTDIR=/agent-runtime && \
+    test -e /agent-runtime/usr/lib/libXtst.so.6
+
+# The AT-SPI launcher reads these schemas to decide whether accessibility is
+# enabled and which toolkit behavior to expose in the desktop session.
+RUN SCHEMAS_SERIES="${GSETTINGS_SCHEMAS_VERSION%.*}" && \
+    curl -fL --retry 5 \
+      https://download.gnome.org/sources/gsettings-desktop-schemas/${SCHEMAS_SERIES}/gsettings-desktop-schemas-${GSETTINGS_SCHEMAS_VERSION}.tar.xz \
+      -o gsettings-desktop-schemas.tar.xz && \
+    tar -xf gsettings-desktop-schemas.tar.xz
+WORKDIR /build/gsettings-desktop-schemas-${GSETTINGS_SCHEMAS_VERSION}
+RUN meson setup build --prefix=/usr --libdir=lib --buildtype=release \
+      -Dintrospection=false && \
+    ninja -C build && \
+    DESTDIR=/agent-runtime ninja -C build install
+
+WORKDIR /build
+RUN ATSPI_SERIES="${ATSPI_VERSION%.*}" && \
+    curl -fL --retry 5 \
+      https://download.gnome.org/sources/at-spi2-core/${ATSPI_SERIES}/at-spi2-core-${ATSPI_VERSION}.tar.xz \
+      -o at-spi2-core.tar.xz && \
+    tar -xf at-spi2-core.tar.xz
+WORKDIR /build/at-spi2-core-${ATSPI_VERSION}
+RUN meson setup build --prefix=/usr --libdir=lib --libexecdir=libexec \
+      --buildtype=release -Ddefault_bus=dbus-daemon \
+      -Ddbus_daemon=/usr/bin/dbus-daemon -Duse_systemd=true \
+      -Dgtk2_atk_adaptor=false -Ddocs=false \
+      -Dintrospection=disabled -Dx11=enabled
+RUN ninja -C build
+RUN ninja -C build install
+RUN DESTDIR=/agent-runtime ninja -C build install
+RUN test -x /agent-runtime/usr/libexec/at-spi-bus-launcher && \
+    test -x /agent-runtime/usr/libexec/at-spi2-registryd && \
+    test -e /agent-runtime/usr/lib/libatk-bridge-2.0.so.0 && \
+    test -e /agent-runtime/usr/share/dbus-1/services/org.a11y.Bus.service && \
+    test -e /agent-runtime/usr/share/dbus-1/accessibility-services/org.a11y.atspi.Registry.service && \
+    test -e /agent-runtime/usr/lib/systemd/user/at-spi-dbus-bus.service
+
+WORKDIR /build
+RUN GTK_SERIES="${GTK3_VERSION%.*}" && \
+    curl -fL --retry 5 \
+      https://download.gnome.org/sources/gtk+/${GTK_SERIES}/gtk+-${GTK3_VERSION}.tar.xz \
+      -o gtk.tar.xz && \
+    tar -xf gtk.tar.xz
+WORKDIR /build/gtk+-${GTK3_VERSION}
+RUN meson setup build --prefix=/usr --libdir=lib --buildtype=release \
+      -Dx11_backend=true -Dwayland_backend=false -Dbroadway_backend=false \
+      -Dintrospection=false -Dgtk_doc=false -Dman=false \
+      -Ddemos=false -Dexamples=false -Dtests=false \
+      -Dprint_backends=file -Dcolord=no
+RUN ninja -C build
+RUN DESTDIR=/agent-runtime ninja -C build install
+
+
+FROM agent-runtime-build AS cua-build
+COPY --from=rust-toolchain /usr/local/cargo/ /usr/local/cargo/
+COPY --from=rust-toolchain /usr/local/rustup/ /usr/local/rustup/
+# The native toolchain defaults C builds to GCC LTO, which hides ring's C/ASM
+# symbols from the Rust final link. Retain its size flags without cross-LTO.
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:${PATH} \
+    RUSTFLAGS="-C target-feature=-crt-static" \
+    CFLAGS="-Os -pipe -fomit-frame-pointer -fno-unroll-loops -fno-asynchronous-unwind-tables -ffunction-sections -fdata-sections" \
+    LDFLAGS="-Wl,--gc-sections -Wl,--as-needed"
+WORKDIR /build
+RUN curl -fL --retry 5 \
+      https://github.com/trycua/cua/archive/${CUA_COMMIT}.tar.gz \
+      -o cua.tar.gz && \
+    mkdir -p /build/cua && \
+    tar -xzf cua.tar.gz --strip-components=1 -C /build/cua && \
+    rm cua.tar.gz
+RUN mkdir -p /cua/usr/bin && \
+    cd /build/cua/libs/cua-driver/rust && \
+    cargo build --locked -p cua-driver --release && \
+    install -Dm755 target/release/cua-driver /cua/usr/bin/cua-driver && \
+    /cua/usr/bin/cua-driver --version && \
+    ldd /cua/usr/bin/cua-driver | tee /cua/ldd.txt && \
+    ! grep -q 'not found' /cua/ldd.txt
+
+
+FROM ${BASE_IMAGE} AS agent
+COPY --from=agent-runtime-build /agent-runtime/ /
+COPY --from=cua-build /cua/ /
+RUN glib-compile-schemas /usr/share/glib-2.0/schemas && \
+    ldconfig && \
+    ldd /usr/bin/cua-driver | tee /tmp/cua-ldd.txt && \
+    ! grep -q 'not found' /tmp/cua-ldd.txt && \
+    rm /tmp/cua-ldd.txt
