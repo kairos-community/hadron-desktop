@@ -1,7 +1,7 @@
 # Hadron desktop
 
-Two tiling desktop variants built on top of the minimal
-[Hadron](https://github.com/kairos-io/hadron) base image:
+Two tiling desktop variants plus an opt-in agent overlay built on top of the
+minimal [Hadron](https://github.com/kairos-io/hadron) base image:
 
 | `DESKTOP` | Display stack | Desktop | Native desktop tools |
 |-----------|---------------|---------|----------------------|
@@ -25,6 +25,8 @@ and a `test/` harness) and depends only on the published Hadron images
   wl-clipboard, slurp and swayidle.
 - **i3:** XLibre 25.2.0, X11 Mesa/GLX, the XLibre libinput driver, i3 4.25.1,
   st, dmenu, i3bar, dunst and xsel.
+- **Agent overlay:** an opt-in i3-based appliance build that layers Cua and
+  the agent services on top of the XLibre desktop.
 - **Login:** `ly` runs on `tty1`. It launches Sway directly for the Wayland
   session and owns the XLibre server lifecycle for the i3 X session.
 - **Networking:** NetworkManager + wpa_supplicant (wifi).
@@ -41,9 +43,12 @@ and a `test/` harness) and depends only on the published Hadron images
 make image                 # default Wayland/Sway image: sway-desktop:dev
 make DESKTOP=i3 image      # XLibre/i3 image: i3-desktop:dev
 make images                # build both image variants
+make agent-image           # build the opt-in agent overlay image
+make agent-iso             # build the opt-in agent ISO
 
 make                       # default Sway image + installer ISO
 make DESKTOP=i3 iso        # XLibre/i3 image + installer ISO
+make agent-iso VERSION=v1.2.3
 ```
 
 The equivalent direct Docker builds are:
@@ -59,9 +64,9 @@ kept under `build/sway-desktop/` and `build/i3-desktop/`.
 ## Releases
 
 Pushing a `v`-prefixed tag runs `.github/workflows/release.yml`. The workflow
-builds the Sway and i3/XLibre installer ISOs in parallel, verifies their SHA-256
-checksums, and creates a GitHub Release containing both ISOs and both checksum
-files:
+builds the Sway and i3/XLibre installer ISOs in parallel, builds the separate
+agent ISO, verifies all SHA-256 checksums, and creates a GitHub Release
+containing three ISOs and three checksum files:
 
 ```sh
 git tag -a v1.0.0 -m "Hadron Desktop v1.0.0"
@@ -155,6 +160,23 @@ unattended install mechanism: if the datasource already contains `users:` and
 `install:` the wizard skips the prompt path. For the agent appliance, the seed
 also needs `hadron_agent.enabled=true` so the overlay starts its agent profile
 instead of the plain desktop path.
+
+Minimal unattended agent seed:
+
+```yaml
+#cloud-config
+install:
+  auto: true
+  device: /dev/vda
+  reboot: true
+users:
+  - name: agent
+    passwd: "$6$..."
+hadron_agent:
+  enabled: true
+  auth:
+    user_token_hash: "sha256:..."
+```
 
 ### Production vs test launch
 
