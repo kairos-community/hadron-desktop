@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-14
 
-**Status:** Approved direction; written design pending review
+**Status:** Approved
 
 **Scope:** Add a pinned OpenPGP engine to the shared Hadron desktop image,
 replace Hadron's unsigned Flathub setup with signed verification, and make the
@@ -41,6 +41,7 @@ The initial compatibility baseline is:
 | libgcrypt | 1.12.2 | `7ce33c2492221a0436f96a8500215e9f3e3dcb5fd26a757cd415e7a843babd5e` |
 | libksba | 1.8.0 | `296b9db9095749f2aa104202d7ab7fd09ad10710e00780a709c9754b1a1d9292` |
 | npth | 1.8 | `8bd24b4f23a3065d6e5b26e98aba9ce783ea4fd781069c1b35d149694e90ca3e` |
+| SQLite | 3.49.2 | `5c6d8697e8a32a1512a9be5ad2b2e7a891241c334f56f8b0fb4fc6051e1652e8` |
 | GnuPG | 2.4.9 | `dd17ab2e9a04fd79d39d853f599cbc852062ddb9ab52a4ddeb4176fd8b302964` |
 
 Every new source archive and the Flathub descriptor must come from its official
@@ -60,6 +61,10 @@ reliable GPGME OpenPGP engine: `gpg`, `gpgv`, `gpgconf`, `gpg-agent`,
 localization components unless a build-time or runtime gate proves one is a
 hard dependency. The build copies a closed runtime artifact into the common
 `default` image and rejects unresolved dynamic links.
+
+`keyboxd` requires SQLite, which the Hadron toolchain does not ship. The closed
+artifact therefore includes a pinned SQLite 3.49.2 shared library but not the
+SQLite command-line program. SQLite is counted inside the same 20 MiB budget.
 
 The supported Hadron use is repository-signature verification. Hadron ships no
 private key, general-user GnuPG trust database, keyserver configuration, or
@@ -148,8 +153,8 @@ The implementation is accepted only when all of these pass:
   verification enabled.
 - An existing `flathub` remote created with `--no-gpg-verify` is repaired to the
   canonical URL and signed mode by a second setup run.
-- A deliberately malformed descriptor or key fails closed and never creates
-  or preserves an insecure remote.
+- A deliberately malformed descriptor or key fails closed and never leaves an
+  insecure remote enabled.
 - The Cua compatibility image installs the exact Chromium application commit
   through the signed system remote and records its signed dependency inventory.
 - The added runtime files stay within the 20 MiB uncompressed budget.
