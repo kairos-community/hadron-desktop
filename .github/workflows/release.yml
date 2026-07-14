@@ -1,0 +1,154 @@
+name: Release ISOs
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed tag to build and publish
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.desktop }} ISO
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        desktop:
+          - sway
+          - i3
+    env:
+      DESKTOP: ${{ matrix.desktop }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+            echo "Release tag must start with v and contain only letters, numbers, dots, underscores, pluses, and hyphens: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Check out release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      # Standard GitHub-hosted Linux runners expose 14 GB of SSD. Remove large
+      # preinstalled SDKs that this Docker-only build does not use so BuildKit
+      # has room for the source-build stages.
+      - name: Reclaim runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+          docker system prune --all --force
+          df -h /
+
+      - name: Build installer ISO
+        shell: bash
+        run: |
+          set -euo pipefail
+          make DESKTOP="$DESKTOP" VERSION="$RELEASE_TAG" iso
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          iso_dir="build/${DESKTOP}-desktop/iso"
+          mapfile -t isos < <(find "$iso_dir" -maxdepth 1 -type f -name '*.iso' -print)
+          if (( ${#isos[@]} != 1 )); then
+            echo "Expected exactly one ISO in $iso_dir, found ${#isos[@]}" >&2
+            exit 1
+          fi
+
+          mkdir -p dist
+          asset="hadron-desktop-${DESKTOP}-${RELEASE_TAG}-amd64.iso"
+          cp "${isos[0]}" "dist/$asset"
+          cd dist
+          sha256sum "$asset" > "$asset.sha256"
+
+      - name: Upload ${{ matrix.desktop }} workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.desktop }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Download both ISO artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: release
+          merge-multiple: true
+
+      - name: Verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          isos=(release/*.iso)
+          checksums=(release/*.sha256)
+
+          if (( ${#isos[@]} != 2 || ${#checksums[@]} != 2 )); then
+            echo "Expected two ISOs and two checksum files" >&2
+            find release -maxdepth 1 -type f -print >&2
+            exit 1
+          fi
+
+          cd release
+          sha256sum --check ./*.sha256
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(release/*.iso release/*.sha256)
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" \
+              --clobber \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --verify-tag \
+              --generate-notes \
+              --repo "$GITHUB_REPOSITORY"
+          fi

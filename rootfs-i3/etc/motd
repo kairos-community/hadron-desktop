@@ -1,0 +1,4 @@
+Welcome to Hadron Desktop — i3 on XLibre, built from source on Kairos.
+
+  Containers : docker run …   ·   distrobox enter
+  Apps       : flatpak search <name>   ·   flatpak install flathub <id>

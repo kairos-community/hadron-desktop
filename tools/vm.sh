@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch the Hadron sway-desktop image in QEMU with the CORRECT flags for an
+# Launch a Hadron desktop image in QEMU with the correct display flags for an
 # accurate picture of the real boot.
 #
 # WHY THIS EXISTS: QEMU's *default* VGA gives a glitchy UEFI framebuffer that
@@ -13,10 +13,11 @@
 #   tools/vm.sh run             # boot the already-installed disk   (default)
 #
 # Env knobs (all optional):
-#   DISK         disk image path        (default build/vm/disk.qcow2)
+#   DESKTOP     sway or i3             (default sway; selects artifact paths)
+#   DISK         disk image path        (default build/vm/<desktop>-disk.qcow2)
 #   DISK_SIZE    size for a fresh disk   (default 20G)
 #   FRESH=1      recreate the disk even if it exists
-#   ISO          installer ISO          (default: newest build/sway-desktop/iso/*.iso)
+#   ISO          installer ISO          (default: newest build/<desktop>-desktop/iso/*.iso)
 #   MEM CPUS     guest resources        (default 4096, 4)
 #   VNC          VNC display number     (default 10  -> TCP 5910)
 #   NOVNC=1      also serve noVNC web    (needs websockify + a noVNC checkout)
@@ -28,13 +29,18 @@ cd "$(dirname "$0")/.."          # repo root
 REPO="$PWD"
 
 MODE="${1:-run}"
+DESKTOP="${DESKTOP:-sway}"
+case "$DESKTOP" in
+  sway|i3) ;;
+  *) echo "error: unsupported DESKTOP '$DESKTOP' (expected sway or i3)" >&2; exit 2 ;;
+esac
 MEM="${MEM:-4096}"
 CPUS="${CPUS:-4}"
 VNC="${VNC:-10}"
 VNC_PORT=$((5900 + VNC))
 NOVNC_PORT="${NOVNC_PORT:-6090}"
 BIND="${BIND:-0.0.0.0}"
-DISK="${DISK:-build/vm/disk.qcow2}"
+DISK="${DISK:-build/vm/${DESKTOP}-disk.qcow2}"
 DISK_SIZE="${DISK_SIZE:-20G}"
 
 # --- locate OVMF (UEFI firmware) across distros ----------------------------
@@ -70,7 +76,7 @@ fi
 # --- mode-specific bits ----------------------------------------------------
 CDROM=()
 if [ "$MODE" = "install" ]; then
-  ISO="${ISO:-$(ls -t "$REPO"/build/sway-desktop/iso/*.iso 2>/dev/null | head -1 || true)}"
+  ISO="${ISO:-$(ls -t "$REPO"/build/${DESKTOP}-desktop/iso/*.iso 2>/dev/null | head -1 || true)}"
   [ -n "${2:-}" ] && ISO="$2"
   [ -n "${ISO:-}" ] && [ -f "$ISO" ] || {
     echo "error: no installer ISO found. Run 'make iso' or pass one: tools/vm.sh install path/to.iso" >&2
@@ -116,7 +122,7 @@ echo "==> Ctrl-C in this terminal stops the VM."
 
 # virtio-vga is the whole point — clean UEFI framebuffer, no garbled boot.
 exec qemu-system-x86_64 \
-  -name hadron-desktop-vm \
+  -name "hadron-${DESKTOP}-desktop-vm" \
   "${ACCEL[@]}" \
   -m "$MEM" -smp "$CPUS" \
   -drive if=pflash,format=raw,unit=0,readonly=on,file="$OVMF_CODE" \

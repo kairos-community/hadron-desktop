@@ -1,0 +1,26 @@
+# Start the ly display manager on the installed desktop.
+#
+# The image bakes ly into multi-user.target.wants, but Kairos manages /etc as an
+# overlay and forces `systemctl set-default multi-user.target` at boot, so the
+# baked enablement gets shadowed and graphical.target (which would pull the
+# display-manager) is never reached. This boot stage — the idiomatic Kairos way,
+# mirroring 09_systemd_services.yaml — wires and starts ly against the live /etc
+# on every boot of the installed system.
+#
+# Guarded so it does NOT run during the live/installer boot: there the installer
+# (kairos-installer.service) owns tty1, and ly's own ConditionKernelCommandLine
+# /ConditionPathExists drop-in keeps it from stealing the VT.
+name: "Hadron desktop session"
+stages:
+  boot:
+    - if: '! grep -q "install-mode" /proc/cmdline && [ ! -f /run/cos/live_mode ]'
+      name: "enable + start ly on the installed desktop"
+      commands:
+        - mkdir -p /etc/systemd/system/multi-user.target.wants
+        - ln -sf /usr/lib/systemd/system/ly@.service /etc/systemd/system/multi-user.target.wants/ly@tty1.service
+        - ln -sf /usr/lib/systemd/system/hadron-splash.service /etc/systemd/system/multi-user.target.wants/hadron-splash.service
+        - systemctl daemon-reload
+        # Render the boot splash on tty1 first (oneshot, ~5s, RemainAfterExit so
+        # this is a no-op if it already played via the baked symlink), then ly.
+        - systemctl start hadron-splash.service || true
+        - systemctl start ly@tty1.service || true

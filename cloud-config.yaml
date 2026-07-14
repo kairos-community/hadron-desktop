@@ -1,6 +1,6 @@
 #cloud-config
 #
-# Example Kairos cloud-config for the sway-desktop image.
+# Example Kairos cloud-config for either Hadron desktop image.
 #
 # The desktop image bakes in NO user — the desktop user is created here, at
 # install/first-boot, on the persistent /home partition. Pass this file to the
@@ -12,7 +12,7 @@
 # or serve it via the datasource (cdrom/network).
 #
 # At boot, the ly display manager (on tty1) authenticates this user and starts
-# the Sway session.
+# the image's selected Sway/Wayland or i3/XLibre session.
 
 # Auto-install to disk on first boot (omit for an interactive/manual install).
 install:
@@ -41,7 +41,8 @@ users:
       # - ssh-ed25519 AAAA... you@host
 
 # Optional: pick the default session for ly. ly lists its built-in sessions
-# "shell" (0) and "xinitrc" (1) first, then Sway (2), so default to 2.
+# "shell" (0) and "xinitrc" (1) first, then the image's desktop (2), so use 2
+# for both variants.
 stages:
   initramfs:
     - name: "Default desktop session"

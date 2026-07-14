@@ -1,0 +1,208 @@
+#!/bin/sh
+# Hadron Desktop first-boot interactive installer.
+#
+# Runs as kairos-installer.service (via system/oem/90_desktop_installer.yaml) on
+# tty1 in install-mode. Collects hostname/username/password/disk (+ optional
+# GitHub SSH keys), assigns the desktop groups, writes a Kairos cloud-config to
+# /oem, then runs `kairos-agent install` (which merges /oem). If a user/install
+# cloud-config was already provided, it skips the prompts and installs unattended.
+#
+# Overrides (testing / automation):
+#   HADRON_INSTALL_NONINTERACTIVE=1 +
+#       HADRON_USER/HADRON_PASS/HADRON_DISK[/HADRON_HOSTNAME][/HADRON_GITHUB]
+#       skip prompts and use the environment values.
+#   HADRON_INSTALL_CMD install command to exec (default "kairos-agent install").
+set -eu
+
+OEM_DIR="${HADRON_OEM_DIR:-/oem}"
+OUT="$OEM_DIR/99_hadron-user.yaml"
+INSTALL_CMD="${HADRON_INSTALL_CMD:-kairos-agent install}"
+NONINT="${HADRON_INSTALL_NONINTERACTIVE:-0}"
+
+DESKTOP_NAME="desktop"
+DISPLAY_NAME="display server"
+[ -f /etc/hadron-desktop/session ] && . /etc/hadron-desktop/session
+
+# Colours as LITERAL escape sequences (16-colour; the install console is a Linux
+# VT with no truecolor). Built once so output uses plain `printf '%s'` and never
+# reinterprets the message as a format string.
+E=$(printf '\033')
+R="${E}[0m"; DIM="${E}[0;90m"; B="${E}[1m"
+BLUE="${E}[1;34m"; CYAN="${E}[1;36m"; MAG="${E}[1;35m"
+GREEN="${E}[1;32m"; RED="${E}[1;31m"
+
+say()  { printf '%s\n' "$*" >&2; }
+err()  { printf '%s\n' "${RED}  !!${R} $*" >&2; }
+step() { printf '\n%s\n' "${MAG}[$1/6]${R} ${B}$2${R}" >&2; }
+
+banner() {
+    [ "$NONINT" = "1" ] && return 0
+    printf '\033[2J\033[H' >&2
+    say ""
+    say "   ${CYAN}+-----------------------------------------------+${R}"
+    say "   ${CYAN}|${R}   ${B}H A D R O N${R}   ${DIM}-${R}   $DESKTOP_NAME desktop installer   ${CYAN}|${R}"
+    say "   ${CYAN}+-----------------------------------------------+${R}"
+    say "        ${DIM}$DESKTOP_NAME  ·  $DISPLAY_NAME  ·  kairos${R}"
+    say ""
+    say "   ${DIM}Answer a few questions; the desktop installs to disk${R}"
+    say "   ${DIM}and reboots into $DESKTOP_NAME.${R}"
+}
+
+# --- already configured? do the normal unattended install ------------------
+config_present() {
+    for f in "$OEM_DIR"/*.yaml "$OEM_DIR"/*.yml; do
+        [ -e "$f" ] || continue
+        [ "$f" = "$OUT" ] && continue
+        grep -qE '^[[:space:]]*(users|install):' "$f" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+if config_present; then
+    say "${CYAN}==>${R} Existing install config found in $OEM_DIR — installing unattended."
+    exec $INSTALL_CMD
+fi
+
+mkdir -p "$OEM_DIR"
+
+# --- prompt helpers --------------------------------------------------------
+prompt() { # prompt "message" "default" -> value on stdout
+    _msg="$1"; _def="${2:-}"
+    if [ -n "$_def" ]; then printf '%s' "   ${GREEN}?${R} $_msg ${DIM}[$_def]${R}: " >&2
+    else printf '%s' "   ${GREEN}?${R} $_msg: " >&2; fi
+    read -r _val || _val=""
+    [ -n "$_val" ] || _val="$_def"
+    printf '%s' "$_val"
+}
+
+prompt_secret() { # prompt_secret "message" -> value on stdout (no echo, confirm)
+    while :; do
+        printf '%s' "   ${GREEN}?${R} $1: " >&2
+        stty -echo 2>/dev/null || true; read -r _p1 || _p1=""; stty echo 2>/dev/null || true
+        printf '%s' "
+   ${GREEN}?${R} Confirm $1: " >&2
+        stty -echo 2>/dev/null || true; read -r _p2 || _p2=""; stty echo 2>/dev/null || true
+        printf '\n' >&2
+        if [ -n "$_p1" ] && [ "$_p1" = "$_p2" ]; then printf '%s' "$_p1"; return; fi
+        err "Passwords were empty or did not match — try again."
+    done
+}
+
+list_disks() { # echo: "<dev> <sizeGB>" per candidate whole disk
+    for _d in /sys/block/*; do
+        _n=$(basename "$_d")
+        case "$_n" in loop*|sr*|ram*|fd*|dm-*) continue ;; esac
+        _sectors=$(cat "$_d/size" 2>/dev/null || echo 0)
+        [ "$_sectors" -gt 0 ] 2>/dev/null || continue
+        _gb=$(( _sectors / 2 / 1024 / 1024 ))
+        printf '/dev/%s %s\n' "$_n" "$_gb"
+    done
+}
+
+pick_disk() { # interactive numbered menu -> /dev/<name> on stdout
+    _i=0; _names=""
+    while read -r _dev _gb; do
+        _i=$((_i + 1)); _names="$_names $_dev"
+        printf '%s\n' "     ${CYAN}$_i)${R} $_dev   ${DIM}$_gb GB${R}" >&2
+    done <<EOF
+$(list_disks)
+EOF
+    [ "$_i" -gt 0 ] || { err "No installable disk found."; exit 1; }
+    while :; do
+        printf '%s' "   ${GREEN}?${R} Install to which disk? ${DIM}[1-$_i]${R}: " >&2
+        read -r _sel || _sel=""
+        case "$_sel" in
+            ''|*[!0-9]*) ;;
+            *) [ "$_sel" -ge 1 ] 2>/dev/null && [ "$_sel" -le "$_i" ] 2>/dev/null && {
+                   printf '%s' "$(echo "$_names" | cut -d' ' -f$((_sel + 1)))"; return; } ;;
+        esac
+        err "Pick a number between 1 and $_i."
+    done
+}
+
+# --- collect settings ------------------------------------------------------
+GITHUB=""
+if [ "$NONINT" = "1" ]; then
+    HOSTNAME_VAL="${HADRON_HOSTNAME:-hadron}"
+    USERNAME="${HADRON_USER:?HADRON_USER required in non-interactive mode}"
+    PASSWORD="${HADRON_PASS:?HADRON_PASS required in non-interactive mode}"
+    DISK="${HADRON_DISK:?HADRON_DISK required in non-interactive mode}"
+    GITHUB="${HADRON_GITHUB:-}"
+else
+    if [ ! -t 0 ]; then
+        err "No terminal on stdin and no config to install. Run on a console, or set"
+        err "HADRON_INSTALL_NONINTERACTIVE=1 with HADRON_USER/HADRON_PASS/HADRON_DISK[/HADRON_HOSTNAME]."
+        exit 1
+    fi
+    # Loop the whole wizard: a non-confirmation re-asks instead of dead-ending the
+    # installer. (Aborting the confirm used to `exit 1`, which killed the installer
+    # service and left the live system stuck with no way to retry.)
+    while :; do
+        banner
+        step 1 "Hostname"
+        HOSTNAME_VAL=$(prompt "Hostname" "hadron")
+        step 2 "Username"
+        USERNAME=$(prompt "Username" "")
+        while [ -z "$USERNAME" ]; do USERNAME=$(prompt "Username (required)" ""); done
+        step 3 "Password"
+        PASSWORD=$(prompt_secret "Password for $USERNAME")
+        step 4 "SSH keys (optional)"
+        say "   ${DIM}Import your public SSH keys from GitHub for remote login.${R}"
+        GITHUB=$(prompt "GitHub username (blank to skip)" "")
+        step 5 "Target disk"
+        say "   ${DIM}The selected disk will be ERASED.${R}"
+        DISK=$(pick_disk)
+
+        # --- summary + confirm ---------------------------------------------
+        step 6 "Confirm"
+        say "   ${B}Hostname${R}    : $HOSTNAME_VAL"
+        say "   ${B}Username${R}    : $USERNAME ${DIM}(groups: admin audio video render input bluetooth seat docker)${R}"
+        say "   ${B}SSH keys${R}    : ${GITHUB:+github:$GITHUB}${GITHUB:-none}"
+        say "   ${B}Install to${R}  : ${RED}$DISK  (all data erased)${R}"
+        say ""
+        _ans=$(prompt "Type ${B}yes${R} to install (anything else starts over)" "")
+        case "$_ans" in
+            y|Y|yes|YES|Yes) break ;;
+            *) say ""; err "Not confirmed — starting over."; sleep 1 ;;
+        esac
+    done
+fi
+
+HASH=$(printf '%s' "$PASSWORD" | openssl passwd -6 -stdin)
+
+# --- write the cloud-config the installer will consume ---------------------
+umask 077
+cat > "$OUT" <<EOF
+#cloud-config
+# Generated by the Hadron Desktop interactive installer ($(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo first-boot)).
+install:
+  device: "$DISK"
+  auto: true
+  reboot: true
+hostname: "$HOSTNAME_VAL"
+users:
+  - name: "$USERNAME"
+    passwd: '$HASH'
+    groups: [admin, audio, video, render, input, bluetooth, seat, docker]
+EOF
+if [ -n "$GITHUB" ]; then
+    cat >> "$OUT" <<EOF
+    ssh_authorized_keys:
+      - github:$GITHUB
+EOF
+fi
+cat >> "$OUT" <<EOF
+stages:
+  initramfs:
+    - name: "Hadron desktop default session"
+      files:
+        - path: /etc/ly/save.ini
+          permissions: 0644
+          content: |
+            user = $USERNAME
+            session_index = 2
+EOF
+
+say ""
+say "${GREEN}==>${R} Installing ${B}$USERNAME@$HOSTNAME_VAL${R} to ${B}$DISK${R} ..."
+exec $INSTALL_CMD

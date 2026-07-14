@@ -23,8 +23,14 @@ RUN systemctl mask systemd-networkd.service systemd-networkd.socket \
         systemd-networkd-wait-online.service 2>/dev/null || true
 # The live test boot runs on a Kairos overlay rootfs; docker's overlay2 driver
 # cannot stack on another overlayfs, so force the always-works vfs driver here.
-# Production (installed) systems keep overlay2 on the /var/lib/docker bind-mount.
-RUN mkdir -p /etc/docker && printf '%s\n' '{' '  "storage-driver": "vfs"' '}' > /etc/docker/daemon.json
+# Production leaves Docker disabled on the live ISO and starts it only after
+# installation. The M7 test deliberately exercises Docker during its live boot,
+# so this test-only derivative both selects vfs and opts the service back in.
+RUN mkdir -p /etc/docker /etc/systemd/system/multi-user.target.wants && \
+    printf '%s\n' '{' '  "storage-driver": "vfs"' '}' > /etc/docker/daemon.json && \
+    systemctl enable docker.socket docker.service 2>/dev/null || true; \
+    ln -sf /usr/lib/systemd/system/docker.service \
+      /etc/systemd/system/multi-user.target.wants/docker.service
 # The wifi test fabricates two mac80211_hwsim radios: wlan0 runs a hostapd AP,
 # wlan1 is the NetworkManager client. Keep wlan0 out of NM's hands so hostapd
 # can own it.

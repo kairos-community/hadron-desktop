@@ -1,4 +1,0 @@
-Welcome to Hadron Desktop — a from-source Sway/Wayland desktop on Kairos.
-
-  Containers : docker run …   ·   distrobox enter
-  Apps       : flatpak search <name>   ·   flatpak install flathub <id>

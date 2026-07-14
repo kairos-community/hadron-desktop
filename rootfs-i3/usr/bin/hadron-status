@@ -1,0 +1,24 @@
+#!/bin/sh
+# Lightweight status producer for i3bar's plain-text protocol.
+while :; do
+    net=$(nmcli -t -f TYPE,STATE,CONNECTION device 2>/dev/null |
+        awk -F: '$2=="connected" { print ($1=="wifi" ? "Wi-Fi " : "Net ") $3; exit }')
+    [ -n "$net" ] || net="Net offline"
+
+    volume=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null |
+        awk '{ if ($0 ~ /MUTED/) print "muted"; else printf "%.0f%%", $2 * 100 }')
+    [ -n "$volume" ] || volume="--"
+
+    memory=$(awk '/MemTotal:/ { total=$2 } /MemAvailable:/ { available=$2 }
+        END { if (total > 0) printf "%.0f%%", (total-available)*100/total; else print "--" }' /proc/meminfo)
+
+    battery=""
+    for capacity in /sys/class/power_supply/BAT*/capacity; do
+        [ -r "$capacity" ] || continue
+        battery=" | Bat $(cat "$capacity")%"
+        break
+    done
+
+    printf ' %s | Vol %s | Mem %s%s | %s \n' "$net" "$volume" "$memory" "$battery" "$(date '+%a %d %b  %H:%M')"
+    sleep 5
+done

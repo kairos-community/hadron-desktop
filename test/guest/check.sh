@@ -316,9 +316,9 @@ if want M1; then
   # interactive TUI login can't be driven over a headless VT — that path is
   # validated on real hardware).
   # ly 1.3.x ships the ly@.service template (the plain ly.service was dropped);
-  # start-sway lives in /usr/bin, not /usr/local (Kairos shadows /usr/local).
+  # start-desktop lives in /usr/bin, not /usr/local (Kairos shadows /usr/local).
   if [ -x /usr/bin/ly ] && [ -f /usr/lib/systemd/system/ly@.service ] && [ -f /etc/pam.d/ly ]; then pass ly_installed; else fail ly_installed; fi
-  if [ -f /usr/share/wayland-sessions/sway.desktop ] && [ -x /usr/bin/start-sway ]; then pass wayland_session_entry; else fail wayland_session_entry; fi
+  if [ -f /usr/share/wayland-sessions/sway.desktop ] && [ -x /usr/bin/start-desktop ]; then pass wayland_session_entry; else fail wayland_session_entry; fi
 
   UID_SWAY="$(id -u "$DESKUSER" 2>/dev/null || echo 1000)"
   RT="/run/user/$UID_SWAY"
