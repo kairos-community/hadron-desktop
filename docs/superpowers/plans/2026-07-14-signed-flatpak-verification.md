@@ -367,6 +367,7 @@ Record both byte counts in the task report. Expected: artifact count is numeric 
 
 **Files:**
 
+- Modify: `Dockerfile` (final-image `/tmp` permissions)
 - Create: `test/flatpak/check-user-setup.sh`
 - Modify: `rootfs/usr/bin/hadron-user-setup:1-17`
 
@@ -383,6 +384,8 @@ Create executable `test/flatpak/check-user-setup.sh`. It must run these four ind
 #!/usr/bin/env bash
 set -euo pipefail
 IMAGE="${IMAGE:?set IMAGE to the Hadron image under test}"
+
+test "$(docker run --rm "$IMAGE" stat -c %a /tmp)" = 1777
 
 docker run --rm -i "$IMAGE" sh -eu -s <<'CLEAN'
 useradd -m -u 1000 -s /bin/sh fixture
@@ -462,9 +465,21 @@ chmod +x test/flatpak/check-user-setup.sh
 IMAGE=hadron-signed-flatpak:i3 test/flatpak/check-user-setup.sh
 ```
 
-Expected: the first case exits nonzero because the current script creates a remote whose options include `no-gpg-verify`.
+Expected: the precondition or first case exits nonzero. The Task 1 image has `/tmp`
+mode `0755`, which prevents libostree from creating its per-user temporary GPG
+home, and the current setup script still requests `no-gpg-verify`.
 
-- [ ] **Step 3: Replace `hadron-user-setup` with explicit state transitions**
+- [ ] **Step 3: Restore the temporary-directory invariant and replace `hadron-user-setup` with explicit state transitions**
+
+In the existing final `default` image setup `RUN`, set `/tmp` to the standard
+world-writable sticky mode before any per-user Flatpak operation can run:
+
+```dockerfile
+    chmod 1777 /tmp; \
+```
+
+This is required because libostree creates `ostree-gpg-*` directories below
+`g_get_tmp_dir()` as the unprivileged user while importing a remote key.
 
 Implement these POSIX-shell functions and constants in `rootfs/usr/bin/hadron-user-setup`:
 
@@ -579,7 +594,10 @@ IMAGE=hadron-signed-flatpak:i3 test/flatpak/check-runtime.sh
 IMAGE=hadron-signed-flatpak:i3 test/flatpak/check-user-setup.sh
 ```
 
-Expected: all commands exit 0. The clean case is idempotent, the insecure URL/trust case is repaired and enabled, the malformed-key case returns nonzero with `flathub` disabled, and the malformed-descriptor case leaves no enabled `flathub` remote.
+Expected: all commands exit 0. `/tmp` is `01777`, the clean case is idempotent,
+the insecure URL/trust case is repaired and enabled, the malformed-key case
+returns nonzero with `flathub` disabled, and the malformed-descriptor case
+leaves no enabled `flathub` remote.
 
 - [ ] **Step 5: Prove the shared Sway path**
 
@@ -599,7 +617,7 @@ Expected: the same runtime and all four migration scenarios pass in the Sway ima
 Run:
 
 ```bash
-git add rootfs/usr/bin/hadron-user-setup test/flatpak/check-user-setup.sh
+git add Dockerfile rootfs/usr/bin/hadron-user-setup test/flatpak/check-user-setup.sh
 git commit -m "fix: require signed Flathub remotes"
 ```
 
