@@ -1,17 +1,95 @@
 #!/bin/sh
-# Per-boot per-user setup, run late (after users exist and /home is mounted) by
-# hadron-user-setup.service. Idempotent.
-#
-#  - the Flathub remote per human user (--user installs land on persistent
-#    /home, so the remote persists; --if-not-exists makes re-runs cheap).
-#    Added with --no-gpg-verify because the image ships libgpgme but no gpg.
-#
-# (Docker is rootful and needs no per-user subuid/subgid mapping, so unlike the
-# old podman setup this no longer touches /etc/subuid or /etc/subgid.)
-for u in $(awk -F: '$3>=1000 && $3<60000 {print $1}' /etc/passwd); do
-    home=$(awk -F: -v u="$u" '$1==u {print $6}' /etc/passwd)
-    if [ -d "$home" ]; then
-        su - "$u" -c 'flatpak --user remote-add --if-not-exists --no-gpg-verify \
-            flathub https://dl.flathub.org/repo/' >/dev/null 2>&1 || true
+# Keep every human user's persistent Flathub remote signed and canonical.
+set -u
+
+FLATHUB_NAME=flathub
+FLATHUB_URL=https://dl.flathub.org/repo/
+FLATHUB_DESCRIPTOR=/usr/share/hadron/flathub.flatpakrepo
+FLATHUB_KEY=/usr/share/hadron/flathub.gpg
+FLATHUB_FINGERPRINT=6E5C05D979C76DAF93C081354184DD4D907A7CAE
+
+GNUPGHOME=$(mktemp -d /run/hadron-user-setup-gpg.XXXXXX) || exit 1
+chmod 700 "$GNUPGHOME"
+export GNUPGHOME
+trap 'rm -rf "$GNUPGHOME"' 0 HUP INT TERM
+
+remote_details() {
+    su - "$1" -c \
+        'flatpak --user remotes --show-disabled --columns=name,url,options'
+}
+
+remote_exists() {
+    remote_details "$1" | awk -F '\t' '$1 == "flathub" { found=1 }
+        END { exit !found }'
+}
+
+assert_remote_state() {
+    user=$1
+    expected=$2
+    remote_details "$user" | awk -F '\t' \
+        -v expected="$expected" -v url="$FLATHUB_URL" '
+        $1 == "flathub" {
+            found=1
+            if ($2 != url || $3 ~ /no-gpg-verify/) bad=1
+            if (expected == "disabled" && $3 !~ /disabled/) bad=1
+            if (expected == "enabled" && $3 ~ /disabled/) bad=1
+        }
+        END { exit (!found || bad) }
+    '
+}
+
+disable_remote() {
+    su - "$1" -c 'flatpak --user remote-modify --disable flathub'
+}
+
+bootstrap_key_valid() {
+    fingerprint=$(gpg --batch --with-colons --show-keys \
+        "$FLATHUB_KEY" 2>/dev/null |
+        awk -F: '$1 == "fpr" { print $10; exit }')
+    [ "$fingerprint" = "$FLATHUB_FINGERPRINT" ]
+}
+
+leave_disabled() {
+    if remote_exists "$1" && ! disable_remote "$1"; then
+        echo "hadron-user-setup: unable to disable failed flathub remote for $1" >&2
+    fi
+    return 1
+}
+
+configure_remote() {
+    user=$1
+    if remote_exists "$user"; then
+        disable_remote "$user" || return 1
+        if ! bootstrap_key_valid || ! su - "$user" -c \
+            "flatpak --user remote-modify --url='$FLATHUB_URL' \
+             --gpg-import='$FLATHUB_KEY' --gpg-verify '$FLATHUB_NAME'" ||
+           ! assert_remote_state "$user" disabled; then
+            leave_disabled "$user"
+            return 1
+        fi
+        if ! su - "$user" -c \
+            "flatpak --user remote-modify --enable '$FLATHUB_NAME'" ||
+           ! assert_remote_state "$user" enabled; then
+            leave_disabled "$user"
+            return 1
+        fi
+        return 0
+    fi
+
+    if ! bootstrap_key_valid || ! su - "$user" -c \
+        "flatpak --user remote-add '$FLATHUB_NAME' '$FLATHUB_DESCRIPTOR'" ||
+       ! assert_remote_state "$user" enabled; then
+        leave_disabled "$user"
+        return 1
+    fi
+}
+
+status=0
+for user in $(awk -F: '$3 >= 1000 && $3 < 60000 { print $1 }' /etc/passwd); do
+    home=$(awk -F: -v user="$user" '$1 == user { print $6 }' /etc/passwd)
+    if [ -d "$home" ] && ! configure_remote "$user"; then
+        echo "hadron-user-setup: signed Flathub setup failed for $user" >&2
+        status=1
     fi
 done
+exit "$status"

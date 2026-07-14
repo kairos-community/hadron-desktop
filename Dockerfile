@@ -2650,7 +2650,8 @@ COPY --from=desktop-config / /
 # install time via a Kairos cloud-config (see cloud-config.yaml) and lives on
 # the persistent /home. We only ensure the groups it will join exist, enable
 # the system services, and configure the ly display manager on tty1.
-RUN ldconfig 2>/dev/null || true; \
+RUN chmod 1777 /tmp; \
+    ldconfig 2>/dev/null || true; \
     # Register the bundled fonts for the selected bar, terminal, and launcher.
     fc-cache -f 2>/dev/null || true; \
     for g in audio video render input bluetooth seat docker; do groupadd -f "$g"; done; \
