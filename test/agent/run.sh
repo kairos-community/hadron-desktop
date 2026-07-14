@@ -111,6 +111,35 @@ ISO="$(ls -t "$ISO_DIR"/*.iso 2>/dev/null | head -1)"
 log "ISO: $ISO"
 
 # ---------------------------------------------------------------------------
+# 2b. Extract the live kernel + initrd from the ISO for a direct-kernel boot
+# ---------------------------------------------------------------------------
+# We boot QEMU with -kernel/-initrd so the HARNESS controls the kernel cmdline
+# (live mode, no install-mode, no nomodeset, no vga=795) instead of deferring to
+# the ISO GRUB default entry, whose cmdline breaks the phase (install-mode stops
+# Ly; nomodeset kills virtio-gpu KMS). The host has no xorriso/bsdtar/7z and no
+# passwordless sudo, so extraction runs inside the AuroraBoot image, which is
+# already present locally (it built the ISO) and ships xorriso/osirrox. The
+# image's entrypoint is the auroraboot binary, so we override it with xorriso.
+KDIR="$RUNTIME/kboot"
+KERNEL="$KDIR/kernel"
+INITRD="$KDIR/initrd"
+rm -rf "$KDIR"
+mkdir -p "$KDIR"
+log "Extracting /boot/kernel + /boot/initrd from ISO via xorriso ($AURORA_IMAGE)"
+docker run --rm \
+  --entrypoint xorriso \
+  -v "$ISO":/iso.iso:ro \
+  -v "$KDIR":/out \
+  "$AURORA_IMAGE" \
+  -osirrox on -indev /iso.iso \
+  -extract /boot/kernel /out/kernel \
+  -extract /boot/initrd /out/initrd \
+  || { err "kernel/initrd extraction (xorriso) failed"; exit 15; }
+[ -s "$KERNEL" ] && [ -s "$INITRD" ] \
+  || { err "extraction produced no kernel/initrd (kernel=$KERNEL initrd=$INITRD)"; exit 15; }
+log "Extracted kernel ($(stat -c%s "$KERNEL") B) + initrd ($(stat -c%s "$INITRD") B)"
+
+# ---------------------------------------------------------------------------
 # 3. Create the 256 MiB raw artifact disk
 # ---------------------------------------------------------------------------
 # CROSS-TASK CONTRACT: the Task 4 reporter (cua-compat-report) writes its tar to
@@ -184,9 +213,19 @@ else
   log "No /dev/kvm: using -accel tcg,thread=multi"
 fi
 
-log "Booting graphical QEMU (VNC 127.0.0.1:$VNC_DISPLAY, timeout ${BOOT_TIMEOUT}s)"
+log "Booting graphical QEMU via direct kernel (VNC 127.0.0.1:$VNC_DISPLAY, timeout ${BOOT_TIMEOUT}s)"
 rm -f "$CONSOLE" "$QMP_SOCK"
 touch "$CONSOLE"
+
+# Direct-kernel live boot. The CD stays attached (the live cmdline loads the
+# rootfs squashfs from the CDLABEL=COS_LIVE medium), but we drop `-boot d` and
+# supply our own kernel/initrd/cmdline. This is the ISO's "boot local node from
+# livecd" entry MINUS `nomodeset` and MINUS `vga=795`, so virtio-gpu KMS can
+# drive a clean DRM framebuffer for the XLibre session; it also omits
+# `install-mode`, so the Ly autologin drop-in's !install-mode condition holds.
+# Do NOT re-add nomodeset / install-mode / vga=795. Direct-kernel boot is fully
+# compatible with the OVMF pflash units below.
+KERNEL_CMDLINE="cdroot root=live:CDLABEL=COS_LIVE rd.live.dir=/ rd.live.squashimg=rootfs.squashfs rd.live.overlay.overlayfs net.ifnames=1 console=ttyS0 console=tty1 kairos.boot_live_mode selinux=0"
 
 # virtio-vga + -vnc gives the real DRM-backed scanout we screendump later.
 # NEVER add -display none / -nographic here: that would defeat the phase.
@@ -203,7 +242,9 @@ qemu-system-x86_64 \
   -drive "if=none,id=artifacts,format=raw,file=$ARTDISK" \
   -device "virtio-blk-pci,drive=artifacts,serial=$ARTIFACTS_SERIAL" \
   -cdrom "$ISO" \
-  -boot d \
+  -kernel "$KERNEL" \
+  -initrd "$INITRD" \
+  -append "$KERNEL_CMDLINE" \
   >"$QEMU_LOG" 2>&1 &
 QEMU_PID=$!
 

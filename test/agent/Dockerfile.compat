@@ -142,6 +142,8 @@ RUN uid_owner="$(awk -F: '$3 == 1000 { print $1 }' /etc/passwd)" && \
     test "$(readlink \
       /etc/systemd/system/multi-user.target.wants/ly@tty1.service)" = \
       /usr/lib/systemd/system/ly@.service && \
+    test "$(readlink \
+      /etc/systemd/system/serial-getty@ttyS0.service)" = /dev/null && \
     chmod 0755 /usr/local/libexec/cua-compat-collect \
       /usr/local/libexec/cua-compat-report \
       /usr/local/libexec/cua-compat-probe && \
