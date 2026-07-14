@@ -737,10 +737,22 @@ RUN commit="$(cat /src/chromium.commit)" && \
       "$commit" && \
     install -Dm644 /src/chromium.commit \
       /etc/hadron-agent-test/chromium-commit && \
-    flatpak list --system --all --columns=ref,active:f,origin,runtime \
-      > /etc/hadron-agent-test/flatpak-refs.tsv && \
+    flatpak list --system --all --columns=ref,origin,runtime \
+      > /tmp/flatpak-refs.tsv && \
+    : > /etc/hadron-agent-test/flatpak-refs.tsv && \
+    while IFS="$(printf '\t')" read -r ref origin runtime; do \
+      test -n "$ref" || continue; \
+      active="$(flatpak info --system --show-commit "$ref")" || exit 1; \
+      test "${#active}" -eq 64 || exit 1; \
+      printf '%s\n' "$active" | grep -Eq '^[0-9a-f]{64}$' || exit 1; \
+      printf '%s\t%s\t%s\t%s\n' \
+        "$ref" "$active" "$origin" "$runtime" \
+        >> /etc/hadron-agent-test/flatpak-refs.tsv || exit 1; \
+    done < /tmp/flatpak-refs.tsv && \
+    rm -f /tmp/flatpak-refs.tsv && \
     test -s /etc/hadron-agent-test/flatpak-refs.tsv && \
-    awk -F '\t' '$3 != "flathub" { bad=1 } \
+    awk -F '\t' 'NF != 4 || $2 !~ /^[0-9a-f]{64}$/ || \
+      $3 != "flathub" { bad=1 } \
       END { exit (NR == 0 || bad) }' \
       /etc/hadron-agent-test/flatpak-refs.tsv
 ```
@@ -749,6 +761,11 @@ Flatpak 1.16.6 must not receive `--show-details` with this projection: that
 flag overrides `--columns` and shifts URL/options away from fields 2 and 3.
 The explicit three-column command above preserves the intended signed-state
 assertion.
+
+Flatpak 1.16.6 truncates the `active` list column to 12 characters before
+formatting, including with `active:f`. The inventory therefore enumerates the
+installed refs first, resolves each full commit through `flatpak info
+--show-commit`, and rejects any row without a 64-character lowercase commit.
 
 Do not add `--if-not-exists`: a same-named ambient remote must make this deterministic test build fail instead of bypassing the descriptor.
 
