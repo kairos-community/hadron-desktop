@@ -1,10 +1,13 @@
-# Build either Hadron desktop variant and a bootable installer ISO.
+# Build either Hadron desktop variant, the opt-in agent overlay, and bootable
+# installer ISOs.
 #
 #   make image        # build the desktop image (Kairos init layer folded in)
 #   make iso          # build the image + the installer ISO
 #   make              # both (image, then iso)
 #   make DESKTOP=i3 image               # XLibre + i3 variant
 #   make images                          # build both variant images
+#   make agent-image                     # build the i3-based agent overlay
+#   make agent-iso                       # build the agent ISO
 #   make clean                           # remove build artifacts
 #
 # Knobs (override on the command line):
@@ -17,6 +20,10 @@ DESKTOP      ?= sway
 IMAGE        ?= $(DESKTOP)-desktop:dev
 BASE_IMAGE   ?= ghcr.io/kairos-io/hadron:main
 AURORA_IMAGE ?= quay.io/kairos/auroraboot:v0.21.0-alpha.4
+AGENT_BASE_IMAGE ?= i3-desktop:dev
+AGENT_IMAGE      ?= agent-desktop:dev
+AGENT_WORK       := build/agent-desktop
+AGENT_ISO_DIR    := $(AGENT_WORK)/iso
 
 VALID_DESKTOPS := sway i3
 ifneq ($(words $(DESKTOP)),1)
@@ -44,7 +51,7 @@ endif
 
 export DOCKER_BUILDKIT := 1
 
-.PHONY: all image images iso vm vm-install clean
+.PHONY: all image images iso agent-image agent-iso vm vm-install clean
 
 all: iso
 
@@ -56,6 +63,22 @@ image:
 images:
 	$(MAKE) DESKTOP=sway image
 	$(MAKE) DESKTOP=i3 image
+
+agent-image:
+	$(MAKE) DESKTOP=i3 IMAGE=$(AGENT_BASE_IMAGE) $(if $(VERSION),VERSION=$(VERSION),) image
+	docker build -f Dockerfile.agent --target agent \
+	  --build-arg BASE_IMAGE=$(AGENT_BASE_IMAGE) \
+	  $(if $(VERSION),--build-arg VERSION=$(VERSION),) \
+	  -t $(AGENT_IMAGE) .
+
+agent-iso: agent-image
+	mkdir -p $(AGENT_ISO_DIR)
+	rm -f $(AGENT_ISO_DIR)/*.iso
+	docker run --rm --privileged \
+	  -v /var/run/docker.sock:/var/run/docker.sock \
+	  -v $(CURDIR)/$(AGENT_ISO_DIR):/output \
+	  $(AURORA_IMAGE) build-iso --output /output/ docker:$(AGENT_IMAGE)
+	@echo "ISO: $$(ls -t $(AGENT_ISO_DIR)/*.iso | head -1)"
 
 # Build the installer ISO with AuroraBoot straight from the image (it reads the
 # local image over the Docker socket).
@@ -77,4 +100,4 @@ vm:                   ## boot the already-installed disk
 	tools/vm.sh run
 
 clean:
-	rm -rf $(WORK)
+	rm -rf $(WORK) $(AGENT_WORK)

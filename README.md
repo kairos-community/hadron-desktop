@@ -141,6 +141,21 @@ There are two ways to create that user:
   When one is present the wizard detects it and runs the normal unattended
   install instead of prompting — so CI and automated installs are unaffected.
 
+The top-level build targets are:
+
+```sh
+make DESKTOP=sway iso
+make DESKTOP=i3 iso
+make agent-iso VERSION=v1.2.3
+```
+
+`agent-iso` first builds the i3 base image, then layers `Dockerfile.agent` on
+top to produce the opt-in agent appliance. The agent ISO still uses the same
+unattended install mechanism: if the datasource already contains `users:` and
+`install:` the wizard skips the prompt path. For the agent appliance, the seed
+also needs `hadron_agent.enabled=true` so the overlay starts its agent profile
+instead of the plain desktop path.
+
 ### Production vs test launch
 
 `ly`'s interactive TUI login can't be driven over a headless VT, and headless

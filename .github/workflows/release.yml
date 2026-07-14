@@ -44,7 +44,7 @@ jobs:
           fi
 
       - name: Check out release tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
           persist-credentials: false
@@ -98,9 +98,83 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  build-agent:
+    name: Build agent ISO
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Validate release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+            echo "Release tag must start with v and contain only letters, numbers, dots, underscores, pluses, and hyphens: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      # Standard GitHub-hosted Linux runners expose 14 GB of SSD. Remove large
+      # preinstalled SDKs that this Docker-only build does not use so BuildKit
+      # has room for the source-build stages.
+      - name: Reclaim runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+          docker system prune --all --force
+          df -h /
+
+      - name: Build agent ISO
+        shell: bash
+        run: |
+          set -euo pipefail
+          make VERSION="$RELEASE_TAG" agent-iso
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          iso_dir="build/agent-desktop/iso"
+          mapfile -t isos < <(find "$iso_dir" -maxdepth 1 -type f -name '*.iso' -print)
+          if (( ${#isos[@]} != 1 )); then
+            echo "Expected exactly one ISO in $iso_dir, found ${#isos[@]}" >&2
+            exit 1
+          fi
+
+          mkdir -p dist
+          asset="hadron-desktop-agent-${RELEASE_TAG}-amd64.iso"
+          cp "${isos[0]}" "dist/$asset"
+          cd dist
+          sha256sum "$asset" > "$asset.sha256"
+
+      - name: Upload agent workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-agent
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs:
+      - build
+      - build-agent
     runs-on: ubuntu-24.04
     permissions:
       actions: read
@@ -124,8 +198,8 @@ jobs:
           isos=(release/*.iso)
           checksums=(release/*.sha256)
 
-          if (( ${#isos[@]} != 2 || ${#checksums[@]} != 2 )); then
-            echo "Expected two ISOs and two checksum files" >&2
+          if (( ${#isos[@]} != 3 || ${#checksums[@]} != 3 )); then
+            echo "Expected three ISOs and three checksum files" >&2
             find release -maxdepth 1 -type f -print >&2
             exit 1
           fi
