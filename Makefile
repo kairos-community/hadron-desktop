@@ -1,26 +1,37 @@
-# Build the Hadron sway-desktop image and a bootable installer ISO.
+# Build either Hadron desktop variant and a bootable installer ISO.
 #
 #   make image        # build the desktop image (Kairos init layer folded in)
 #   make iso          # build the image + the installer ISO
 #   make              # both (image, then iso)
-#   make clean        # remove build artifacts
+#   make DESKTOP=i3 image               # XLibre + i3 variant
+#   make images                          # build both variant images
+#   make clean                           # remove build artifacts
 #
 # Knobs (override on the command line):
-#   make GPU=full FIRMWARE=true          # hardware GL + real-hardware firmware
-#   make IMAGE=sway-desktop:hw            # change the image tag
+#   make DESKTOP=i3 GPU=full FIRMWARE=true # XLibre/i3 + hardware support
+#   make IMAGE=sway-desktop:hw             # change the image tag
 #   make BASE_IMAGE=ghcr.io/...:vX        # pin a different Hadron base
 #   make VERSION=v1.2.3                   # stamp a Kairos version
 
-IMAGE        ?= sway-desktop:dev
+DESKTOP      ?= sway
+IMAGE        ?= $(DESKTOP)-desktop:dev
 BASE_IMAGE   ?= ghcr.io/kairos-io/hadron:main
 AURORA_IMAGE ?= quay.io/kairos/auroraboot:v0.21.0-alpha.4
 
-WORK    := build/sway-desktop
+VALID_DESKTOPS := sway i3
+ifneq ($(words $(DESKTOP)),1)
+$(error unsupported DESKTOP '$(DESKTOP)'; choose exactly one of: $(VALID_DESKTOPS))
+endif
+ifeq ($(filter $(DESKTOP),$(VALID_DESKTOPS)),)
+$(error unsupported DESKTOP '$(DESKTOP)'; choose one of: $(VALID_DESKTOPS))
+endif
+
+WORK    := build/$(DESKTOP)-desktop
 ISO_DIR := $(WORK)/iso
 
 # Optional build args, only passed when set (otherwise the Dockerfile defaults
 # apply: GPU=vm, FIRMWARE=false, VERSION=v0.0.0).
-BUILD_ARGS := --build-arg BASE_IMAGE=$(BASE_IMAGE)
+BUILD_ARGS := --build-arg BASE_IMAGE=$(BASE_IMAGE) --build-arg DESKTOP=$(DESKTOP)
 ifdef GPU
 BUILD_ARGS += --build-arg GPU=$(GPU)
 endif
@@ -33,7 +44,7 @@ endif
 
 export DOCKER_BUILDKIT := 1
 
-.PHONY: all image iso vm vm-install clean
+.PHONY: all image images iso vm vm-install clean
 
 all: iso
 
@@ -41,6 +52,10 @@ all: iso
 # (build `--target default` for the bare desktop image without it).
 image:
 	docker build $(BUILD_ARGS) -t $(IMAGE) .
+
+images:
+	$(MAKE) DESKTOP=sway image
+	$(MAKE) DESKTOP=i3 image
 
 # Build the installer ISO with AuroraBoot straight from the image (it reads the
 # local image over the Docker socket).

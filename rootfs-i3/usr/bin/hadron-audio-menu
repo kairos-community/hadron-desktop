@@ -1,0 +1,18 @@
+#!/bin/sh
+# dmenu-based WirePlumber output switcher for the XLibre/i3 variant.
+list=$(wpctl status 2>/dev/null | awk '
+    /Sinks:/      { insink=1; next }
+    /Sources:|Filters:|Streams:|^ *$/ { insink=0 }
+    insink && match($0, /[0-9]+\./) {
+        rest = substr($0, RSTART)
+        id = rest; sub(/\..*/, "", id)
+        name = rest; sub(/^[0-9]+\.[ ]*/, "", name); sub(/[ ]*\[vol.*$/, "", name)
+        active = ($0 ~ /\*/) ? "* " : "  "
+        printf "%s%s\t%s\n", active, name, id
+    }')
+
+[ -n "$list" ] || exit 0
+sel=$(printf '%s\n' "$list" | cut -f1 | dmenu -i -l 10 -p 'Audio output' \
+    -fn 'DejaVu Sans-11' -nb '#1a1b26' -nf '#c0caf5' -sb '#7aa2f7' -sf '#1a1b26') || exit 0
+id=$(printf '%s\n' "$list" | awk -F'\t' -v s="$sel" '$1==s{print $2; exit}')
+[ -n "$id" ] && wpctl set-default "$id"

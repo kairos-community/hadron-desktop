@@ -15,7 +15,7 @@ ConditionPathExists=!/run/cos/live_mode
 [Service]
 Type=oneshot
 # Stay "active (exited)" after the splash finishes so a second `systemctl start`
-# (the 91_sway_session boot stage also starts it, to guarantee splash-before-ly
+# (the 91_desktop_session boot stage also starts it, to guarantee splash-before-ly
 # even if the baked multi-user.target.wants symlink is shadowed by the /etc
 # overlay) is a no-op instead of replaying the animation.
 RemainAfterExit=yes

@@ -1,0 +1,9 @@
+# Environment sourced by /usr/bin/start-desktop before launching i3.
+export XDG_CURRENT_DESKTOP=i3
+export XDG_SESSION_DESKTOP=i3
+export XDG_SESSION_TYPE=x11
+export GDK_BACKEND=x11
+export QT_QPA_PLATFORM=xcb
+export SDL_VIDEODRIVER=x11
+export MOZ_ENABLE_WAYLAND=0
+export _JAVA_AWT_WM_NONREPARENTING=1

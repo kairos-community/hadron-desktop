@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=i3 (XLibre)
+Comment=i3 tiling window manager on the XLibre X server
+Exec=/usr/bin/start-desktop
+TryExec=/usr/bin/i3
+Type=Application
+DesktopNames=i3

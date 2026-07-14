@@ -1,0 +1,18 @@
+#!/bin/sh
+# fuzzel-based audio output switcher for Sway (WirePlumber via wpctl).
+# Bound to Mod+Shift+a. Lists sinks; sets the chosen one as the default output.
+list=$(wpctl status 2>/dev/null | awk '
+    /Sinks:/      { insink=1; next }
+    /Sources:|Filters:|Streams:|^ *$/ { insink=0 }
+    insink && match($0, /[0-9]+\./) {
+        rest = substr($0, RSTART)                 # "49. Name [vol: ...]"
+        id = rest; sub(/\..*/, "", id)            # "49"
+        name = rest; sub(/^[0-9]+\.[ ]*/, "", name); sub(/[ ]*\[vol.*$/, "", name)
+        active = ($0 ~ /\*/) ? "\xe2\x97\x8f " : "  "
+        printf "%s%s\t%s\n", active, name, id
+    }')
+
+[ -n "$list" ] || exit 0
+sel=$(printf '%s\n' "$list" | cut -f1 | fuzzel --dmenu --width=46 --lines=10 --prompt='Audio output > ') || exit 0
+id=$(printf '%s\n' "$list" | awk -F'\t' -v s="$sel" '$1==s{print $2; exit}')
+[ -n "$id" ] && wpctl set-default "$id"

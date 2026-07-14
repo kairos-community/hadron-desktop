@@ -1,29 +1,36 @@
-# Sway desktop on Hadron
+# Hadron desktop
 
-A full [Sway](https://swaywm.org/) Wayland desktop built on top of the minimal
-[Hadron](https://github.com/kairos-io/hadron) base image, with NetworkManager,
-PipeWire audio, wifi and bluetooth. Everything is compiled from source against
-the Hadron musl toolchain in a single multi-stage `Dockerfile`.
+Two tiling desktop variants built on top of the minimal
+[Hadron](https://github.com/kairos-io/hadron) base image:
 
-The repo is self-contained (single `Dockerfile`, a `rootfs/` overlay, a `test/`
-harness) and depends only on the published Hadron images
+| `DESKTOP` | Display stack | Desktop | Native desktop tools |
+|-----------|---------------|---------|----------------------|
+| `sway` (default) | Wayland + wlroots | [Sway](https://swaywm.org/) | foot, fuzzel, waybar, mako |
+| `i3` | [XLibre](https://www.xlibre.net/) X server | [i3](https://i3wm.org/) | st, dmenu, i3bar, dunst |
+
+Both include NetworkManager, PipeWire audio, wifi, bluetooth, Docker and
+Distrobox. Everything is compiled from source against the Hadron musl toolchain
+in one multi-stage `Dockerfile`; BuildKit only evaluates the selected graphics
+stack.
+
+The repo is self-contained (`Dockerfile`, common and variant rootfs overlays,
+and a `test/` harness) and depends only on the published Hadron images
 (`ghcr.io/kairos-io/hadron{,-toolchain}:main`) — no Hadron source checkout needed.
 
 > Status: built incrementally — see the milestone table below.
 
-## What's inside
+## Variant architecture
 
-- **Compositor:** Sway (wlroots), running under **systemd-logind** seat
-  management — `ly` logs a user in on `tty1`, launching Sway, and `pam_systemd`
-  registers a logind session that grants DRM/input device access.
-- **Terminal:** `foot`.
-- **Display stack:** wayland, wlroots, Mesa, libinput, libxkbcommon, pixman,
-  pango/cairo, freetype/fontconfig (+ DejaVu fonts).
+- **Sway:** Wayland, wlroots, Wayland Mesa, Sway, foot, fuzzel, waybar, mako,
+  wl-clipboard, slurp and swayidle.
+- **i3:** XLibre 25.2.0, X11 Mesa/GLX, the XLibre libinput driver, i3 4.25.1,
+  st, dmenu, i3bar, dunst and xsel.
+- **Login:** `ly` runs on `tty1`. It launches Sway directly for the Wayland
+  session and owns the XLibre server lifecycle for the i3 X session.
 - **Networking:** NetworkManager + wpa_supplicant (wifi).
 - **Audio:** PipeWire + WirePlumber.
 - **Bluetooth:** BlueZ.
 - **Containers:** rootful docker + distrobox (mutable dev-env containers).
-- **Desktop polish:** waybar, mako, fuzzel, wl-clipboard, slurp, swayidle.
 - **Real-hardware firmware:** optional curated `linux-firmware` subset
   (`--build-arg FIRMWARE=true`).
 - **Hardware GL:** optional Mesa `iris`/`radeonsi` (`--build-arg GPU=full`).
@@ -31,16 +38,47 @@ harness) and depends only on the published Hadron images
 ## Build
 
 ```sh
-make            # build the image + the installer ISO
-make image      # just the image (extends ghcr.io/kairos-io/hadron:main)
-make iso        # just the ISO (AuroraBoot)
+make image                 # default Wayland/Sway image: sway-desktop:dev
+make DESKTOP=i3 image      # XLibre/i3 image: i3-desktop:dev
+make images                # build both image variants
+
+make                       # default Sway image + installer ISO
+make DESKTOP=i3 iso        # XLibre/i3 image + installer ISO
 ```
+
+The equivalent direct Docker builds are:
+
+```sh
+docker build -t sway-desktop:dev .
+docker build --build-arg DESKTOP=i3 -t i3-desktop:dev .
+```
+
+Only `sway` and `i3` are valid selector values. The corresponding artifacts are
+kept under `build/sway-desktop/` and `build/i3-desktop/`.
+
+## Releases
+
+Pushing a `v`-prefixed tag runs `.github/workflows/release.yml`. The workflow
+builds the Sway and i3/XLibre installer ISOs in parallel, verifies their SHA-256
+checksums, and creates a GitHub Release containing both ISOs and both checksum
+files:
+
+```sh
+git tag -a v1.0.0 -m "Hadron Desktop v1.0.0"
+git push origin v1.0.0
+```
+
+An existing tag can be rebuilt from the Actions page with the workflow's manual
+dispatch. Rebuilt assets replace same-named assets on a mutable release.
 
 ## Try it in a VM
 
 ```sh
 make vm-install   # fresh disk, boot the newest installer ISO (then it reboots to disk)
 make vm           # boot the already-installed disk
+
+DESKTOP=i3 make vm-install
+DESKTOP=i3 make vm
 ```
 
 Both call `tools/vm.sh`, which launches QEMU with UEFI (OVMF) **and virtio-gpu**.
@@ -50,21 +88,21 @@ static (a QEMU artifact, not an image bug — real hardware renders fine).
 Connect over VNC (`<host>:5910`); set `NOVNC=1` for a browser client. See the
 header of `tools/vm.sh` for knobs (`MEM`, `VNC`, `FRESH=1`, `ISO=…`, …).
 
-The Kairos init layer is folded into the Dockerfile's final stage, so a plain
-`docker build -t sway-desktop:dev .` already produces a bootable artifact
+The Kairos init layer is folded into the Dockerfile's final stage, so either
+Docker command above already produces a bootable artifact
 AuroraBoot can turn into an ISO (build `--target default` for the bare desktop
 image without it).
 
 ## Run on real hardware
 
 The image is a bootable Kairos/Hadron OS image. Build an ISO/disk with AuroraBoot
-(`make iso`) and install it to a machine. On boot it autologins the `sway` user
-on `tty1` and starts Sway. (Real wifi/bluetooth/audio require the
+(`make iso`) and install it to a machine. On boot, `ly` runs on `tty1` and starts
+the session selected at image build time. (Real wifi/bluetooth/audio require the
 `linux-firmware` blobs — see milestone M6.)
 
-## Test (headless, autonomous)
+## Test (Sway headless harness)
 
-The `test/` harness builds the image, builds a bootable ISO
+The existing `test/` harness exercises the default Sway variant, builds a bootable ISO
 with AuroraBoot, boots it headless in QEMU, and asserts that the desktop and each
 subsystem come up — entirely without a display. It exercises even wifi and
 bluetooth using virtual kernel devices (`mac80211_hwsim`, `hci_vhci`).
@@ -86,15 +124,15 @@ harness parses them and exits non-zero on any failure. Screenshots captured with
 
 The image bakes in **no user**. The desktop user is created at install time and
 lives on the persistent `/home`. On boot the **`ly`** display manager (TUI, on
-tty1) authenticates that user and launches the Sway session
-(`/usr/share/wayland-sessions/sway.desktop` → `start-sway`), giving Sway a
-proper logind seat session and the DRM/KMS backend.
+tty1) authenticates that user and launches the selected session through
+`/usr/bin/start-desktop`. In the Sway image this is the Wayland session; in the
+i3 image, `ly` starts XLibre and then launches i3.
 
 There are two ways to create that user:
 
 - **Interactive installer (default).** Boot the live ISO with nothing else and a
-  small wizard (`/usr/local/bin/sway-install`, wired in via
-  `system/oem/90_sway_installer.yaml`) prompts on tty1 for **hostname, username,
+  small wizard (`/usr/local/bin/hadron-install`, wired in via
+  `system/oem/90_desktop_installer.yaml`) prompts on tty1 for **hostname, username,
   password, and target disk**, assigns the desktop groups (admin, audio, video,
   render, input, bluetooth, seat), hashes the password (`openssl passwd -6`),
   writes the cloud-config, and installs.
@@ -134,6 +172,7 @@ The default image is VM-slim. For real laptops, build with the firmware subset:
 
 ```sh
 docker build --build-arg FIRMWARE=true -t sway-desktop:hw .
+docker build --build-arg DESKTOP=i3 --build-arg FIRMWARE=true -t i3-desktop:hw .
 ```
 
 This bundles a curated `linux-firmware` subset (iwlwifi, ath, rtw, brcm, intel
@@ -149,6 +188,9 @@ accelerated GL on real Intel/AMD laptops, build with `GPU=full`:
 ```sh
 docker build --build-arg GPU=full --build-arg FIRMWARE=true \
   -t sway-desktop:hw .
+
+docker build --build-arg DESKTOP=i3 --build-arg GPU=full \
+  --build-arg FIRMWARE=true -t i3-desktop:hw .
 ```
 
 `GPU=full` builds Mesa `iris` (Intel) + `radeonsi` (AMD), which require LLVM.
@@ -176,9 +218,14 @@ softpipe/virgl (software) while the hardware drivers ride along for real metal.
 hadron-desktop/
   Dockerfile          # multi-stage build of the whole desktop stack
   cloud-config.yaml   # example Kairos install config (creates the desktop user)
-  rootfs/             # overlay: sway config, ly session entry, launcher, env
+  rootfs/             # shared OS, installer and service overlay
+  rootfs-sway/        # Wayland/Sway session config and native tools
+  rootfs-i3/          # XLibre/i3 session config and native tools
+  tools/
+    hadron-xroot.c    # tiny X11 root-window background helper
+    vm.sh             # variant-aware QEMU launcher
   test/
-    run.sh            # build -> kairos -> ISO -> QEMU -> assert
+    run.sh            # default Sway build -> ISO -> QEMU -> assert
     Dockerfile.test   # injects in-guest test instrumentation
     guest/check.sh    # in-guest assertions (emit SWAYTEST: markers)
     artifacts/        # console logs + screenshots (gitignored)

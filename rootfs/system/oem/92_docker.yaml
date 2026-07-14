@@ -7,7 +7,7 @@
 #     /run/cos/cos-layout.env, which cos-setup's rootfs stage consumes).
 #  2. Re-enable + start docker.service on the installed system. Kairos manages
 #     /etc as an overlay and forces multi-user.target, shadowing the baked
-#     enablement — mirroring 91_sway_session.yaml.
+#     enablement — mirroring 91_desktop_session.yaml.
 name: "docker"
 stages:
   rootfs:

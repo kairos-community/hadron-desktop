@@ -1,0 +1,46 @@
+#!/bin/sh
+# dmenu-based Wi-Fi menu for the XLibre/i3 variant (NetworkManager via nmcli).
+menu() {
+    dmenu -i -l 14 -p "$1" -fn 'DejaVu Sans-11' \
+        -nb '#1a1b26' -nf '#c0caf5' -sb '#7aa2f7' -sf '#1a1b26'
+}
+
+radio=$(nmcli -t -f WIFI radio 2>/dev/null || echo "")
+if [ "$radio" = "disabled" ]; then
+    [ "$(printf 'Turn Wi-Fi on' | menu 'Wi-Fi is off')" = "Turn Wi-Fi on" ] && nmcli radio wifi on
+    exit 0
+fi
+
+nmcli device wifi rescan >/dev/null 2>&1 || true
+aps=$(nmcli -t --escape no -f ACTIVE,SIGNAL,SECURITY,SSID device wifi list 2>/dev/null | awk -F: '
+    { ssid=$4; for (i=5; i<=NF; i++) ssid=ssid ":" $i }
+    ssid=="" || seen[ssid]++ { next }
+    {
+        mark = ($1 == "yes") ? "* " : "  "
+        sec  = ($3 == "" || $3 == "--") ? "" : " +"
+        printf "%s%s  (%d%%%s)\n", mark, ssid, $2, sec
+    }')
+
+sel=$(printf '%s\n  ---------\n  Disconnect\n  Turn Wi-Fi off\n  Rescan' "$aps" | menu 'Wi-Fi') || exit 0
+clean=$(printf '%s' "$sel" | sed -e 's/^[* ] *//' -e 's/  *$//')
+case "$clean" in
+    ''|'---------') exit 0 ;;
+    'Turn Wi-Fi off') nmcli radio wifi off; exit 0 ;;
+    'Rescan') exec "$0" ;;
+    'Disconnect')
+        dev=$(nmcli -t -f DEVICE,TYPE device | awk -F: '$2=="wifi"{print $1; exit}')
+        [ -n "$dev" ] && nmcli device disconnect "$dev"
+        exit 0 ;;
+esac
+
+ssid=$(printf '%s' "$clean" | sed -E 's/  *\([0-9]+%.*\)$//')
+[ -n "$ssid" ] || exit 0
+
+if nmcli -t -f NAME connection show 2>/dev/null | grep -qxF "$ssid"; then
+    nmcli connection up id "$ssid"
+elif printf '%s' "$sel" | grep -q '%)$'; then
+    nmcli device wifi connect "$ssid"
+else
+    pw=$(hadron-secret-prompt "Password for $ssid") || exit 0
+    [ -n "$pw" ] && nmcli device wifi connect "$ssid" password "$pw"
+fi

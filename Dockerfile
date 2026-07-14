@@ -1,16 +1,21 @@
-# Sway desktop environment for Hadron.
+# Hadron desktop environment: Sway/Wayland or i3/XLibre.
 #
-# Builds a full Wayland desktop (Sway) on top of the Hadron base image, with (in
-# later milestones) NetworkManager, PipeWire audio, wifi and bluetooth.
+# Builds a complete desktop on top of the Hadron base image. DESKTOP=sway keeps
+# the existing Wayland/Sway stack; DESKTOP=i3 selects XLibre and i3. BuildKit
+# only evaluates the selected desktop rootfs, so the other graphics stack is
+# pruned from both the build graph and the resulting image.
 # Everything is built from source against the Hadron musl toolchain.
 #
 # Build:    docker build -t sway-desktop:dev .
+# XLibre:   docker build --build-arg DESKTOP=i3 -t i3-desktop:dev .
 # Test:     test/run.sh   (full build -> boot -> assert loop)
 #
-# Milestone M1: Sway compositor under systemd-logind, rendering on tty1 via an
-# autologin user, with a terminal (foot).
+# Milestone M1: Sway compositor under systemd-logind, rendering on tty1 for an
+# ly-authenticated user, with a terminal (foot).
 
 ARG BASE_IMAGE=ghcr.io/kairos-io/hadron:main
+# Select the display server + window manager pair. Supported values: sway, i3.
+ARG DESKTOP=sway
 # GPU=vm (default): software/virtual GL only — no LLVM is built.
 # GPU=full: hardware GL (iris/radeonsi) — builds the LLVM/SPIRV stack below.
 ARG GPU=vm
@@ -50,6 +55,20 @@ WORKDIR /build/libdrm-src
 RUN pip3 install meson ninja
 RUN meson setup buildDir ${COMMON_MESON_FLAGS} -Dtests=false
 RUN DESTDIR=/libdrm ninja -C buildDir install
+
+
+# systemd/libudev in the Hadron musl toolchain is linked against libucontext.
+# Build it explicitly so every stage using those toolchain libraries can link
+# reliably, and copy it into both desktop runtime roots below.
+FROM toolchain AS libucontext
+ARG LIBUCONTEXT_VERSION=1.5.1
+RUN mkdir -p /libucontext
+WORKDIR /build
+RUN curl -fL --retry 5 https://github.com/kaniini/libucontext/archive/refs/tags/libucontext-${LIBUCONTEXT_VERSION}.tar.gz -o libucontext.tar.gz && \
+    tar -xf libucontext.tar.gz && mv libucontext-* src
+WORKDIR /build/src
+RUN make -j"$(nproc)" ARCH=x86_64
+RUN make ARCH=x86_64 DESTDIR=/libucontext install
 
 
 # ===========================================================================
@@ -239,6 +258,7 @@ RUN DESTDIR=/libevdev ninja -C buildDir install
 
 
 FROM toolchain AS libinput
+COPY --from=libucontext /libucontext /
 COPY --from=libevdev /libevdev /
 ARG LIBINPUT_VERSION=1.30.0
 RUN mkdir -p /libinput
@@ -273,7 +293,7 @@ RUN DESTDIR=/libdisplay-info ninja -C buildDir install
 
 
 # ===========================================================================
-# Desktop libraries (new for the sway desktop)
+# Shared desktop libraries
 # ===========================================================================
 
 # PCRE2 — required by glib
@@ -295,7 +315,12 @@ WORKDIR /build
 RUN curl -L https://download.sourceforge.net/libpng/libpng-${LIBPNG_VERSION}.tar.xz -o libpng.tar.xz && tar -xf libpng.tar.xz && rm libpng.tar.xz && mv libpng-* libpng-src
 WORKDIR /build/libpng-src
 RUN ./configure ${COMMON_CONFIGURE_ARGS} --disable-dependency-tracking
-RUN make -j$(nproc) && make install DESTDIR=/libpng
+# The Hadron cross-style target tuple causes libpng's generated DFA feature
+# header to disable every read/write API. Use libpng's shipped, standard
+# feature profile so Cairo, grim, and gdk-pixbuf get the normal PNG surface.
+RUN sed -i 's/^pnglibconf\.h: pnglibconf\.out$/pnglibconf.h:/' Makefile && \
+    cp scripts/pnglibconf.h.prebuilt pnglibconf.h && \
+    make -j$(nproc) && make install DESTDIR=/libpng
 
 
 # GLib — libffi/expat/zlib already provided by the toolchain
@@ -752,6 +777,7 @@ RUN make -C libdbusmenu-glib -j"$(nproc)" && make -C libdbusmenu-gtk -j"$(nproc)
 # ("Cannot create session: disabled at compile-time"), so sway can never open
 # DRM and gets bounced straight back to the login manager.
 FROM toolchain AS libseat
+COPY --from=libucontext /libucontext /
 ARG SEATD_VERSION=0.9.1
 RUN mkdir -p /libseat
 WORKDIR /build
@@ -764,6 +790,7 @@ RUN DESTDIR=/libseat ninja -C buildDir install
 
 
 FROM toolchain AS wlroots
+COPY --from=libucontext /libucontext /
 RUN mkdir -p /wlroots
 COPY --from=libseat /libseat /
 COPY --from=wayland /wayland /
@@ -786,6 +813,7 @@ RUN DESTDIR=/wlroots ninja -C buildDir install
 
 # Sway
 FROM toolchain AS sway
+COPY --from=libucontext /libucontext /
 COPY --from=wayland /wayland /
 COPY --from=libdrm /libdrm /
 COPY --from=libxkb /libxkb /
@@ -994,12 +1022,13 @@ RUN make -j$(nproc) && make install DESTDIR=/libndp
 # wireless-regdb — regulatory database (loaded by cfg80211 from /lib/firmware)
 FROM toolchain AS wireless-regdb
 ARG WIRELESS_REGDB_VERSION=2024.10.07
-# Use /usr/lib (the base image is usrmerged; /lib -> usr/lib). Installing to a
-# top-level /lib would create a real dir that conflicts with the /lib symlink.
-RUN mkdir -p /wireless-regdb/usr/lib/firmware
+# Hadron points both /lib/firmware and /usr/lib/firmware at this persistent,
+# canonical directory. Writing the target directly avoids replacing either
+# symlink when the scratch rootfs is overlaid onto the base image.
+RUN mkdir -p /wireless-regdb/usr/local/lib/firmware
 WORKDIR /build
 RUN curl -L https://www.kernel.org/pub/software/network/wireless-regdb/wireless-regdb-${WIRELESS_REGDB_VERSION}.tar.xz -o regdb.tar.xz && tar -xf regdb.tar.xz && rm regdb.tar.xz && mv wireless-regdb-* regdb-src
-RUN cp regdb-src/regulatory.db regdb-src/regulatory.db.p7s /wireless-regdb/usr/lib/firmware/
+RUN cp regdb-src/regulatory.db regdb-src/regulatory.db.p7s /wireless-regdb/usr/local/lib/firmware/
 
 
 # ncurses — provides the termcap library (libtinfo) that the toolchain's
@@ -1032,6 +1061,7 @@ RUN make -j$(nproc) && make install DESTDIR=/libxslt
 
 # NetworkManager
 FROM toolchain AS networkmanager
+COPY --from=libucontext /libucontext /
 COPY --from=glib2 /glib2 /
 COPY --from=pcre2 /pcre2 /
 COPY --from=libndp /libndp /
@@ -1095,6 +1125,7 @@ RUN make -j$(nproc) && make install DESTDIR=/sbc
 
 # BlueZ — bluetoothd, bluetoothctl, btvirt (virtual HCI for the test)
 FROM toolchain AS bluez
+COPY --from=libucontext /libucontext /
 COPY --from=glib2 /glib2 /
 COPY --from=pcre2 /pcre2 /
 COPY --from=ncurses /ncurses /
@@ -1119,6 +1150,7 @@ RUN cp -f tools/btvirt /bluez/usr/bin/ 2>/dev/null || cp -f emulator/btvirt /blu
 
 # PipeWire
 FROM toolchain AS pipewire
+COPY --from=libucontext /libucontext /
 COPY --from=alsa-lib /alsa-lib /
 COPY --from=glib2 /glib2 /
 COPY --from=pcre2 /pcre2 /
@@ -1143,6 +1175,7 @@ RUN DESTDIR=/pipewire ninja -C buildDir install
 
 # WirePlumber (session manager; uses its bundled Lua)
 FROM toolchain AS wireplumber
+COPY --from=libucontext /libucontext /
 COPY --from=glib2 /glib2 /
 COPY --from=pcre2 /pcre2 /
 COPY --from=pipewire /pipewire /
@@ -1166,9 +1199,10 @@ RUN DESTDIR=/wireplumber ninja -C buildDir install
 # --- waybar — the status bar / panel ---------------------------------------
 # Native modules drive NetworkManager / WirePlumber / BlueZ directly (clickable
 # wifi, volume, bluetooth), plus an SNI system tray (libdbusmenu) for external
-# applet icons. Click actions reuse the fuzzel sway-wifi-menu / sway-audio-menu.
+# applet icons. Click actions reuse the variant-aware Hadron network/audio menus.
 # Defined after wireplumber/pipewire so every COPY --from resolves backwards.
 FROM toolchain AS waybar
+COPY --from=libucontext /libucontext /
 COPY --from=glib2 /glib2 /
 COPY --from=pcre2 /pcre2 /
 COPY --from=cairo /cairo /
@@ -1419,6 +1453,7 @@ RUN make -j"$(nproc)" libs && make install-libs DESTDIR=/e2fsprogs
 # --- ostree — the content store flatpak deploys apps from -------------------
 # libcurl/openssl/zlib/lzma/libmount/libsystemd all come from the toolchain.
 FROM toolchain AS ostree
+COPY --from=libucontext /libucontext /
 COPY --from=glib2 /glib2 /
 COPY --from=pcre2 /pcre2 /
 COPY --from=libarchive /libarchive /
@@ -1443,6 +1478,7 @@ RUN make -j"$(nproc)" && make DESTDIR=/ostree install
 # come from the toolchain. GPG verification is built (gpgme) but has no gpg
 # binary at runtime, so remotes are added with --no-gpg-verify.
 FROM toolchain AS flatpak
+COPY --from=libucontext /libucontext /
 COPY --from=glib2 /glib2 /
 COPY --from=pcre2 /pcre2 /
 COPY --from=libpng /libpng /
@@ -1544,6 +1580,7 @@ RUN DESTDIR=/swaybg ninja -C buildDir install
 
 # mako — notification daemon
 FROM toolchain AS mako
+COPY --from=libucontext /libucontext /
 COPY --from=wayland /wayland /
 COPY --from=cairo /cairo /
 COPY --from=pango /pango /
@@ -1626,6 +1663,7 @@ RUN DESTDIR=/slurp ninja -C buildDir install
 
 # swayidle — idle management
 FROM toolchain AS swayidle
+COPY --from=libucontext /libucontext /
 COPY --from=wayland /wayland /
 ARG SWAYIDLE_VERSION=1.8.0
 RUN mkdir -p /swayidle
@@ -1639,10 +1677,10 @@ RUN DESTDIR=/swayidle ninja -C buildDir install
 
 # X protocol libs — ly links libxcb (X11 session support) even in a Wayland setup
 FROM toolchain AS xorgproto
-ARG XORGPROTO_VERSION=2024.1
+ARG XORGPROTO_VERSION=2025.1
 RUN mkdir -p /xorgproto
 WORKDIR /build
-RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors https://gitlab.freedesktop.org/xorg/proto/xorgproto/-/archive/xorgproto-${XORGPROTO_VERSION}/xorgproto-xorgproto-${XORGPROTO_VERSION}.tar.gz -o xorgproto.tar.gz && tar -xf xorgproto.tar.gz && rm xorgproto.tar.gz && mv xorgproto-xorgproto-* xorgproto-src
+RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors https://github.com/X11Libre/mirror.fdo.xorgproto/archive/refs/tags/xorgproto-${XORGPROTO_VERSION}.tar.gz -o xorgproto.tar.gz && tar -xf xorgproto.tar.gz && rm xorgproto.tar.gz && mv mirror.fdo.xorgproto-* xorgproto-src
 WORKDIR /build/xorgproto-src
 RUN pip3 install meson ninja
 RUN meson setup buildDir ${COMMON_MESON_FLAGS}
@@ -1682,9 +1720,525 @@ RUN make -j$(nproc) && make install DESTDIR=/libxcb
 
 
 # ===========================================================================
+# XLibre + i3 display stack (selected with DESKTOP=i3)
+#
+# XLibre intentionally remains isolated from the Sway graph. The i3-rootfs
+# stage below is the only consumer, so BuildKit prunes this entire section from
+# the default DESKTOP=sway build.
+# ===========================================================================
+
+# X11 client/server libraries. Keep these in one cached stage: each package is
+# installed both into the live builder prefix (for the next package) and into
+# /x11-libs (the rootfs artifact). Protocol headers/libxcb come from the shared
+# stages above because ly also uses them in the Sway image.
+FROM toolchain AS x11-libs
+COPY --from=xorgproto /xorgproto /
+COPY --from=xcbproto /xcbproto /
+COPY --from=libxau /libxau /
+COPY --from=libxcb /libxcb /
+COPY --from=freetype /freetype /
+COPY --from=fontconfig /fontconfig /
+RUN mkdir -p /x11-libs
+WORKDIR /build
+
+ARG XTRANS_VERSION=1.6.0
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/xtrans-${XTRANS_VERSION}.tar.xz -o xtrans.tar.xz && \
+    tar -xf xtrans.tar.xz && cd xtrans-${XTRANS_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-docs && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBX11_VERSION=1.8.12
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libX11-${LIBX11_VERSION}.tar.xz -o libX11.tar.xz && \
+    tar -xf libX11.tar.xz && cd libX11-${LIBX11_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-specs --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBXEXT_VERSION=1.3.6
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libXext-${LIBXEXT_VERSION}.tar.xz -o libXext.tar.xz && \
+    tar -xf libXext.tar.xz && cd libXext-${LIBXEXT_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-specs --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBXRENDER_VERSION=0.9.12
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libXrender-${LIBXRENDER_VERSION}.tar.xz -o libXrender.tar.xz && \
+    tar -xf libXrender.tar.xz && cd libXrender-${LIBXRENDER_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBXFIXES_VERSION=6.0.1
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libXfixes-${LIBXFIXES_VERSION}.tar.xz -o libXfixes.tar.xz && \
+    tar -xf libXfixes.tar.xz && cd libXfixes-${LIBXFIXES_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBXDAMAGE_VERSION=1.1.6
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libXdamage-${LIBXDAMAGE_VERSION}.tar.xz -o libXdamage.tar.xz && \
+    tar -xf libXdamage.tar.xz && cd libXdamage-${LIBXDAMAGE_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBXCOMPOSITE_VERSION=0.4.6
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libXcomposite-${LIBXCOMPOSITE_VERSION}.tar.xz -o libXcomposite.tar.xz && \
+    tar -xf libXcomposite.tar.xz && cd libXcomposite-${LIBXCOMPOSITE_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBXRANDR_VERSION=1.5.4
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libXrandr-${LIBXRANDR_VERSION}.tar.xz -o libXrandr.tar.xz && \
+    tar -xf libXrandr.tar.xz && cd libXrandr-${LIBXRANDR_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBXI_VERSION=1.8.2
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libXi-${LIBXI_VERSION}.tar.xz -o libXi.tar.xz && \
+    tar -xf libXi.tar.xz && cd libXi-${LIBXI_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBXINERAMA_VERSION=1.1.5
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libXinerama-${LIBXINERAMA_VERSION}.tar.xz -o libXinerama.tar.xz && \
+    tar -xf libXinerama.tar.xz && cd libXinerama-${LIBXINERAMA_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBXCURSOR_VERSION=1.2.3
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libXcursor-${LIBXCURSOR_VERSION}.tar.xz -o libXcursor.tar.xz && \
+    tar -xf libXcursor.tar.xz && cd libXcursor-${LIBXCURSOR_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBXFT_VERSION=2.3.9
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libXft-${LIBXFT_VERSION}.tar.xz -o libXft.tar.xz && \
+    tar -xf libXft.tar.xz && cd libXft-${LIBXFT_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBXSS_VERSION=1.2.4
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libXScrnSaver-${LIBXSS_VERSION}.tar.xz -o libXScrnSaver.tar.xz && \
+    tar -xf libXScrnSaver.tar.xz && cd libXScrnSaver-${LIBXSS_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+# XLibre's mandatory font/XKB support libraries and the runtime xkb compiler.
+ARG LIBFONTENC_VERSION=1.1.8
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libfontenc-${LIBFONTENC_VERSION}.tar.xz -o libfontenc.tar.xz && \
+    tar -xf libfontenc.tar.xz && cd libfontenc-${LIBFONTENC_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBXFONT2_VERSION=2.0.7
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libXfont2-${LIBXFONT2_VERSION}.tar.xz -o libXfont2.tar.xz && \
+    tar -xf libXfont2.tar.xz && cd libXfont2-${LIBXFONT2_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-devel-docs --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBXKBFILE_VERSION=1.1.3
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libxkbfile-${LIBXKBFILE_VERSION}.tar.xz -o libxkbfile.tar.xz && \
+    tar -xf libxkbfile.tar.xz && cd libxkbfile-${LIBXKBFILE_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG XKBCOMP_VERSION=1.4.7
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/app/xkbcomp-${XKBCOMP_VERSION}.tar.xz -o xkbcomp.tar.xz && \
+    tar -xf xkbcomp.tar.xz && cd xkbcomp-${XKBCOMP_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+# DRM/modesetting support used by the XLibre server.
+RUN pip3 install meson ninja
+ARG LIBXCVT_VERSION=0.1.3
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libxcvt-${LIBXCVT_VERSION}.tar.xz -o libxcvt.tar.xz && \
+    tar -xf libxcvt.tar.xz && cd libxcvt-${LIBXCVT_VERSION} && \
+    meson setup buildDir ${COMMON_MESON_FLAGS} && \
+    ninja -C buildDir install && DESTDIR=/x11-libs ninja -C buildDir install
+
+ARG LIBPCIACCESS_VERSION=0.18.1
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libpciaccess-${LIBPCIACCESS_VERSION}.tar.xz -o libpciaccess.tar.xz && \
+    tar -xf libpciaccess.tar.xz && cd libpciaccess-${LIBPCIACCESS_VERSION} && \
+    meson setup buildDir ${COMMON_MESON_FLAGS} -Dzlib=disabled && \
+    ninja -C buildDir install && DESTDIR=/x11-libs ninja -C buildDir install
+
+ARG LIBXSHMFENCE_VERSION=1.3.3
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libxshmfence-${LIBXSHMFENCE_VERSION}.tar.xz -o libxshmfence.tar.xz && \
+    tar -xf libxshmfence.tar.xz && cd libxshmfence-${LIBXSHMFENCE_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+# i3's XCB utility dependencies.
+ARG XCB_UTIL_VERSION=0.4.1
+RUN curl -fL --retry 5 https://xcb.freedesktop.org/dist/xcb-util-${XCB_UTIL_VERSION}.tar.xz -o xcb-util.tar.xz && \
+    tar -xf xcb-util.tar.xz && cd xcb-util-${XCB_UTIL_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG XCB_UTIL_IMAGE_VERSION=0.4.1
+RUN curl -fL --retry 5 https://xcb.freedesktop.org/dist/xcb-util-image-${XCB_UTIL_IMAGE_VERSION}.tar.xz -o xcb-image.tar.xz && \
+    tar -xf xcb-image.tar.xz && cd xcb-util-image-${XCB_UTIL_IMAGE_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG XCB_UTIL_RENDERUTIL_VERSION=0.3.10
+RUN curl -fL --retry 5 https://xcb.freedesktop.org/dist/xcb-util-renderutil-${XCB_UTIL_RENDERUTIL_VERSION}.tar.xz -o xcb-renderutil.tar.xz && \
+    tar -xf xcb-renderutil.tar.xz && cd xcb-util-renderutil-${XCB_UTIL_RENDERUTIL_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG XCB_UTIL_CURSOR_VERSION=0.1.5
+RUN curl -fL --retry 5 https://xcb.freedesktop.org/dist/xcb-util-cursor-${XCB_UTIL_CURSOR_VERSION}.tar.xz -o xcb-cursor.tar.xz && \
+    tar -xf xcb-cursor.tar.xz && cd xcb-util-cursor-${XCB_UTIL_CURSOR_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG XCB_UTIL_KEYSYMS_VERSION=0.4.1
+RUN curl -fL --retry 5 https://xcb.freedesktop.org/dist/xcb-util-keysyms-${XCB_UTIL_KEYSYMS_VERSION}.tar.xz -o xcb-keysyms.tar.xz && \
+    tar -xf xcb-keysyms.tar.xz && cd xcb-util-keysyms-${XCB_UTIL_KEYSYMS_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG XCB_UTIL_WM_VERSION=0.4.2
+RUN curl -fL --retry 5 https://xcb.freedesktop.org/dist/xcb-util-wm-${XCB_UTIL_WM_VERSION}.tar.xz -o xcb-wm.tar.xz && \
+    tar -xf xcb-wm.tar.xz && cd xcb-util-wm-${XCB_UTIL_WM_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+# xcb-util-xrm uses the BSD queue macros. musl does not ship sys/queue.h, so
+# install the header-only compatibility pair from libbsd for this build graph.
+ARG LIBBSD_HEADERS_VERSION=0.12.2
+RUN curl -fL --retry 5 https://libbsd.freedesktop.org/releases/libbsd-${LIBBSD_HEADERS_VERSION}.tar.xz -o libbsd.tar.xz && \
+    tar -xf libbsd.tar.xz && \
+    mkdir -p /usr/include/sys /usr/include/bsd/sys /x11-libs/usr/include/sys /x11-libs/usr/include/bsd/sys && \
+    cp libbsd-${LIBBSD_HEADERS_VERSION}/include/bsd/sys/queue.h /usr/include/sys/queue.h && \
+    cp libbsd-${LIBBSD_HEADERS_VERSION}/include/bsd/sys/cdefs.h /usr/include/bsd/sys/cdefs.h && \
+    cp /usr/include/sys/queue.h /x11-libs/usr/include/sys/queue.h && \
+    cp /usr/include/bsd/sys/cdefs.h /x11-libs/usr/include/bsd/sys/cdefs.h
+
+ARG XCB_UTIL_XRM_VERSION=1.3
+RUN curl -fL --retry 5 https://github.com/Airblader/xcb-util-xrm/releases/download/v${XCB_UTIL_XRM_VERSION}/xcb-util-xrm-${XCB_UTIL_XRM_VERSION}.tar.gz -o xcb-xrm.tar.gz && \
+    tar -xf xcb-xrm.tar.gz && cd xcb-util-xrm-${XCB_UTIL_XRM_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG STARTUP_NOTIFICATION_VERSION=0.12
+RUN curl -fL --retry 5 https://www.freedesktop.org/software/startup-notification/releases/startup-notification-${STARTUP_NOTIFICATION_VERSION}.tar.gz -o startup-notification.tar.gz && \
+    tar -xf startup-notification.tar.gz && cd startup-notification-${STARTUP_NOTIFICATION_VERSION} && \
+    ./configure --quiet --prefix=/usr --enable-shared --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG LIBEV_VERSION=4.33
+RUN curl -fL --retry 5 https://dist.schmorp.de/libev/libev-${LIBEV_VERSION}.tar.gz -o libev.tar.gz && \
+    tar -xf libev.tar.gz && cd libev-${LIBEV_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+ARG YAJL_VERSION=2.1.0
+RUN curl -fL --retry 5 https://github.com/lloyd/yajl/archive/refs/tags/${YAJL_VERSION}.tar.gz -o yajl.tar.gz && \
+    tar -xf yajl.tar.gz && cd yajl-${YAJL_VERSION} && \
+    sed -i '/ADD_SUBDIRECTORY(test)/,$d' CMakeLists.txt && \
+    cmake -G Ninja -B buildDir -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=ON && \
+    ninja -C buildDir && ninja -C buildDir install && DESTDIR=/x11-libs ninja -C buildDir install
+
+ARG LIBXXF86VM_VERSION=1.1.7
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/lib/libXxf86vm-${LIBXXF86VM_VERSION}.tar.xz -o libXxf86vm.tar.xz && \
+    tar -xf libXxf86vm.tar.xz && cd libXxf86vm-${LIBXXF86VM_VERSION} && \
+    ./configure ${COMMON_CONFIGURE_ARGS} --disable-static && \
+    make -j"$(nproc)" && make install && make install DESTDIR=/x11-libs
+
+
+# libxkbcommon with its X11/XCB bridge (the Sway variant keeps the lean,
+# Wayland-only build from the earlier libxkb stage).
+FROM toolchain AS libxkb-x11
+COPY --from=xkeyboard-config /xkeyboard-config /
+COPY --from=xorgproto /xorgproto /
+COPY --from=xcbproto /xcbproto /
+COPY --from=libxau /libxau /
+COPY --from=libxcb /libxcb /
+ARG LIBXKBCOMMON_VERSION=1.13.0
+RUN mkdir -p /libxkb-x11
+WORKDIR /build
+RUN curl -fL https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-${LIBXKBCOMMON_VERSION}.tar.gz -o libxkbcommon.tar.gz && \
+    tar -xf libxkbcommon.tar.gz && mv libxkbcommon-* src
+WORKDIR /build/src
+RUN pip3 install meson ninja
+RUN meson setup buildDir ${COMMON_MESON_FLAGS} -Denable-x11=true -Denable-wayland=false -Denable-xkbregistry=true -Denable-bash-completion=false
+RUN DESTDIR=/libxkb-x11 ninja -C buildDir install
+
+
+# Mesa rebuilt for the X11 platform and DRI GLX. GPU retains the same vm/full
+# semantics as the Sway Mesa stage.
+FROM toolchain AS mesa-x11
+COPY --from=libdrm /libdrm /
+COPY --from=llvm-stack /llvm-out /llvm-out
+RUN rsync -aHAX --keep-dirlinks /llvm-out/. / && rm -rf /llvm-out
+COPY --from=xorgproto /xorgproto /
+COPY --from=xcbproto /xcbproto /
+COPY --from=libxau /libxau /
+COPY --from=libxcb /libxcb /
+COPY --from=x11-libs /x11-libs /
+ARG MESA_VERSION=25.3.0
+ARG GPU=vm
+RUN mkdir -p /mesa-x11
+WORKDIR /build
+RUN curl -fL https://archive.mesa3d.org/mesa-${MESA_VERSION}.tar.xz -o mesa.tar.xz && \
+    tar -xf mesa.tar.xz && mv mesa-* src
+WORKDIR /build/src
+RUN pip3 install meson ninja setuptools mako pyyaml
+RUN if [ "$GPU" = "full" ]; then \
+      DRV="iris,radeonsi,virgl,softpipe,svga"; LLVMOPT=true; RTTI=false; \
+    else \
+      DRV="virgl,softpipe,svga"; LLVMOPT=false; RTTI=true; \
+    fi; \
+    meson setup buildDir ${COMMON_MESON_FLAGS} -Dplatforms=x11 \
+      -Dgallium-drivers="$DRV" -Dglx=dri -Dopengl=true -Dgles1=enabled -Dgles2=enabled \
+      -Degl=enabled -Dvulkan-drivers= -Dllvm="$LLVMOPT" -Dcpp_rtti="$RTTI" -Dbuild-tests=false
+RUN DESTDIR=/mesa-x11 ninja -C buildDir install
+RUN if [ "$GPU" = "full" ]; then \
+      mkdir -p /mesa-x11/usr/lib && cp -a /usr/lib/libLLVM.so* /mesa-x11/usr/lib/ && cp -a /usr/lib/libelf.so* /mesa-x11/usr/lib/; \
+    fi
+
+
+FROM toolchain AS libepoxy-x11
+COPY --from=xorgproto /xorgproto /
+COPY --from=xcbproto /xcbproto /
+COPY --from=libxau /libxau /
+COPY --from=libxcb /libxcb /
+COPY --from=x11-libs /x11-libs /
+COPY --from=mesa-x11 /mesa-x11 /
+ARG LIBEPOXY_VERSION=1.5.10
+RUN mkdir -p /libepoxy-x11
+WORKDIR /build
+RUN curl -fL https://github.com/anholt/libepoxy/archive/refs/tags/${LIBEPOXY_VERSION}.tar.gz -o epoxy.tar.gz && \
+    tar -xf epoxy.tar.gz && mv libepoxy-* src
+WORKDIR /build/src
+RUN pip3 install meson ninja
+RUN meson setup buildDir ${COMMON_MESON_FLAGS} -Dglx=yes -Dx11=true -Degl=yes -Dtests=false
+RUN DESTDIR=/libepoxy-x11 ninja -C buildDir install
+
+
+# X11-enabled Cairo/Pango pair used by i3 and dunst. Keeping these separate
+# avoids adding libX11 dependencies to Sway's Cairo runtime.
+FROM toolchain AS cairo-x11
+COPY --from=xorgproto /xorgproto /
+COPY --from=xcbproto /xcbproto /
+COPY --from=libxau /libxau /
+COPY --from=libxcb /libxcb /
+COPY --from=x11-libs /x11-libs /
+COPY --from=pixman /pixman /
+COPY --from=freetype /freetype /
+COPY --from=fontconfig /fontconfig /
+COPY --from=libpng /libpng /
+COPY --from=pcre2 /pcre2 /
+COPY --from=glib2 /glib2 /
+ARG CAIRO_VERSION=1.18.4
+RUN mkdir -p /cairo-x11
+WORKDIR /build
+RUN curl -fL https://cairographics.org/releases/cairo-${CAIRO_VERSION}.tar.xz -o cairo.tar.xz && \
+    tar -xf cairo.tar.xz && mv cairo-* src
+WORKDIR /build/src
+RUN pip3 install meson ninja
+RUN meson setup buildDir ${COMMON_MESON_FLAGS} -Dtests=disabled -Dglib=enabled -Dspectre=disabled \
+    -Dfreetype=enabled -Dfontconfig=enabled -Dpng=enabled -Dxlib=enabled -Dxcb=enabled
+RUN DESTDIR=/cairo-x11 ninja -C buildDir install
+
+FROM toolchain AS pango-x11
+COPY --from=xorgproto /xorgproto /
+COPY --from=xcbproto /xcbproto /
+COPY --from=libxau /libxau /
+COPY --from=libxcb /libxcb /
+COPY --from=x11-libs /x11-libs /
+COPY --from=glib2 /glib2 /
+COPY --from=pcre2 /pcre2 /
+COPY --from=harfbuzz /harfbuzz /
+COPY --from=freetype /freetype /
+COPY --from=fontconfig /fontconfig /
+COPY --from=fribidi /fribidi /
+COPY --from=cairo-x11 /cairo-x11 /
+COPY --from=pixman /pixman /
+COPY --from=libpng /libpng /
+ARG PANGO_VERSION=1.54.0
+RUN mkdir -p /pango-x11
+WORKDIR /build
+RUN PANGO_MAJOR="${PANGO_VERSION%.*}" && curl -fL https://download.gnome.org/sources/pango/${PANGO_MAJOR}/pango-${PANGO_VERSION}.tar.xz -o pango.tar.xz && \
+    tar -xf pango.tar.xz && mv pango-* src
+WORKDIR /build/src
+RUN pip3 install meson ninja
+RUN meson setup buildDir ${COMMON_MESON_FLAGS} -Dintrospection=disabled -Dgtk_doc=false -Dfontconfig=enabled -Dfreetype=enabled -Dcairo=enabled
+RUN DESTDIR=/pango-x11 ninja -C buildDir install
+
+
+# XLibre X server. 25.2.0 is the current stable branch and includes the Xorg
+# modesetting DDX; only the external libinput DDX is needed below.
+FROM toolchain AS xlibre
+COPY --from=xorgproto /xorgproto /
+COPY --from=xcbproto /xcbproto /
+COPY --from=libxau /libxau /
+COPY --from=libxcb /libxcb /
+COPY --from=freetype /freetype /
+COPY --from=libucontext /libucontext /
+COPY --from=x11-libs /x11-libs /
+COPY --from=xkeyboard-config /xkeyboard-config /
+COPY --from=pixman /pixman /
+COPY --from=libdrm /libdrm /
+COPY --from=mesa-x11 /mesa-x11 /
+COPY --from=libepoxy-x11 /libepoxy-x11 /
+COPY --from=libseat /libseat /
+ARG XLIBRE_VERSION=25.2.0
+RUN mkdir -p /xlibre
+WORKDIR /build
+RUN curl -fL --retry 5 https://github.com/X11Libre/xserver/archive/refs/tags/xlibre-xserver-${XLIBRE_VERSION}.tar.gz -o xlibre.tar.gz && \
+    tar -xf xlibre.tar.gz && mv xserver-* src && \
+    sed -i '/#include <stddef.h>/a #include <sys/random.h>' src/os/osdep.h && \
+    sed -i 's/while (pos < len)/while (pos < nbytes)/; s/getrandom(buf + pos/getrandom((unsigned char *)buf + pos/' src/os/osdep.h
+WORKDIR /build/src
+RUN pip3 install meson ninja
+RUN meson setup buildDir ${COMMON_MESON_FLAGS} \
+      -Dxorg=true -Dxorg-sdk=true -Dxnest=false -Dxephyr=false -Dxfbdev=false -Dxvfb=true \
+      -Dglamor=true -Dgbm=true -Dglx=true -Dglx_dri=true \
+      -Ddri1=false -Ddri2=true -Ddri3=true -Ddrm=true \
+      -Dxdmcp=false -Dxdm-auth-1=false -Dint10=false -Dagp=false -Ddga=false \
+      -Dudev=true -Dudev_kms=true -Dsystemd_notify=false -Dsystemd_logind=false -Dseatd_libseat=true \
+      -Dsuid_wrapper=false -Dlisten_tcp=false -Dsha1=libcrypto -Dxselinux=false \
+      -Dxkb_dir=/usr/share/X11/xkb -Dxkb_output_dir=/var/lib/xkb -Dxkb_bin_dir=/usr/bin \
+      -Dxf86-input-inputtest=false -Dtests=false -Ddocs=false -Ddevel-docs=false
+RUN DESTDIR=/xlibre ninja -C buildDir install
+
+
+FROM toolchain AS xlibre-input-libinput
+COPY --from=xorgproto /xorgproto /
+COPY --from=libevdev /libevdev /
+COPY --from=libinput /libinput /
+COPY --from=libucontext /libucontext /
+COPY --from=pixman /pixman /
+COPY --from=freetype /freetype /
+COPY --from=x11-libs /x11-libs /
+COPY --from=xlibre /xlibre /
+ARG XLIBRE_INPUT_LIBINPUT_VERSION=25.0.1
+RUN mkdir -p /xlibre-input-libinput
+WORKDIR /build
+RUN curl -fL --retry 5 https://github.com/X11Libre/xf86-input-libinput/archive/refs/tags/xlibre-xf86-input-libinput-${XLIBRE_INPUT_LIBINPUT_VERSION}.tar.gz -o driver.tar.gz && \
+    tar -xf driver.tar.gz && mv xf86-input-libinput-* src
+WORKDIR /build/src
+RUN pip3 install meson ninja
+RUN meson setup buildDir ${COMMON_MESON_FLAGS}
+RUN DESTDIR=/xlibre-input-libinput ninja -C buildDir install
+
+
+FROM toolchain AS i3
+COPY --from=xorgproto /xorgproto /
+COPY --from=xcbproto /xcbproto /
+COPY --from=libxau /libxau /
+COPY --from=libxcb /libxcb /
+COPY --from=x11-libs /x11-libs /
+COPY --from=libxkb-x11 /libxkb-x11 /
+COPY --from=cairo-x11 /cairo-x11 /
+COPY --from=pango-x11 /pango-x11 /
+COPY --from=pixman /pixman /
+COPY --from=pcre2 /pcre2 /
+COPY --from=glib2 /glib2 /
+COPY --from=harfbuzz /harfbuzz /
+COPY --from=fribidi /fribidi /
+COPY --from=freetype /freetype /
+COPY --from=fontconfig /fontconfig /
+COPY --from=libpng /libpng /
+ARG I3_VERSION=4.25.1
+RUN mkdir -p /i3
+WORKDIR /build
+RUN curl -fL --retry 5 https://i3wm.org/downloads/i3-${I3_VERSION}.tar.xz -o i3.tar.xz && \
+    tar -xf i3.tar.xz && mv i3-* src
+WORKDIR /build/src
+RUN pip3 install meson ninja
+RUN meson setup buildDir ${COMMON_MESON_FLAGS} -Ddocs=false -Dmans=false
+RUN DESTDIR=/i3 ninja -C buildDir install
+
+
+# Native X11 desktop tools: xauth for Ly's X session cookie, st terminal, dmenu
+# launcher, xsel clipboard, and a tiny root-window color helper. These replace
+# foot/fuzzel/wl-clipboard/swaybg.
+FROM toolchain AS x11-desktop-tools
+COPY --from=xorgproto /xorgproto /
+COPY --from=xcbproto /xcbproto /
+COPY --from=libxau /libxau /
+COPY --from=libxcb /libxcb /
+COPY --from=x11-libs /x11-libs /
+COPY --from=freetype /freetype /
+COPY --from=fontconfig /fontconfig /
+COPY tools/hadron-xroot.c /build/hadron-xroot.c
+RUN mkdir -p /x11-desktop-tools/usr/bin
+WORKDIR /build
+ARG XAUTH_VERSION=1.1.5
+# xauth only uses XmuGetHostname from libXmuu; that function is a thin
+# gethostname(2) wrapper. Use libc directly instead of pulling libXt and the
+# rest of libXmu's legacy widget dependency chain into this small image.
+RUN curl -fL --retry 5 https://www.x.org/releases/individual/app/xauth-${XAUTH_VERSION}.tar.xz -o xauth.tar.xz && \
+    tar -xf xauth.tar.xz && cd xauth-${XAUTH_VERSION} && \
+    sed -i -e 's|#include <X11/Xmu/SysUtil.h>|#include <unistd.h>|' \
+           -e 's/XmuGetHostname/gethostname/' \
+           -e '/(void) gethostname (buf, maxlen);/a\    buf[maxlen - 1] = '\''\\0'\'';' parsedpy.c && \
+    XAUTH_CFLAGS="-I/usr/include $(pkg-config --cflags x11 xau xext)" \
+    XAUTH_LIBS="$(pkg-config --libs x11 xau xext)" \
+    ./configure ${COMMON_CONFIGURE_ARGS} && \
+    make -j"$(nproc)" && make install DESTDIR=/x11-desktop-tools
+
+ARG ST_VERSION=0.9.3
+RUN curl -fL --retry 5 https://dl.suckless.org/st/st-${ST_VERSION}.tar.gz -o st.tar.gz && \
+    tar -xf st.tar.gz && cd st-${ST_VERSION} && \
+    sed -i -e 's|^PREFIX = .*|PREFIX = /usr|' -e 's|^X11INC = .*|X11INC = /usr/include|' -e 's|^X11LIB = .*|X11LIB = /usr/lib|' config.mk && \
+    sed -i -e 's|Liberation Mono:pixelsize=12|DejaVu Sans Mono:pixelsize=15|' \
+           -e 's|static int borderpx = 2;|static int borderpx = 10;|' \
+           -e 's|char \*termname = "st-256color";|char *termname = "xterm-256color";|' \
+           -e 's|"gray90", /\* default foreground colour \*/|"#c0caf5", /* default foreground colour */|' \
+           -e 's|"black", /\* default background colour \*/|"#1a1b26", /* default background colour */|' config.def.h && \
+    make -j"$(nproc)" CC=cc && install -m0755 st /x11-desktop-tools/usr/bin/st
+
+ARG DMENU_VERSION=5.3
+RUN curl -fL --retry 5 https://dl.suckless.org/tools/dmenu-${DMENU_VERSION}.tar.gz -o dmenu.tar.gz && \
+    tar -xf dmenu.tar.gz && cd dmenu-${DMENU_VERSION} && \
+    sed -i -e 's|^PREFIX = .*|PREFIX = /usr|' -e 's|^X11INC = .*|X11INC = /usr/include|' -e 's|^X11LIB = .*|X11LIB = /usr/lib|' config.mk && \
+    make -j"$(nproc)" CC=cc && make install CC=cc DESTDIR=/x11-desktop-tools
+
+ARG XSEL_VERSION=1.2.1
+RUN curl -fL --retry 5 https://github.com/kfish/xsel/archive/refs/tags/${XSEL_VERSION}.tar.gz -o xsel.tar.gz && \
+    tar -xf xsel.tar.gz && cd xsel-${XSEL_VERSION} && \
+    autoreconf -fi && ./configure ${COMMON_CONFIGURE_ARGS} && \
+    make -j"$(nproc)" && make install DESTDIR=/x11-desktop-tools
+
+RUN cc -O2 -Wall -Wextra /build/hadron-xroot.c $(pkg-config --cflags --libs x11) -o /x11-desktop-tools/usr/bin/hadron-xroot
+
+
+# X11 notification daemon replacing mako.
+FROM toolchain AS dunst
+COPY --from=libucontext /libucontext /
+COPY --from=xorgproto /xorgproto /
+COPY --from=xcbproto /xcbproto /
+COPY --from=libxau /libxau /
+COPY --from=libxcb /libxcb /
+COPY --from=x11-libs /x11-libs /
+COPY --from=cairo-x11 /cairo-x11 /
+COPY --from=pango-x11 /pango-x11 /
+COPY --from=pixman /pixman /
+COPY --from=pcre2 /pcre2 /
+COPY --from=glib2 /glib2 /
+COPY --from=harfbuzz /harfbuzz /
+COPY --from=fribidi /fribidi /
+COPY --from=freetype /freetype /
+COPY --from=fontconfig /fontconfig /
+COPY --from=libpng /libpng /
+COPY --from=gdk-pixbuf /gdk-pixbuf /
+ARG DUNST_VERSION=1.13.0
+RUN mkdir -p /dunst
+WORKDIR /build
+RUN curl -fL --retry 5 https://github.com/dunst-project/dunst/archive/refs/tags/v${DUNST_VERSION}.tar.gz -o dunst.tar.gz && \
+    tar -xf dunst.tar.gz && mv dunst-* src
+WORKDIR /build/src
+RUN pip3 install meson ninja
+RUN meson setup buildDir ${COMMON_MESON_FLAGS} -Dx11=enabled -Dwayland=disabled -Ddunstify=disabled -Dsystemd=enabled -Ddocs=disabled
+RUN DESTDIR=/dunst ninja -C buildDir install
+
+
+# ===========================================================================
 # Login manager — ly (TUI display manager). Built with the prebuilt musl Zig
-# toolchain (Hadron's toolchain has no Zig). ly authenticates a user via PAM
-# and launches the Wayland session, giving it a logind seat session.
+# toolchain (Hadron's toolchain has no Zig). ly authenticates a user via PAM,
+# creates the logind session, and launches either Wayland directly or XLibre
+# plus the selected X session.
 # ===========================================================================
 FROM toolchain AS ly
 COPY --from=libxcb /libxcb /
@@ -1719,7 +2273,7 @@ RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors "https://codeberg.org/
 # ===========================================================================
 FROM alpine:3 AS firmware
 ARG FIRMWARE=false
-RUN mkdir -p /firmware/usr/lib/firmware
+RUN mkdir -p /firmware/usr/local/lib/firmware
 RUN if [ "$FIRMWARE" = "true" ]; then \
       apk add --no-cache git && \
       git clone --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git /lf && \
@@ -1727,7 +2281,7 @@ RUN if [ "$FIRMWARE" = "true" ]; then \
         iwlwifi-*.ucode iwlwifi-*.pnvm ath10k ath11k ath12k ath9k_htc \
         rtw88 rtw89 rtlwifi rtl_bt rtl_nic brcm mrvl mediatek \
         intel/ibt-* qca i915 amdgpu nvidia regulatory.db regulatory.db.p7s ; do \
-          cp -a --parents $p /firmware/usr/lib/firmware/ 2>/dev/null || true ; \
+          cp -a --parents $p /firmware/usr/local/lib/firmware/ 2>/dev/null || true ; \
       done ; \
     fi
 
@@ -1739,6 +2293,7 @@ RUN if [ "$FIRMWARE" = "true" ]; then \
 FROM scratch AS sway-rootfs
 COPY --from=wayland /wayland /
 COPY --from=libdrm /libdrm /
+COPY --from=libucontext /libucontext /
 COPY --from=mesa /mesa /
 COPY --from=xkeyboard-config /xkeyboard-config /
 COPY --from=libxkb /libxkb /
@@ -1811,9 +2366,80 @@ COPY --from=libxcb /libxcb /
 COPY --from=ly /ly /
 
 
+# XLibre/i3 root. This mirrors the shared networking/audio/container-facing
+# runtime from sway-rootfs but swaps every display-specific artifact.
+FROM scratch AS i3-rootfs
+COPY --from=libdrm /libdrm /
+COPY --from=libucontext /libucontext /
+COPY --from=mesa-x11 /mesa-x11 /
+COPY --from=xkeyboard-config /xkeyboard-config /
+COPY --from=libxkb-x11 /libxkb-x11 /
+COPY --from=pixman /pixman /
+COPY --from=libevdev /libevdev /
+COPY --from=libinput /libinput /
+COPY --from=hwdata /hwdata /
+COPY --from=cairo-x11 /cairo-x11 /
+COPY --from=pcre2 /pcre2 /
+COPY --from=glib2 /glib2 /
+COPY --from=freetype /freetype /
+COPY --from=harfbuzz /harfbuzz /
+COPY --from=fribidi /fribidi /
+COPY --from=fontconfig /fontconfig /
+COPY --from=pango-x11 /pango-x11 /
+COPY --from=libpng /libpng /
+COPY --from=gdk-pixbuf /gdk-pixbuf /
+COPY --from=libseat /libseat /
+# XLibre server, input DDX, client libraries, and i3-native desktop tools.
+COPY --from=xorgproto /xorgproto /
+COPY --from=libxau /libxau /
+COPY --from=libxcb /libxcb /
+COPY --from=x11-libs /x11-libs /
+COPY --from=libepoxy-x11 /libepoxy-x11 /
+COPY --from=xlibre /xlibre /
+COPY --from=xlibre-input-libinput /xlibre-input-libinput /
+COPY --from=i3 /i3 /
+COPY --from=x11-desktop-tools /x11-desktop-tools /
+COPY --from=dunst /dunst /
+# M2: networking
+COPY --from=libnl /libnl /
+COPY --from=wpa-supplicant /wpa /
+COPY --from=hostapd /hostapd /
+COPY --from=libndp /libndp /
+COPY --from=networkmanager /networkmanager /
+COPY --from=wireless-regdb /wireless-regdb /
+COPY --from=ncurses /ncurses /
+# M3: audio
+COPY --from=alsa-lib /alsa-lib /
+COPY --from=alsa-ucm-conf /alsa-ucm-conf /
+COPY --from=pipewire /pipewire /
+COPY --from=wireplumber /wireplumber /
+# M4: bluetooth
+COPY --from=sbc /sbc /
+COPY --from=bluez /bluez /
+# Shared visual assets + login manager.
+COPY --from=nerdfont /nerdfont /
+COPY --from=ly /ly /
+
+
+# Static configuration is also selected as a rootfs stage. rootfs/ is shared;
+# the overlay contains only files for the chosen session, so the i3 image never
+# advertises a broken Sway session (and vice versa).
+FROM scratch AS common-config
+COPY rootfs/ /
+
+FROM common-config AS sway-config
+COPY rootfs-sway/ /
+
+FROM common-config AS i3-config
+COPY rootfs-i3/ /
+
+FROM ${DESKTOP}-rootfs AS desktop-rootfs
+FROM ${DESKTOP}-config AS desktop-config
+
+
 FROM ${BASE_IMAGE} AS default
 # Built desktop stack
-COPY --from=sway-rootfs / /
+COPY --from=desktop-rootfs / /
 # Runtime libraries provided by the toolchain but not the base image
 COPY --from=toolchain /usr/lib/libffi.so* /usr/lib/
 COPY --from=toolchain /usr/lib/libexpat.so* /usr/lib/
@@ -1852,27 +2478,27 @@ COPY --from=docker /docker /
 COPY --from=distrobox /distrobox /
 # M6: optional real-hardware firmware (empty unless FIRMWARE=true)
 COPY --from=firmware /firmware /
-# Static config / launch layer
-COPY rootfs/ /
+# Shared + selected session config / launch layer
+COPY --from=desktop-config / /
 # System setup. NOTE: no user is created here — the desktop user is defined at
 # install time via a Kairos cloud-config (see cloud-config.yaml) and lives on
 # the persistent /home. We only ensure the groups it will join exist, enable
 # the system services, and configure the ly display manager on tty1.
 RUN ldconfig 2>/dev/null || true; \
-    # Register the bundled Nerd Font symbols so waybar/foot resolve the glyphs.
+    # Register the bundled fonts for the selected bar, terminal, and launcher.
     fc-cache -f 2>/dev/null || true; \
     for g in audio video render input bluetooth seat docker; do groupadd -f "$g"; done; \
-    mkdir -p /var/lib/docker; \
-    # start-sway lives in /usr/bin (NOT /usr/local): Kairos mounts /usr/local
+    mkdir -p /var/lib/docker /var/lib/xkb; \
+    # The selected session launcher lives in /usr/bin (NOT /usr/local): Kairos mounts /usr/local
     # from the persistent partition on the installed system, which shadows
     # anything baked into the image there — ly would exec a missing launcher and
-    # bounce straight back to the login screen. sway-install stays in
+    # bounce straight back to the login screen. hadron-install stays in
     # /usr/local/bin since it only runs at install time (live, /usr/local intact).
-    chmod +x /usr/bin/start-sway /usr/bin/sway-wifi-menu /usr/bin/sway-audio-menu /usr/local/bin/sway-install; \
+    chmod +x /usr/bin/start-desktop /usr/bin/hadron-* /usr/local/bin/hadron-install; \
     # ly runs on tty1 via the ly@tty1 instance of the ly@.service template (ly
     # 1.3.x dropped the plain ly.service and the config `tty` option — the tty is
     # the systemd instance). It authenticates the cloud-config user and launches
-    # the Sway session via the session entry.
+    # the selected Sway or i3 session via its desktop entry.
     # Tokyo Night theme for ly + the "Black Hole" .dur animation from ly's README
     # as the login background (full_color must stay on for the 256-colour file).
     sed -i \
@@ -1886,6 +2512,13 @@ RUN ldconfig 2>/dev/null || true; \
       -e 's/^box_title = .*/box_title = Hadron Desktop/' \
       -e 's/^clock = .*/clock = %H:%M/' \
       /etc/ly/config.ini 2>/dev/null || true; \
+    # XLibre's libseat integration is initialized before its later automatic
+    # controlling-TTY detection. Rootless X sessions therefore must pass
+    # -keeptty explicitly; otherwise libseat is disabled and XLibre falls back
+    # to opening /dev/ttyN itself, which fails for the authenticated user.
+    if [ -x /usr/bin/Xorg ]; then \
+      sed -i 's|^x_cmd = .*|x_cmd = /usr/bin/X -keeptty|' /etc/ly/config.ini; \
+    fi; \
     # ly's unit ships only `Alias=display-manager.service` (no WantedBy=), so a
     # plain `systemctl enable` never pulls it into a target. And Kairos forces
     # `systemctl set-default multi-user.target` at boot, so graphical.target
@@ -1907,11 +2540,14 @@ RUN ldconfig 2>/dev/null || true; \
     # never starts and bluetoothctl hangs on "waiting for bluetoothd".
     systemctl enable bluetooth.service 2>/dev/null || true; \
     ln -sf /usr/lib/systemd/system/bluetooth.service /etc/systemd/system/multi-user.target.wants/bluetooth.service; \
-    # Docker: rootful daemon. enable links it for multi-user; Kairos forces that
-    # target and shadows baked enablement on /etc, so also symlink it directly
-    # (the installed system re-applies this via the 92_docker.yaml oem boot stage).
-    systemctl enable docker.socket docker.service 2>/dev/null || true; \
-    ln -sf /usr/lib/systemd/system/docker.service /etc/systemd/system/multi-user.target.wants/docker.service; \
+    # Docker must stay disabled in the baked filesystem: the live installer's
+    # /var is itself an overlayfs, so starting dockerd there would make overlay2
+    # repeatedly fail its nested-overlay check. The guarded 92_docker.yaml boot
+    # stage enables and starts Docker only on the installed system, after Kairos
+    # has bind-mounted persistent /var/lib/docker.
+    systemctl disable docker.socket docker.service 2>/dev/null || true; \
+    rm -f /etc/systemd/system/sockets.target.wants/docker.socket \
+      /etc/systemd/system/multi-user.target.wants/docker.service; \
     # Boot splash: the base image ships /usr/bin/hadron-splash (animated "HADRON"
     # ASCII, self-limits to ~5s). Pull it into multi-user.target like ly; the unit
     # is ordered Before=ly@tty1.service so it renders on tty1 before the login.
@@ -1971,5 +2607,5 @@ RUN sed -i '/^loadfont unicode/a set color_normal=light-gray/black\nset color_hi
 # (hadron-theme/ isn't written by kairos-init, so its COPY at line ~1982 survives.)
 COPY rootfs/etc/kairos/branding/grubmenu.cfg /etc/kairos/branding/grubmenu.cfg
 # kairos-init regenerates /etc/motd (and may touch /etc/issue); re-apply the
-# branded console banners on top.
-COPY rootfs/etc/issue rootfs/etc/motd /etc/
+# branded console banners from the selected desktop overlay on top.
+COPY --from=desktop-config /etc/issue /etc/motd /etc/

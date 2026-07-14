@@ -1,0 +1,15 @@
+#!/bin/sh
+# Sway session launcher used by the display manager (ly): source the desktop
+# environment, then exec the compositor inside a D-Bus session.
+#
+# The session bus is required for waybar's SNI system tray (StatusNotifier lives
+# on the session bus) and for the PipeWire/WirePlumber audio stack. ly does not
+# spin up a systemd user session with a bus, so we start one here with
+# dbus-run-session unless something upstream already provided one.
+[ -f /etc/sway-desktop/env ] && . /etc/sway-desktop/env
+[ -f /etc/sway-desktop/env.local ] && . /etc/sway-desktop/env.local
+
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    exec dbus-run-session -- sway
+fi
+exec sway
