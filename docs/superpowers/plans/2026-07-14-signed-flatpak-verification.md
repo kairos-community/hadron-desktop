@@ -680,7 +680,7 @@ if grep -F -- '--no-gpg-verify' "$dockerfile"; then
     exit 1
 fi
 grep -F '/usr/share/hadron/flathub.flatpakrepo' "$dockerfile" >/dev/null
-grep -F 'remotes --system --show-details --columns=name,url,options' \
+grep -F 'remotes --system --columns=name,url,options' \
     "$dockerfile" >/dev/null
 grep -F 'flatpak-refs.tsv' "$dockerfile" >/dev/null
 
@@ -723,8 +723,7 @@ RUN commit="$(cat /src/chromium.commit)" && \
     gpgconf --list-components | grep -E '^gpg:OpenPGP:' >/dev/null && \
     flatpak --system remote-add flathub \
       /usr/share/hadron/flathub.flatpakrepo && \
-    details="$(flatpak remotes --system --show-details \
-      --columns=name,url,options)" && \
+    details="$(flatpak remotes --system --columns=name,url,options)" && \
     printf '%s\n' "$details" | awk -F '\t' \
       '$1 == "flathub" && $2 == "https://dl.flathub.org/repo/" && \
        $3 !~ /no-gpg-verify/ { found=1 } END { exit !found }' && \
@@ -745,6 +744,11 @@ RUN commit="$(cat /src/chromium.commit)" && \
       END { exit (NR == 0 || bad) }' \
       /etc/hadron-agent-test/flatpak-refs.tsv
 ```
+
+Flatpak 1.16.6 must not receive `--show-details` with this projection: that
+flag overrides `--columns` and shifts URL/options away from fields 2 and 3.
+The explicit three-column command above preserves the intended signed-state
+assertion.
 
 Do not add `--if-not-exists`: a same-named ambient remote must make this deterministic test build fail instead of bypassing the descriptor.
 
@@ -835,8 +839,7 @@ Run:
 docker run --rm -i hadron-agent-compat:test sh -eu -s <<'CONTAINER'
 test -x /usr/local/libexec/hadron-cua-gtk-fixture
 gpgconf --list-components | grep -E "^gpg:OpenPGP:" >/dev/null
-details=$(flatpak remotes --system --show-details \
-  --columns=name,url,options)
+details=$(flatpak remotes --system --columns=name,url,options)
 printf "%s\n" "$details" | awk -F "\t" '
   $1 == "flathub" && $2 == "https://dl.flathub.org/repo/" &&
   $3 !~ /no-gpg-verify/ { found=1 }
