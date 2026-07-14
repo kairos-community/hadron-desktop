@@ -1,0 +1,788 @@
+// Command cua-compat-probe drives cua-driver over MCP against the real
+// XLibre/i3 compatibility session and records, per capability, whether Cua can
+// control the desktop. It is test-only: it is compiled solely inside
+// test/agent/Dockerfile.compat (never on the host, never in the production
+// agent image) and is exec'd by the i3 config drop-in at
+// etc/i3/config.d/99-cua-compat.conf.
+//
+// The probe writes three artifacts the Task 4 collector waits on, all under
+// /run/user/1000/hadron-cua-compat: result.json (the typed probe.Result),
+// cua-desktop.png (a full-display Cua capture), and result.status (exactly
+// PASS or FAIL, written last). All writes are atomic (temp file + rename).
+//
+// Assertion channels are deliberately narrow and never cheat: GTK state is read
+// only from the fixture's own state file, and Chromium state is read only from
+// a fresh AT-SPI tree — never via JavaScript, CDP, or DevTools.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/mudler/hadron-desktop/agent/internal/cua"
+	"github.com/mudler/hadron-desktop/agent/internal/probe"
+)
+
+const (
+	runtimeDir    = "/run/user/1000/hadron-cua-compat"
+	gtkStatePath  = "/run/user/1000/hadron-cua-gtk-state.json"
+	driverBinary  = "/usr/bin/cua-driver"
+	gtkTitle      = "Hadron Cua GTK Fixture"
+	chromiumTitle = "Hadron Cua Chromium Fixture"
+
+	deliveryForeground = "foreground"
+	typedText          = "hadron"
+	namedKey           = "F5"
+	chromiumTypedText  = "cua"
+
+	overallTimeout   = 180 * time.Second
+	discoveryTimeout = 90 * time.Second
+	callTimeout      = 60 * time.Second
+	settleTimeout    = 8 * time.Second
+	pollInterval     = 250 * time.Millisecond
+)
+
+// driverEnv is the opt-out environment appended to the cua-driver child: no
+// telemetry, no update check, and full AT-SPI advertisement so the fixtures'
+// accessibility trees are reachable.
+var driverEnv = []string{
+	"CUA_DRIVER_RS_TELEMETRY_ENABLED=false",
+	"CUA_DRIVER_RS_UPDATE_CHECK=false",
+	"CUA_DRIVER_RS_A11Y_ADVERTISE_MODE=all",
+}
+
+// GTK drag endpoints in window-local pixels, used only as a fallback when the
+// AT-SPI tree does not report usable bounds for the drag source/target. They
+// match the fixture's fixed 900x640 layout (see fixtures/gtk3/main.c): the drag
+// source sits at (40,420) 150x80 and the target at (520,420) 150x80. All other
+// GTK actions address elements by AT-SPI index, so they stay correct even when
+// i3 tiles and resizes the window.
+const (
+	gtkDragFromX = 115
+	gtkDragFromY = 460
+	gtkDragToX   = 595
+	gtkDragToY   = 460
+)
+
+func main() {
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.SetPrefix("cua-compat-probe: ")
+
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		log.Fatalf("creating runtime dir: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), overallTimeout)
+	defer cancel()
+
+	var result probe.Result
+	pngPath := filepath.Join(runtimeDir, "cua-desktop.png")
+
+	runProbe(ctx, &result, pngPath)
+
+	if err := writeArtifacts(result, pngPath); err != nil {
+		log.Fatalf("writing artifacts: %v", err)
+	}
+	log.Printf("done: status=%s result=%+v", statusFor(result), result)
+}
+
+// runProbe fills result in place. Every step is best-effort: a failure in one
+// capability leaves its field false and the probe continues, so result.json
+// always reflects the full matrix.
+func runProbe(ctx context.Context, result *probe.Result, pngPath string) {
+	result.Environment = checkEnvironment()
+	if !result.Environment {
+		log.Printf("environment check failed; continuing so the failure is recorded")
+	}
+
+	client, err := cua.Start(ctx, cua.Options{
+		Binary: driverBinary,
+		Args:   []string{"mcp", "--no-daemon-relaunch"},
+		Env:    driverEnv,
+	})
+	if err != nil {
+		log.Printf("starting cua-driver: %v", err)
+		return
+	}
+	defer func() {
+		if cerr := client.Close(); cerr != nil {
+			log.Printf("closing cua-driver: %v", cerr)
+		}
+	}()
+
+	p := &prober{client: client, ctx: ctx}
+
+	result.DesktopCapture = p.captureDesktop(pngPath)
+
+	gtk, chromium, found := p.discoverWindows()
+	result.WindowDiscovery = found
+	if !found {
+		log.Printf("did not discover both fixture windows within %s", discoveryTimeout)
+	}
+
+	if gtk != nil {
+		p.exerciseGTK(result, *gtk)
+	}
+	if chromium != nil {
+		p.exerciseChromium(result, *chromium)
+	}
+}
+
+type prober struct {
+	client *cua.Client
+	ctx    context.Context
+}
+
+// call invokes an MCP tool and treats a tool-reported error (IsError) as a
+// failure so callers do not misread an error payload as success.
+func (p *prober) call(name string, args map[string]any) (*mcp.CallToolResult, error) {
+	ctx, cancel := context.WithTimeout(p.ctx, callTimeout)
+	defer cancel()
+
+	res, err := p.client.Call(ctx, name, args)
+	if err != nil {
+		return nil, fmt.Errorf("calling %s: %w", name, err)
+	}
+	if res.IsError {
+		return res, fmt.Errorf("tool %s reported error: %s", name, contentText(res))
+	}
+	return res, nil
+}
+
+// captureDesktop writes the full-display PNG that the collector waits on and
+// the Task 6 framebuffer comparison consumes. It writes to a temp path Cua owns
+// and renames it into place so the final artifact appears atomically.
+func (p *prober) captureDesktop(pngPath string) bool {
+	tmp := pngPath + ".tmp"
+	_ = os.Remove(tmp)
+	if _, err := p.call("get_desktop_state", map[string]any{
+		"screenshot_out_file": tmp,
+	}); err != nil {
+		log.Printf("get_desktop_state: %v", err)
+		return false
+	}
+	if !nonEmptyFile(tmp) {
+		log.Printf("get_desktop_state produced no PNG at %s", tmp)
+		_ = os.Remove(tmp)
+		return false
+	}
+	if err := os.Rename(tmp, pngPath); err != nil {
+		log.Printf("renaming desktop PNG: %v", err)
+		_ = os.Remove(tmp)
+		return false
+	}
+	return true
+}
+
+type windowRecord struct {
+	WindowID   uint64 `json:"window_id"`
+	PID        int    `json:"pid"`
+	AppName    string `json:"app_name"`
+	Title      string `json:"title"`
+	IsOnScreen bool   `json:"is_on_screen"`
+}
+
+type listWindowsOutput struct {
+	Windows []windowRecord `json:"windows"`
+}
+
+// discoverWindows polls list_windows until both fixture windows are visible or
+// the discovery timeout elapses. Fixtures are launched asynchronously by i3, so
+// a window may not exist on the first read.
+func (p *prober) discoverWindows() (gtk, chromium *windowRecord, found bool) {
+	deadline := time.Now().Add(discoveryTimeout)
+	for {
+		res, err := p.call("list_windows", map[string]any{})
+		if err != nil {
+			log.Printf("list_windows: %v", err)
+		} else {
+			var out listWindowsOutput
+			if derr := decodeStructured(res, &out); derr != nil {
+				log.Printf("decoding list_windows: %v", derr)
+			} else {
+				gtk, chromium = matchFixtureWindows(out.Windows)
+			}
+		}
+		if gtk != nil && chromium != nil {
+			return gtk, chromium, true
+		}
+		if time.Now().After(deadline) {
+			return gtk, chromium, false
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+func matchFixtureWindows(windows []windowRecord) (gtk, chromium *windowRecord) {
+	for i := range windows {
+		w := windows[i]
+		switch {
+		case w.Title == gtkTitle && gtk == nil:
+			g := w
+			gtk = &g
+		case strings.Contains(w.Title, chromiumTitle) && chromium == nil:
+			c := w
+			chromium = &c
+		}
+	}
+	return gtk, chromium
+}
+
+type frame struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+	W int `json:"w"`
+	H int `json:"h"`
+}
+
+type element struct {
+	ElementIndex int    `json:"element_index"`
+	Role         string `json:"role"`
+	Label        string `json:"label"`
+	Value        string `json:"value"`
+	Frame        *frame `json:"frame"`
+}
+
+type windowStateOutput struct {
+	Elements []element `json:"elements"`
+	Degraded bool      `json:"degraded"`
+}
+
+func (p *prober) windowState(w windowRecord) (windowStateOutput, error) {
+	res, err := p.call("get_window_state", map[string]any{
+		"pid":                w.PID,
+		"window_id":          w.WindowID,
+		"include_screenshot": false,
+	})
+	if err != nil {
+		return windowStateOutput{}, err
+	}
+	var out windowStateOutput
+	if derr := decodeStructured(res, &out); derr != nil {
+		return windowStateOutput{}, derr
+	}
+	return out, nil
+}
+
+// gtkState mirrors the JSON the GTK fixture writes to gtkStatePath and the
+// Chromium fixture renders into its visible #state element.
+type gtkState struct {
+	Clicks       int    `json:"clicks"`
+	DoubleClicks int    `json:"double_clicks"`
+	Text         string `json:"text"`
+	Key          string `json:"key"`
+	Dragged      bool   `json:"dragged"`
+	ScrollValue  int    `json:"scroll_value"`
+}
+
+func (p *prober) exerciseGTK(result *probe.Result, gtk windowRecord) {
+	// Capture the window PNG first, then take the action snapshot LAST so its
+	// AT-SPI element indices stay live (Cua's element cache is replaced by the
+	// next get_window_state of the same window).
+	result.WindowCapture = p.captureWindow(gtk)
+
+	if _, err := p.call("bring_to_front", map[string]any{
+		"pid":       gtk.PID,
+		"window_id": gtk.WindowID,
+	}); err != nil {
+		log.Printf("bring_to_front(gtk): %v", err)
+	} else {
+		result.EWMHActivation = true
+	}
+
+	snap, err := p.windowState(gtk)
+	if err != nil {
+		log.Printf("gtk get_window_state: %v", err)
+		return
+	}
+	result.GTKAccessibility = !snap.Degraded &&
+		hasLabel(snap.Elements, "Click count") &&
+		hasLabel(snap.Elements, "Text input") &&
+		hasLabel(snap.Elements, "Scrollable rows")
+
+	base, err := readGTKState()
+	if err != nil {
+		log.Printf("reading baseline GTK state: %v", err)
+		return
+	}
+
+	// Click the counter button by AT-SPI index. xtest confirms the synthetic
+	// input landed at all; gtk_click confirms it registered as exactly one click.
+	if el, ok := findLabel(snap.Elements, "Click count"); ok {
+		if err := p.clickElement(gtk, el.ElementIndex); err != nil {
+			log.Printf("gtk click: %v", err)
+		}
+	} else {
+		log.Printf("gtk: no 'Click count' element found")
+	}
+	after := p.awaitGTK(func(s gtkState) bool { return s.Clicks > base.Clicks })
+	result.XTest = after.Clicks > base.Clicks
+	result.GTKClick = after.Clicks == base.Clicks+1
+
+	// Double click the double-click box by AT-SPI index.
+	if el, ok := findLabel(snap.Elements, "Double click count"); ok {
+		if _, err := p.call("double_click", map[string]any{
+			"pid":           gtk.PID,
+			"window_id":     gtk.WindowID,
+			"element_index": el.ElementIndex,
+			"delivery_mode": deliveryForeground,
+		}); err != nil {
+			log.Printf("gtk double_click: %v", err)
+		}
+	} else {
+		log.Printf("gtk: no 'Double click count' element found")
+	}
+	after = p.awaitGTK(func(s gtkState) bool { return s.DoubleClicks > base.DoubleClicks })
+	result.GTKDoubleClick = after.DoubleClicks > base.DoubleClicks
+
+	// Scroll the scrollable list by AT-SPI index.
+	if el, ok := findLabel(snap.Elements, "Scrollable rows"); ok {
+		if _, err := p.call("scroll", map[string]any{
+			"pid":           gtk.PID,
+			"window_id":     gtk.WindowID,
+			"element_index": el.ElementIndex,
+			"direction":     "down",
+			"by":            "line",
+			"amount":        5,
+			"delivery_mode": deliveryForeground,
+		}); err != nil {
+			log.Printf("gtk scroll: %v", err)
+		}
+	} else {
+		log.Printf("gtk: no 'Scrollable rows' element found")
+	}
+	after = p.awaitGTK(func(s gtkState) bool { return s.ScrollValue > base.ScrollValue })
+	result.GTKScroll = after.ScrollValue > base.ScrollValue
+
+	// Drag from the source box onto the drop target. drag has no element-index
+	// form, so use AT-SPI window-local frame centres when available and fall
+	// back to the fixture's fixed layout otherwise.
+	fromX, fromY, toX, toY := gtkDragEndpoints(snap.Elements)
+	if _, err := p.call("drag", map[string]any{
+		"pid":           gtk.PID,
+		"window_id":     gtk.WindowID,
+		"from_x":        fromX,
+		"from_y":        fromY,
+		"to_x":          toX,
+		"to_y":          toY,
+		"delivery_mode": deliveryForeground,
+	}); err != nil {
+		log.Printf("gtk drag: %v", err)
+	}
+	after = p.awaitGTK(func(s gtkState) bool { return s.Dragged })
+	result.GTKDrag = after.Dragged
+
+	// Type into the entry: focus it by AT-SPI index, then type via the focused
+	// window.
+	if el, ok := findLabel(snap.Elements, "Text input"); ok {
+		if err := p.clickElement(gtk, el.ElementIndex); err != nil {
+			log.Printf("gtk focus entry: %v", err)
+		}
+	} else {
+		log.Printf("gtk: no 'Text input' element found")
+	}
+	if _, err := p.call("type_text", map[string]any{
+		"pid":           gtk.PID,
+		"window_id":     gtk.WindowID,
+		"text":          typedText,
+		"delivery_mode": deliveryForeground,
+	}); err != nil {
+		log.Printf("gtk type_text: %v", err)
+	}
+	after = p.awaitGTK(func(s gtkState) bool { return s.Text == typedText })
+	result.GTKType = after.Text == typedText
+
+	// Named key press (last, so it is the final key recorded).
+	if _, err := p.call("press_key", map[string]any{
+		"pid":           gtk.PID,
+		"window_id":     gtk.WindowID,
+		"key":           namedKey,
+		"delivery_mode": deliveryForeground,
+	}); err != nil {
+		log.Printf("gtk press_key: %v", err)
+	}
+	after = p.awaitGTK(func(s gtkState) bool { return s.Key == namedKey })
+	result.GTKNamedKey = after.Key == namedKey
+}
+
+// gtkDragEndpoints returns the drag source and target centres in window-local
+// pixels, preferring AT-SPI frame bounds and falling back to the fixture's
+// fixed layout.
+func gtkDragEndpoints(elements []element) (fromX, fromY, toX, toY int) {
+	fromX, fromY, toX, toY = gtkDragFromX, gtkDragFromY, gtkDragToX, gtkDragToY
+	if el, ok := findLabel(elements, "Drag source"); ok && el.Frame != nil {
+		fromX = el.Frame.X + el.Frame.W/2
+		fromY = el.Frame.Y + el.Frame.H/2
+	}
+	if el, ok := findLabel(elements, "Drag target"); ok && el.Frame != nil {
+		toX = el.Frame.X + el.Frame.W/2
+		toY = el.Frame.Y + el.Frame.H/2
+	}
+	return fromX, fromY, toX, toY
+}
+
+// clickElement issues a foreground click on an AT-SPI element by index.
+func (p *prober) clickElement(w windowRecord, index int) error {
+	_, err := p.call("click", map[string]any{
+		"pid":           w.PID,
+		"window_id":     w.WindowID,
+		"element_index": index,
+		"delivery_mode": deliveryForeground,
+	})
+	return err
+}
+
+func (p *prober) captureWindow(w windowRecord) bool {
+	tmp := filepath.Join(runtimeDir, ".cua-window.png.tmp")
+	_ = os.Remove(tmp)
+	defer os.Remove(tmp)
+	if _, err := p.call("get_window_state", map[string]any{
+		"pid":                 w.PID,
+		"window_id":           w.WindowID,
+		"screenshot_out_file": tmp,
+	}); err != nil {
+		log.Printf("window capture get_window_state: %v", err)
+		return false
+	}
+	return nonEmptyFile(tmp)
+}
+
+// awaitGTK polls the GTK fixture state file until predicate holds or the settle
+// timeout elapses, returning the last state observed.
+func (p *prober) awaitGTK(predicate func(gtkState) bool) gtkState {
+	deadline := time.Now().Add(settleTimeout)
+	var last gtkState
+	for {
+		s, err := readGTKState()
+		if err == nil {
+			last = s
+			if predicate(s) {
+				return s
+			}
+		}
+		if time.Now().After(deadline) {
+			return last
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+func (p *prober) exerciseChromium(result *probe.Result, chromium windowRecord) {
+	state, err := p.windowState(chromium)
+	if err != nil {
+		log.Printf("chromium get_window_state: %v", err)
+		return
+	}
+	result.ChromiumAccessibility = !state.Degraded &&
+		hasLabel(state.Elements, "Click count") &&
+		hasLabel(state.Elements, "Text input") &&
+		hasLabel(state.Elements, "Fixture state")
+
+	// Click the fixture's click button by AT-SPI element index, then confirm the
+	// visible state text advanced. Re-snapshotting each poll satisfies the
+	// "fresh AT-SPI tree read" requirement.
+	if clickBtn, ok := findLabel(state.Elements, "Click count"); ok {
+		if err := p.clickElement(chromium, clickBtn.ElementIndex); err != nil {
+			log.Printf("chromium click: %v", err)
+		}
+		result.ChromiumClick = p.awaitChromium(chromium, func(s gtkState) bool {
+			return s.Clicks >= 1
+		})
+	} else {
+		log.Printf("chromium: no 'Click count' element found")
+	}
+
+	// Type into the fixture's text input: re-snapshot to get a fresh element
+	// index, focus it, type, then confirm the visible state text.
+	snap, err := p.windowState(chromium)
+	if err != nil {
+		log.Printf("chromium re-snapshot for typing: %v", err)
+		return
+	}
+	input, ok := findLabel(snap.Elements, "Text input")
+	if !ok {
+		log.Printf("chromium: no 'Text input' element found")
+		return
+	}
+	if err := p.clickElement(chromium, input.ElementIndex); err != nil {
+		log.Printf("chromium focus input: %v", err)
+	}
+	if _, err := p.call("type_text", map[string]any{
+		"pid":           chromium.PID,
+		"window_id":     chromium.WindowID,
+		"text":          chromiumTypedText,
+		"delivery_mode": deliveryForeground,
+	}); err != nil {
+		log.Printf("chromium type_text: %v", err)
+	}
+	result.ChromiumType = p.awaitChromium(chromium, func(s gtkState) bool {
+		return s.Text == chromiumTypedText
+	})
+}
+
+// awaitChromium polls a fresh AT-SPI tree until the fixture's visible state
+// text satisfies predicate or the settle timeout elapses.
+func (p *prober) awaitChromium(chromium windowRecord, predicate func(gtkState) bool) bool {
+	deadline := time.Now().Add(settleTimeout)
+	for {
+		if snap, err := p.windowState(chromium); err == nil {
+			if s, ok := chromiumState(snap.Elements); ok && predicate(s) {
+				return true
+			}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+// chromiumState extracts the fixture's serialized state JSON from the AT-SPI
+// tree. The fixture renders JSON.stringify(state) into its visible #state
+// element, so the object appears verbatim as some node's accessible text.
+func chromiumState(elements []element) (gtkState, bool) {
+	for _, e := range elements {
+		for _, text := range []string{e.Value, e.Label} {
+			if s, ok := parseStateJSON(text); ok {
+				return s, true
+			}
+		}
+	}
+	return gtkState{}, false
+}
+
+func parseStateJSON(text string) (gtkState, bool) {
+	marker := strings.Index(text, `"clicks":`)
+	if marker < 0 {
+		return gtkState{}, false
+	}
+	start := strings.LastIndex(text[:marker], "{")
+	end := strings.Index(text[marker:], "}")
+	if start < 0 || end < 0 {
+		return gtkState{}, false
+	}
+	var s gtkState
+	if err := json.Unmarshal([]byte(text[start:marker+end+1]), &s); err != nil {
+		return gtkState{}, false
+	}
+	return s, true
+}
+
+func hasLabel(elements []element, label string) bool {
+	_, ok := findLabel(elements, label)
+	return ok
+}
+
+// findLabel returns the first element whose accessible label equals the target
+// (case-insensitive, trimmed). Exact matching is deliberate: the fixtures set
+// clean, explicit accessible names, and a substring match would let a query for
+// "Click count" wrongly select "Double click count".
+func findLabel(elements []element, label string) (element, bool) {
+	want := strings.ToLower(strings.TrimSpace(label))
+	for _, e := range elements {
+		if strings.ToLower(strings.TrimSpace(e.Label)) == want {
+			return e, true
+		}
+	}
+	return element{}, false
+}
+
+func readGTKState() (gtkState, error) {
+	data, err := os.ReadFile(gtkStatePath)
+	if err != nil {
+		return gtkState{}, err
+	}
+	var s gtkState
+	if err := json.Unmarshal(data, &s); err != nil {
+		return gtkState{}, err
+	}
+	return s, nil
+}
+
+// checkEnvironment fails unless the three inherited session variables are
+// present and their X and D-Bus endpoints actually accept a connection.
+func checkEnvironment() bool {
+	display := os.Getenv("DISPLAY")
+	xauthority := os.Getenv("XAUTHORITY")
+	bus := os.Getenv("DBUS_SESSION_BUS_ADDRESS")
+	if display == "" || xauthority == "" || bus == "" {
+		log.Printf("environment: missing DISPLAY/XAUTHORITY/DBUS_SESSION_BUS_ADDRESS")
+		return false
+	}
+	info, err := os.Stat(xauthority)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		log.Printf("environment: XAUTHORITY %q not a usable file: %v", xauthority, err)
+		return false
+	}
+	f, err := os.Open(xauthority)
+	if err != nil {
+		log.Printf("environment: XAUTHORITY not readable: %v", err)
+		return false
+	}
+	_ = f.Close()
+	if !xEndpointReachable(display) {
+		log.Printf("environment: X endpoint %q unreachable", display)
+		return false
+	}
+	if !dbusEndpointReachable(bus) {
+		log.Printf("environment: D-Bus endpoint %q unreachable", bus)
+		return false
+	}
+	return true
+}
+
+func xEndpointReachable(display string) bool {
+	d := strings.TrimPrefix(display, "unix:")
+	colon := strings.LastIndex(d, ":")
+	if colon < 0 {
+		return false
+	}
+	host := d[:colon]
+	num := d[colon+1:]
+	if dot := strings.Index(num, "."); dot >= 0 {
+		num = num[:dot]
+	}
+	n, err := strconv.Atoi(num)
+	if err != nil {
+		return false
+	}
+	if host == "" {
+		return dialOK("unix", fmt.Sprintf("/tmp/.X11-unix/X%d", n))
+	}
+	return dialOK("tcp", fmt.Sprintf("%s:%d", host, 6000+n))
+}
+
+func dbusEndpointReachable(addr string) bool {
+	for _, entry := range strings.Split(addr, ";") {
+		kv, ok := strings.CutPrefix(entry, "unix:")
+		if !ok {
+			continue
+		}
+		var target string
+		for _, part := range strings.Split(kv, ",") {
+			if v, ok := strings.CutPrefix(part, "path="); ok {
+				target = v
+			}
+			if v, ok := strings.CutPrefix(part, "abstract="); ok {
+				target = "@" + v
+			}
+		}
+		if target != "" && dialOK("unix", target) {
+			return true
+		}
+	}
+	return false
+}
+
+func dialOK(network, address string) bool {
+	conn, err := net.DialTimeout(network, address, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// writeArtifacts writes result.json, ensures the desktop PNG is present, then
+// writes result.status LAST. The collector requires all three to be non-empty;
+// a missing PNG is acceptable only on the FAIL path (which this honours, since
+// DesktopCapture being false forces FAIL).
+func writeArtifacts(result probe.Result, pngPath string) error {
+	encoded, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshalling result: %w", err)
+	}
+	encoded = append(encoded, '\n')
+	if err := writeFileAtomic(filepath.Join(runtimeDir, "result.json"), encoded); err != nil {
+		return fmt.Errorf("writing result.json: %w", err)
+	}
+
+	status := statusFor(result)
+	if status == "PASS" && !nonEmptyFile(pngPath) {
+		// AllPassed implies DesktopCapture, so this should be unreachable; guard
+		// against ever declaring PASS without the PNG the collector requires.
+		return errors.New("refusing to write PASS without a desktop PNG")
+	}
+	if err := writeFileAtomic(filepath.Join(runtimeDir, "result.status"), []byte(status+"\n")); err != nil {
+		return fmt.Errorf("writing result.status: %w", err)
+	}
+	return nil
+}
+
+func statusFor(result probe.Result) string {
+	if result.AllPassed() {
+		return "PASS"
+	}
+	return "FAIL"
+}
+
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+func nonEmptyFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Size() > 0
+}
+
+func decodeStructured(res *mcp.CallToolResult, out any) error {
+	if res == nil || res.StructuredContent == nil {
+		return errors.New("no structured content in tool result")
+	}
+	encoded, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(encoded, out)
+}
+
+func contentText(res *mcp.CallToolResult) string {
+	if res == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range res.Content {
+		if t, ok := c.(*mcp.TextContent); ok {
+			b.WriteString(t.Text)
+		}
+	}
+	return b.String()
+}

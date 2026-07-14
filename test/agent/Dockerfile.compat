@@ -39,6 +39,18 @@ RUN curl -fL --retry 5 \
     make -j"$(nproc)" && \
     install -Dm755 xrandr /out/xrandr
 
+# Build the in-session Cua compatibility probe as a static binary. The probe's
+# main package lives outside the agent Go module tree (test/agent/cmd), so it is
+# copied INTO the module here to satisfy Go's internal-package import rule for
+# agent/internal/cua and agent/internal/probe. It is never compiled on the host
+# and never enters the production agent image.
+FROM golang:1.25.0-alpine3.22 AS probe-build
+ENV CGO_ENABLED=0
+WORKDIR /build/agent
+COPY agent/ /build/agent/
+COPY test/agent/cmd/cua-compat-probe/ /build/agent/cmd/cua-compat-probe/
+RUN go build -trimpath -o /out/cua-compat-probe ./cmd/cua-compat-probe
+
 FROM ${BASE_IMAGE} AS test
 COPY --from=fixture-build /out/hadron-cua-gtk-fixture /usr/local/libexec/hadron-cua-gtk-fixture
 COPY --from=fixture-build /out/xprop /usr/bin/xprop
@@ -83,6 +95,7 @@ RUN commit="$(cat /src/chromium.commit)" && \
       $3 != "flathub" { bad=1 } \
       END { exit (NR == 0 || bad) }' \
       /etc/hadron-agent-test/flatpak-refs.tsv
+COPY --from=probe-build /out/cua-compat-probe /usr/local/libexec/cua-compat-probe
 COPY test/agent/rootfs/ /
 RUN uid_owner="$(awk -F: '$3 == 1000 { print $1 }' /etc/passwd)" && \
     if [ -n "$uid_owner" ]; then \
@@ -130,7 +143,8 @@ RUN uid_owner="$(awk -F: '$3 == 1000 { print $1 }' /etc/passwd)" && \
       /etc/systemd/system/multi-user.target.wants/ly@tty1.service)" = \
       /usr/lib/systemd/system/ly@.service && \
     chmod 0755 /usr/local/libexec/cua-compat-collect \
-      /usr/local/libexec/cua-compat-report && \
+      /usr/local/libexec/cua-compat-report \
+      /usr/local/libexec/cua-compat-probe && \
     ln -s ../cua-compat-report.service \
       /etc/systemd/system/multi-user.target.wants/cua-compat-report.service && \
     ldd /usr/bin/xprop /usr/bin/xrandr > /tmp/x11-diagnostics-ldd.txt && \
