@@ -217,15 +217,28 @@ log "Booting graphical QEMU via direct kernel (VNC 127.0.0.1:$VNC_DISPLAY, timeo
 rm -f "$CONSOLE" "$QMP_SOCK"
 touch "$CONSOLE"
 
-# Direct-kernel live boot. The CD stays attached (the live cmdline loads the
-# rootfs squashfs from the CDLABEL=COS_LIVE medium), but we drop `-boot d` and
-# supply our own kernel/initrd/cmdline. This is the ISO's "boot local node from
-# livecd" entry MINUS `nomodeset` and MINUS `vga=795`, so virtio-gpu KMS can
-# drive a clean DRM framebuffer for the XLibre session; it also omits
-# `install-mode`, so the Ly autologin drop-in's !install-mode condition holds.
-# Do NOT re-add nomodeset / install-mode / vga=795. Direct-kernel boot is fully
-# compatible with the OVMF pflash units below.
-KERNEL_CMDLINE="cdroot root=live:CDLABEL=COS_LIVE rd.live.dir=/ rd.live.squashimg=rootfs.squashfs rd.live.overlay.overlayfs net.ifnames=1 console=ttyS0 console=tty1 kairos.boot_live_mode selinux=0"
+# Direct-kernel live boot. The ISO is attached as a READ-ONLY virtio-blk disk
+# (NOT `-cdrom`): under direct-kernel boot the emulated IDE/ATAPI CD-ROM is
+# never presented to Linux (no sr0), so the initrd's `root=live:CDLABEL=COS_LIVE`
+# label scan finds nothing and drops to dracut emergency. virtio-blk is the one
+# storage driver this initrd is proven to bring up (it detects the artifact
+# disk), and `CDLABEL=` resolves by filesystem label via udev, so it works on
+# any block device carrying the ISO9660 label. We drop `-boot d` and supply our
+# own kernel/initrd/cmdline.
+#
+# We use the ISO "Kairos" default entry's `rd.cos.disable` path (plain
+# dmsquash-live: the initrd just scans block devices for CDLABEL=COS_LIVE), which
+# is the boot path we verified reaches userspace/multi-user under QEMU. We do NOT
+# use the immucore `kairos.boot_live_mode` path: immucore looks for the boot
+# medium it was launched from, which a direct `-kernel` boot never provides, so
+# it drops to dracut emergency (initqueue timeout on COS_LIVE).
+#
+# From that proven cmdline we drop only the three flags that break this phase:
+#   - install-mode  (stops Ly autologin via the !install-mode condition)
+#   - nomodeset     (blocks virtio-gpu KMS -> no DRM scanout, virtio_gpu -EINVAL)
+#   - vga=795       (legacy vesafb hint that can fight KMS)
+# Do NOT re-add nomodeset / install-mode / vga=795.
+KERNEL_CMDLINE="cdroot root=live:CDLABEL=COS_LIVE rd.live.dir=/ rd.live.squashimg=rootfs.squashfs rd.live.overlay.overlayfs net.ifnames=1 console=ttyS0 console=tty1 rd.cos.disable selinux=0"
 
 # virtio-vga + -vnc gives the real DRM-backed scanout we screendump later.
 # NEVER add -display none / -nographic here: that would defeat the phase.
@@ -241,7 +254,8 @@ qemu-system-x86_64 \
   -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
   -drive "if=none,id=artifacts,format=raw,file=$ARTDISK" \
   -device "virtio-blk-pci,drive=artifacts,serial=$ARTIFACTS_SERIAL" \
-  -cdrom "$ISO" \
+  -drive "if=none,id=livecd,format=raw,readonly=on,file=$ISO" \
+  -device "virtio-blk-pci,drive=livecd,serial=coslive" \
   -kernel "$KERNEL" \
   -initrd "$INITRD" \
   -append "$KERNEL_CMDLINE" \
