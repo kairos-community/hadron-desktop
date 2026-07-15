@@ -2,9 +2,13 @@ package provision
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,6 +18,15 @@ import (
 
 	"github.com/mudler/hadron-desktop/agent/internal/auth"
 )
+
+// sha256Digest returns the "sha256:<hex>" digest of a complete bearer string,
+// matching internal/auth's at-rest digest format. Test-only: used to relate a
+// plaintext token back to its persisted digest. (Moved out of state.go, which
+// carried no production caller for it.)
+func sha256Digest(bearer string) string {
+	sum := sha256.Sum256([]byte(bearer))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -205,6 +218,49 @@ func TestMaterializeInstalledReuseNoPlaintext(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Corrupt persisted gateway config: must fail, never silently rotate
+// ---------------------------------------------------------------------------
+
+// TestMaterializeCorruptGatewayConfigFailsWithoutRotating guards against the
+// hazard where a corrupt/truncated gateway/config.json is mistaken for an
+// absent one: that would make resolveUserRotation think no user digest is
+// persisted and mint a brand-new bearer, silently invalidating the one
+// already issued to the user. A corrupt config must fail Materialize instead.
+func TestMaterializeCorruptGatewayConfigFailsWithoutRotating(t *testing.T) {
+	m, stateDir, runtimeDir := newTestMaterializer(t)
+
+	// First boot generates the real state, including the gateway config.
+	if _, err := m.Materialize(enabledConfig()); err != nil {
+		t.Fatalf("first Materialize: %v", err)
+	}
+
+	// Simulate a reboot: tmpfs runtime dir is wiped, state dir survives but
+	// its gateway config has been truncated/corrupted (e.g. crash mid-write
+	// outside this package, disk corruption, etc).
+	os.RemoveAll(runtimeDir)
+	os.MkdirAll(runtimeDir, 0o755)
+
+	gwPath := filepath.Join(stateDir, "gateway", "config.json")
+	if err := os.Chmod(gwPath, 0o600); err != nil {
+		t.Fatalf("chmod gateway config for corruption: %v", err)
+	}
+	if err := os.WriteFile(gwPath, []byte(`{"listen": "0.0.0.0:8`), 0o600); err != nil {
+		t.Fatalf("corrupt gateway config: %v", err)
+	}
+
+	_, err := m.Materialize(enabledConfig())
+	if err == nil {
+		t.Fatal("expected Materialize to fail on a corrupt gateway config, not silently rotate the bearer")
+	}
+
+	// No new plaintext token must have been written -- corruption must never
+	// mint a fresh credential.
+	if _, statErr := os.Stat(filepath.Join(runtimeDir, "first-run-token")); !os.IsNotExist(statErr) {
+		t.Fatalf("first-run-token must not be (re)written when the gateway config is corrupt (stat err = %v)", statErr)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // CI-provided user digest: no plaintext token
 // ---------------------------------------------------------------------------
 
@@ -348,6 +404,80 @@ func TestGeneratedCertSANsValidityFingerprint(t *testing.T) {
 	}
 	if !strings.HasPrefix(fp, "sha256:") || len(fp) != len("sha256:")+64 {
 		t.Fatalf("fingerprint format wrong: %q", fp)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// No plaintext bearer anywhere under the state dir
+// ---------------------------------------------------------------------------
+
+// TestMaterializeNoPlaintextBearerUnderStateDir regression-proofs the core
+// invariant documented at the top of state.go: a plaintext bearer is NEVER
+// written under the state dir, only its digest. It walks the entire state
+// dir tree after a token-generating Materialize and asserts no file's
+// contents contain a raw bearer prefix, then confirms the plaintext exists
+// exactly once, under the runtime dir's first-run-token.
+func TestMaterializeNoPlaintextBearerUnderStateDir(t *testing.T) {
+	m, stateDir, runtimeDir := newTestMaterializer(t)
+
+	res, err := m.Materialize(enabledConfig())
+	if err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+	if !res.TokenWritten {
+		t.Fatal("expected a fresh token to be generated on first boot")
+	}
+
+	containsBearer := func(data []byte) bool {
+		s := string(data)
+		return strings.Contains(s, "hdn_u_") || strings.Contains(s, "hdn_a_")
+	}
+
+	if err := filepath.WalkDir(stateDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return fmt.Errorf("read %s: %w", path, readErr)
+		}
+		if containsBearer(data) {
+			t.Fatalf("plaintext bearer found under state dir at %s", path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk state dir: %v", err)
+	}
+
+	// The plaintext must exist -- exactly once, and only under the runtime
+	// dir's first-run-token.
+	plaintextFiles := 0
+	if err := filepath.WalkDir(runtimeDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return fmt.Errorf("read %s: %w", path, readErr)
+		}
+		if containsBearer(data) {
+			if filepath.Base(path) != "first-run-token" {
+				t.Fatalf("plaintext bearer found outside first-run-token at %s", path)
+			}
+			plaintextFiles++
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk runtime dir: %v", err)
+	}
+	if plaintextFiles != 1 {
+		t.Fatalf("expected exactly one plaintext bearer file (first-run-token), found %d", plaintextFiles)
 	}
 }
 

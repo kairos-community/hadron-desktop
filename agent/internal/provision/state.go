@@ -26,6 +26,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"net"
 	"os"
@@ -218,7 +219,10 @@ func (m *Materializer) Materialize(cfg Config) (Result, error) {
 	stateDir := m.opts.StateDir
 	gatewayDir := filepath.Join(stateDir, "gateway")
 
-	existing := readGatewayConfigOrNil(filepath.Join(gatewayDir, "config.json"))
+	existing, err := readGatewayConfigOrNil(filepath.Join(gatewayDir, "config.json"))
+	if err != nil {
+		return Result{}, fmt.Errorf("provision: %w", err)
+	}
 
 	certPEM, keyPEM, err := m.resolveTLS(cfg, gatewayDir)
 	if err != nil {
@@ -421,7 +425,10 @@ func (m *Materializer) Rotate(opts RotateOptions) (RotateResult, error) {
 	}
 
 	gatewayPath := filepath.Join(m.opts.StateDir, "gateway", "config.json")
-	gw := readGatewayConfigOrNil(gatewayPath)
+	gw, err := readGatewayConfigOrNil(gatewayPath)
+	if err != nil {
+		return RotateResult{}, fmt.Errorf("provision: rotate: %w", err)
+	}
 	if gw == nil {
 		return RotateResult{}, fmt.Errorf("provision: rotate: no gateway config at %s (run provision first)", gatewayPath)
 	}
@@ -625,20 +632,29 @@ func marshalJSON(v any) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// readGatewayConfigOrNil reads and parses a gateway config.json, returning nil
-// if it is absent or unparseable (in which case Materialize regenerates the
-// derived state; the TLS identity is preserved independently via the on-disk
-// tls.crt/tls.key files, so a corrupt config never rotates trust).
-func readGatewayConfigOrNil(path string) *gatewayConfig {
+// readGatewayConfigOrNil reads and parses a gateway config.json. It returns
+// (nil, nil) only when the file is genuinely absent (os.IsNotExist: true
+// first boot, generating a fresh user bearer is correct). Any other read
+// error, or a parse failure on content that does exist, is a corrupt or
+// truncated config -- NOT the same as absent -- and is returned as a hard
+// error so the caller fails the provision instead of treating it as first
+// boot. Silently falling back to nil here would cause resolveUserRotation to
+// mint a brand-new user bearer, invalidating the one already issued to the
+// user: exactly the "never silently rotate trust" hazard this package
+// protects the TLS identity from, extended to the user credential.
+func readGatewayConfigOrNil(path string) (*gatewayConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read gateway config %s: %w", path, err)
 	}
 	var gw gatewayConfig
 	if err := json.Unmarshal(data, &gw); err != nil {
-		return nil
+		return nil, fmt.Errorf("gateway config %s is corrupt: %w", path, err)
 	}
-	return &gw
+	return &gw, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -724,14 +740,6 @@ func certFingerprint(certPEM []byte) (string, error) {
 	}
 	sum := sha256.Sum256(block.Bytes)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
-}
-
-// sha256Digest returns the "sha256:<hex>" digest of a complete bearer string,
-// matching internal/auth's at-rest digest format. Used to relate a plaintext
-// token back to its persisted digest.
-func sha256Digest(bearer string) string {
-	sum := sha256.Sum256([]byte(bearer))
-	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // ---------------------------------------------------------------------------
