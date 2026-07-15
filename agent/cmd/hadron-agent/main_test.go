@@ -135,6 +135,102 @@ func TestTokenRotateWithoutTTYWithholdsSecret(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// provision inspect-seed: the zero-touch authorization gate
+// ---------------------------------------------------------------------------
+
+// writeOEM writes a single cloud-config into a fresh OEM dir and returns it.
+func writeOEM(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "50_seed.yaml"), []byte(content), 0o644); err != nil {
+		t.Fatalf("write oem: %v", err)
+	}
+	return dir
+}
+
+// Only a fully-authorized seed (auto=true + /dev device + enabled) may exit 0,
+// and ONLY when --require-auto-install is present. --quiet emits nothing.
+func TestProvisionInspectSeed(t *testing.T) {
+	authorized := "#cloud-config\ninstall:\n  auto: true\n  device: /dev/sda\nhadron_agent:\n  enabled: true\n"
+
+	cases := []struct {
+		name    string
+		content string
+		args    func(oem string) []string
+		want    int
+	}{
+		{"absent", "#cloud-config\n",
+			func(o string) []string {
+				return []string{"provision", "inspect-seed", "--require-auto-install", "--oem-dir", o}
+			}, 1},
+		{"unrelated", "#cloud-config\nhostname: box\nusers:\n  - name: alice\n",
+			func(o string) []string {
+				return []string{"provision", "inspect-seed", "--require-auto-install", "--oem-dir", o}
+			}, 1},
+		{"auto false", "#cloud-config\ninstall:\n  auto: false\n  device: /dev/sda\nhadron_agent:\n  enabled: true\n",
+			func(o string) []string {
+				return []string{"provision", "inspect-seed", "--require-auto-install", "--oem-dir", o}
+			}, 1},
+		{"device-less", "#cloud-config\ninstall:\n  auto: true\nhadron_agent:\n  enabled: true\n",
+			func(o string) []string {
+				return []string{"provision", "inspect-seed", "--require-auto-install", "--oem-dir", o}
+			}, 1},
+		{"disabled", "#cloud-config\ninstall:\n  auto: true\n  device: /dev/sda\nhadron_agent:\n  enabled: false\n",
+			func(o string) []string {
+				return []string{"provision", "inspect-seed", "--require-auto-install", "--oem-dir", o}
+			}, 1},
+		{"malformed", "#cloud-config\ninstall:\n  auto: true\n  device: [bad\n",
+			func(o string) []string {
+				return []string{"provision", "inspect-seed", "--require-auto-install", "--oem-dir", o}
+			}, 1},
+		{"authorized without flag", authorized,
+			func(o string) []string { return []string{"provision", "inspect-seed", "--oem-dir", o} }, 1},
+		{"authorized", authorized,
+			func(o string) []string {
+				return []string{"provision", "inspect-seed", "--require-auto-install", "--oem-dir", o}
+			}, 0},
+		{"authorized quiet", authorized,
+			func(o string) []string {
+				return []string{"provision", "inspect-seed", "--require-auto-install", "--quiet", "--oem-dir", o}
+			}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			oem := writeOEM(t, tc.content)
+			code, stdout, stderr := runArgs(tc.args(oem)...)
+			if code != tc.want {
+				t.Fatalf("exit = %d, want %d\nstdout: %q\nstderr: %q", code, tc.want, stdout, stderr)
+			}
+			quiet := false
+			for _, a := range tc.args(oem) {
+				if a == "--quiet" {
+					quiet = true
+				}
+			}
+			if tc.want == 0 && !quiet && !strings.Contains(stdout, "/dev/sda") {
+				t.Fatalf("authorized run must print the device; stdout=%q", stdout)
+			}
+			if tc.want == 0 && quiet && stdout != "" {
+				t.Fatalf("authorized --quiet run must print nothing; stdout=%q", stdout)
+			}
+		})
+	}
+}
+
+// --quiet must emit NOTHING on an unauthorized seed so it is a clean systemd
+// ExecCondition.
+func TestProvisionInspectSeedQuietSilentOnUnauthorized(t *testing.T) {
+	oem := writeOEM(t, "#cloud-config\ninstall:\n  auto: false\n")
+	code, stdout, stderr := runArgs("provision", "inspect-seed", "--require-auto-install", "--quiet", "--oem-dir", oem)
+	if code == 0 {
+		t.Fatalf("unauthorized seed must exit non-zero")
+	}
+	if stdout != "" || stderr != "" {
+		t.Fatalf("--quiet must emit nothing; stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // gateway --config: the provisioned config.json drives the verifier (rotation)
 // ---------------------------------------------------------------------------
 

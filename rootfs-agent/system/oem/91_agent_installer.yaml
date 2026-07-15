@@ -1,0 +1,30 @@
+# Point the Kairos auto-installer at the Hadron AGENT appliance installer.
+#
+# This is the INTERACTIVE install path: when the appliance ISO is booted in
+# install-mode, kairos-installer.service owns tty1 and normally runs the desktop
+# wizard (rootfs/system/oem/90_desktop_installer.yaml drops 10-desktop.conf).
+# This stage (91, install-mode only, same initramfs stage) drops a SECOND
+# override -- 20-agent.conf, which sorts AFTER 10-desktop.conf so it wins --
+# replacing the ExecStart with /usr/local/bin/hadron-agent-install. That script
+# asks hostname + disk, shows the exact device in RED, and only wipes the disk
+# after the operator types `yes`.
+#
+# Guards: install-mode on the cmdline (so it can NEVER touch a normally-booted
+# or live system) AND the /etc/hadron-agent/profile marker (so it is a hard
+# no-op on any image that is not the agent appliance overlay).
+name: "Hadron agent appliance installer UI"
+stages:
+  initramfs:
+    - if: 'grep -q "install-mode" /proc/cmdline && [ -f /etc/hadron-agent/profile ] && ([ -f /run/cos/live_mode ] || [ -f /run/cos/uki_install_mode ])'
+      name: "point kairos-installer at the Hadron agent installer"
+      files:
+        - path: /etc/systemd/system/kairos-installer.service.d/20-agent.conf
+          permissions: 0644
+          owner: 0
+          group: 0
+          content: |
+            [Service]
+            ExecStart=
+            ExecStart=/usr/local/bin/hadron-agent-install
+      commands:
+        - systemctl daemon-reload

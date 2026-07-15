@@ -72,6 +72,13 @@ const unusableDigest = auth.Digest("sha256:0000000000000000000000000000000000000
 // positional argument. It maps to exit code 2.
 var errUsage = errors.New("usage")
 
+// errSilent marks a runtime failure that maps to exit code 1 WITHOUT run
+// printing any diagnostic. It exists for `provision inspect-seed --quiet`,
+// whose whole purpose is to be a systemd ExecCondition: it must exit non-zero
+// on an unauthorized seed while emitting nothing at all. Commands that want a
+// human-readable message print it themselves before returning errSilent.
+var errSilent = errors.New("silent failure")
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -122,6 +129,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if errors.Is(err, flag.ErrHelp) {
 		return 0
+	}
+	if errors.Is(err, errSilent) {
+		// Exit non-zero with no diagnostic: the command already emitted
+		// whatever (if anything) it wanted to. Used by inspect-seed --quiet so
+		// it is a clean systemd ExecCondition.
+		return 1
 	}
 	if errors.Is(err, errUsage) {
 		fmt.Fprintf(stderr, "hadron-agent %s: %v\n", cmd, err)
@@ -646,6 +659,15 @@ func installModeActive() bool {
 // and tooling do) is permitted unprivileged, in which case ownership is
 // recorded but not applied.
 func runProvision(args []string, stdout, stderr io.Writer) error {
+	// `provision inspect-seed ...` is a read-only sub-subcommand that never
+	// writes machine state; it only validates whether the merged /oem seed
+	// authorizes a zero-touch install. It is dispatched before the flag parse
+	// below so its own flags (--require-auto-install, --quiet) are handled by
+	// its dedicated FlagSet.
+	if len(args) > 0 && args[0] == "inspect-seed" {
+		return runProvisionInspectSeed(args[1:], stdout, stderr)
+	}
+
 	fs := newFlagSet("provision", stderr)
 	oemDir := fs.String("oem-dir", "/oem", "directory of Kairos OEM *.yaml cloud-config files")
 	stateDir := fs.String("state-dir", provision.DefaultStateDir, "persistent machine-state directory")
@@ -680,6 +702,58 @@ func runProvision(args []string, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stdout, "provisioned: fingerprint=%s admin=%t first_run_token=%t\n",
 		res.CertFingerprint, res.AdminEnabled, res.TokenWritten)
 	return nil
+}
+
+// runProvisionInspectSeed validates whether the merged /oem/*.yaml seed
+// AUTHORIZES a zero-touch (non-interactive) disk install and, when it does,
+// prints the single authorized install device. It is the gate the autoinstall
+// service uses as a systemd ExecCondition.
+//
+// It exits 0 ONLY when --require-auto-install is set AND all three independent
+// conditions hold (install.auto == true, install.device is a non-empty
+// /dev/... path, hadron_agent.enabled == true). Any other outcome -- the flag
+// absent, a condition unmet, or a malformed seed -- exits non-zero. With
+// --quiet it emits NOTHING on failure, so it is a clean ExecCondition that can
+// never leak a diagnostic onto the console; without --quiet it prints the
+// authorized device on success or the withholding reason on failure.
+//
+// This command NEVER writes a disk, a cloud-config, or any machine state: it
+// only reports the verdict. Materializing the install config and invoking the
+// installer is the job of /usr/local/bin/hadron-agent-install.
+func runProvisionInspectSeed(args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("provision inspect-seed", stderr)
+	oemDir := fs.String("oem-dir", "/oem", "directory of Kairos OEM *.yaml cloud-config files")
+	requireAuto := fs.Bool("require-auto-install", false, "exit 0 only when the seed fully authorizes a zero-touch install")
+	quiet := fs.Bool("quiet", false, "emit nothing (for use as a systemd ExecCondition)")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+
+	verdict, err := provision.InspectSeed(*oemDir)
+	reason := verdict.Reason
+	if err != nil {
+		// A malformed/invalid seed is never authorized.
+		verdict.Authorized = false
+		reason = err.Error()
+	}
+
+	// Safety default: authorization requires the caller to explicitly opt in
+	// via --require-auto-install. Without it we never report authorized, so a
+	// caller that forgot the flag can never trigger a wipe.
+	if *requireAuto && verdict.Authorized {
+		if !*quiet {
+			fmt.Fprintln(stdout, verdict.Device)
+		}
+		return nil
+	}
+
+	if !*quiet {
+		if !*requireAuto {
+			reason = "--require-auto-install not set"
+		}
+		fmt.Fprintf(stderr, "inspect-seed: seed does not authorize zero-touch install: %s\n", reason)
+	}
+	return errSilent
 }
 
 // ---------------------------------------------------------------------------
