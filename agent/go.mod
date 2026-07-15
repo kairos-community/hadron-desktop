@@ -3,6 +3,7 @@ module github.com/mudler/hadron-desktop/agent
 go 1.25.0
 
 require (
+	github.com/creack/pty v1.1.24
 	github.com/google/jsonschema-go v0.4.3
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 )
