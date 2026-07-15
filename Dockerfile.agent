@@ -1,6 +1,25 @@
 ARG BASE_IMAGE=i3-desktop:dev
 FROM ${BASE_IMAGE} AS xlibre-desktop
 FROM rust:1.97.0-alpine3.22 AS rust-toolchain
+
+# hadron-agent: the single static MCP service binary (Phase 2/3 Go module at
+# agent/). go.mod/go.sum are copied and downloaded before the rest of the
+# module source so an unrelated source edit does not invalidate the module
+# cache layer.
+FROM golang:1.25.0-alpine3.22 AS agent-gobuild
+ARG VERSION=v0.0.0
+ARG CUA_COMMIT=3cadb5f82e7d2ed071a2082764276ec872a52135
+WORKDIR /src
+COPY agent/go.mod agent/go.sum ./
+RUN go mod download
+COPY agent/ ./
+# The version banner is read from internal/buildinfo (main reads
+# buildinfo.Version/buildinfo.CuaRevision), not from package main.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath \
+    -ldflags="-s -w -X github.com/mudler/hadron-desktop/agent/internal/buildinfo.Version=${VERSION} -X github.com/mudler/hadron-desktop/agent/internal/buildinfo.CuaRevision=${CUA_COMMIT}" \
+    -o /out/hadron-agent ./cmd/hadron-agent
+
 FROM ghcr.io/kairos-io/hadron-toolchain:main AS agent-native
 # The desktop root has the canonical /usr/lib/firmware symlink while the
 # toolchain has an empty directory at that path; normalize it before overlay.
@@ -134,8 +153,20 @@ ENV CUA_DRIVER_RS_TELEMETRY_ENABLED=false \
 COPY rootfs-agent/ /
 COPY --from=agent-runtime-build /agent-runtime/ /
 COPY --from=cua-build /cua/ /
-RUN glib-compile-schemas /usr/share/glib-2.0/schemas && \
+COPY --from=agent-gobuild /out/hadron-agent /usr/bin/hadron-agent
+# Identities for the opt-in appliance overlay only. hadron-agent-gateway is a
+# locked, no-login system account that serves the public HTTPS MCP gateway;
+# hadron-agent-control is a bare group used to gate the local control socket.
+# The human `agent` account is intentionally NOT created here — it is created
+# by the OEM/install paths (Task 5) on the live/installed system.
+RUN groupadd -r hadron-agent-control && \
+    groupadd -r hadron-agent-gateway && \
+    useradd -r -M -N -g hadron-agent-gateway -s /usr/sbin/nologin \
+      -c "Hadron agent gateway" hadron-agent-gateway && \
+    chmod +x /usr/bin/hadron-agent && \
+    glib-compile-schemas /usr/share/glib-2.0/schemas && \
     ldconfig && \
     ldd /usr/bin/cua-driver | tee /tmp/cua-ldd.txt && \
     ! grep -q 'not found' /tmp/cua-ldd.txt && \
-    rm /tmp/cua-ldd.txt
+    rm /tmp/cua-ldd.txt && \
+    ! getent passwd agent
