@@ -11,8 +11,11 @@
 // PASS or FAIL, written last). All writes are atomic (temp file + rename).
 //
 // Assertion channels are deliberately narrow and never cheat: GTK state is read
-// only from the fixture's own state file, and Chromium state is read only from
-// a fresh AT-SPI tree — never via JavaScript, CDP, or DevTools.
+// only from the fixture's own state file. Chromium is driven and read through
+// Cua's `page` tool over CDP (execute_javascript) rather than AT-SPI — flatpak
+// Chromium publishes no AT-SPI DOM tree, so CDP is Cua's actual browser path
+// (an approved amendment to the original AT-SPI-only plan). The truth is still
+// the fixture's own visible #state text, read back by each action's script.
 package main
 
 import (

@@ -40,14 +40,14 @@ type Result struct {
 	GTKType bool `json:"gtk_type"`
 	// GTKNamedKey is true when a named key press is recorded by the GTK fixture.
 	GTKNamedKey bool `json:"gtk_named_key"`
-	// ChromiumAccessibility is true when the Chromium AT-SPI tree exposes the
-	// fixture's ARIA-labelled controls.
+	// ChromiumAccessibility is true when the Chromium DOM is reachable over CDP
+	// (Cua's `page`/execute_javascript) and exposes the fixture's controls.
 	ChromiumAccessibility bool `json:"chromium_accessibility"`
-	// ChromiumClick is true when a click updates the Chromium fixture state,
-	// observed through the AT-SPI tree's visible state text.
+	// ChromiumClick is true when a CDP-driven click updates the Chromium fixture
+	// state, read back from the fixture's own visible #state text.
 	ChromiumClick bool `json:"chromium_click"`
-	// ChromiumType is true when typed text updates the Chromium fixture state,
-	// observed through the AT-SPI tree's visible state text.
+	// ChromiumType is true when CDP-driven typing updates the Chromium fixture
+	// state, read back from the fixture's own visible #state text.
 	ChromiumType bool `json:"chromium_type"`
 }
 
