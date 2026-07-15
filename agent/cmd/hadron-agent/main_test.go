@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -37,7 +39,10 @@ func TestExitCodes(t *testing.T) {
 		{"session unknown flag", []string{"session", "--bogus"}, 2},
 		{"control missing action", []string{"control"}, 2},
 		{"control unknown action", []string{"control", "wobble"}, 2},
-		{"provision unsupported", []string{"provision"}, 1},
+		{"token missing action", []string{"token"}, 2},
+		{"token unknown action", []string{"token", "wobble"}, 2},
+		{"token rotate missing class", []string{"token", "rotate"}, 2},
+		{"token rotate unknown class", []string{"token", "rotate", "wobble"}, 2},
 		// Missing required config is a runtime error, not a usage error.
 		{"gateway missing digests", []string{"gateway", "--listen", "127.0.0.1:0"}, 1},
 	}
@@ -73,17 +78,54 @@ func TestVersionOutput(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// provision reserved
+// provision materializes state into a temp dir (unprivileged)
 // ---------------------------------------------------------------------------
 
-func TestProvisionUnsupportedMessage(t *testing.T) {
-	code, _, stderr := runArgs("provision")
-	if code != 1 {
-		t.Fatalf("provision exit = %d, want 1", code)
+func TestProvisionMaterializesIntoTempDirs(t *testing.T) {
+	oemDir := t.TempDir()
+	stateDir := t.TempDir()
+	runtimeDir := t.TempDir()
+
+	// An empty OEM dir resolves to the opt-in enabled default (no digests), so
+	// provision generates a fresh identity and a one-shot token.
+	code, stdout, stderr := runArgs(
+		"provision",
+		"--oem-dir", oemDir,
+		"--state-dir", stateDir,
+		"--runtime-dir", runtimeDir,
+	)
+	if code != 0 {
+		t.Fatalf("provision exit = %d, want 0\nstderr: %s", code, stderr)
 	}
-	low := strings.ToLower(stderr)
-	if !strings.Contains(low, "provision") || !strings.Contains(low, "phase 3") {
-		t.Fatalf("provision error should name Phase 3:\n%s", stderr)
+	if !strings.Contains(stdout, "fingerprint=sha256:") {
+		t.Fatalf("provision output missing fingerprint:\n%s", stdout)
+	}
+	for _, rel := range []string{"gateway/config.json", "gateway/tls.crt", "gateway/tls.key", "session/config.json"} {
+		if _, err := os.Stat(filepath.Join(stateDir, rel)); err != nil {
+			t.Fatalf("expected %s to be materialized: %v", rel, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(runtimeDir, "first-run-token")); err != nil {
+		t.Fatalf("expected a one-shot first-run token: %v", err)
+	}
+}
+
+// A rotation without a controlling terminal must not print the bearer.
+func TestTokenRotateWithoutTTYWithholdsSecret(t *testing.T) {
+	stateDir := t.TempDir()
+
+	// Provision first so a gateway config exists to rotate.
+	if code, _, stderr := runArgs("provision", "--oem-dir", t.TempDir(), "--state-dir", stateDir, "--runtime-dir", t.TempDir()); code != 0 {
+		t.Fatalf("provision failed: %s", stderr)
+	}
+
+	code, stdout, stderr := runArgs("token", "rotate", "user", "--overlap", "15m", "--state-dir", stateDir)
+	if code != 0 {
+		t.Fatalf("token rotate exit = %d, want 0\nstderr: %s", code, stderr)
+	}
+	// The bearers-buffers are not a TTY, so no bearer must appear anywhere.
+	if strings.Contains(stdout, "hdn_") || strings.Contains(stderr, "hdn_") {
+		t.Fatalf("bearer leaked without a TTY:\nstdout: %s\nstderr: %s", stdout, stderr)
 	}
 }
 

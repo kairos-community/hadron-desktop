@@ -8,7 +8,8 @@
 //	hadron-agent control ...   pause | resume | toggle the local runtime
 //	hadron-agent status        print the local runtime status
 //	hadron-agent version       print the build version and cua revision
-//	hadron-agent provision     (reserved for Phase 3; currently unsupported)
+//	hadron-agent provision     materialize machine TLS, digests, and configs
+//	hadron-agent token rotate  rotate a user or admin bearer
 //
 // Exit codes: an unknown command or an unparseable flag exits 2; a runtime
 // failure exits 1; -h/-help exits 0.
@@ -41,9 +42,12 @@ import (
 	"github.com/mudler/hadron-desktop/agent/internal/files"
 	"github.com/mudler/hadron-desktop/agent/internal/gateway"
 	"github.com/mudler/hadron-desktop/agent/internal/process"
+	"github.com/mudler/hadron-desktop/agent/internal/provision"
 	"github.com/mudler/hadron-desktop/agent/internal/roothelper"
 	"github.com/mudler/hadron-desktop/agent/internal/rpc"
 	"github.com/mudler/hadron-desktop/agent/internal/session"
+
+	"golang.org/x/sys/unix"
 )
 
 // Environment variables that supply the bearer digests when the matching flag
@@ -60,15 +64,9 @@ const (
 // can always be constructed while that class remains effectively disabled.
 const unusableDigest = auth.Digest("sha256:0000000000000000000000000000000000000000000000000000000000000000")
 
-// Sentinel errors that steer the exit-code mapping in run.
-var (
-	// errUsage marks a usage/flag error: an unknown flag, a missing or unknown
-	// positional argument. It maps to exit code 2.
-	errUsage = errors.New("usage")
-	// errUnsupported marks a recognized-but-not-yet-implemented command
-	// (provision). It maps to exit code 1.
-	errUnsupported = errors.New("unsupported")
-)
+// errUsage marks a usage/flag error: an unknown flag, a missing or unknown
+// positional argument. It maps to exit code 2.
+var errUsage = errors.New("usage")
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
@@ -101,7 +99,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "status":
 		err = runStatus(rest, stdout, stderr)
 	case "provision":
-		err = fmt.Errorf("%w: `provision` is reserved for Phase 3 and is not available yet", errUnsupported)
+		err = runProvision(rest, stdout, stderr)
+	case "token":
+		err = runToken(rest, stdout, stderr)
 	case "-h", "--help", "help":
 		usage(stdout)
 		return 0
@@ -138,7 +138,8 @@ Commands:
   control       pause | resume | toggle the local runtime.
   status        Print the local runtime status.
   version       Print the build version and cua-driver revision.
-  provision     Reserved for Phase 3 (currently unsupported).
+  provision     Materialize machine TLS, bearer digests, and service configs.
+  token         rotate user | admin bearer.
 
 Run "hadron-agent <command> -h" for command-specific flags.
 `)
@@ -440,6 +441,146 @@ func runStatus(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "version: %s\nready:   %t\npaused:  %t\n", buildinfo.Version, h.OK, h.Paused)
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// provision
+// ---------------------------------------------------------------------------
+
+// runProvision materializes the machine's persistent state (TLS identity,
+// bearer digests, and service config files) from the merged /oem cloud-config.
+// It is root-only in production: writing into the default system state dir
+// requires root, but pointing --state-dir at a temporary directory (as tests
+// and tooling do) is permitted unprivileged, in which case ownership is
+// recorded but not applied.
+func runProvision(args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("provision", stderr)
+	oemDir := fs.String("oem-dir", "/oem", "directory of Kairos OEM *.yaml cloud-config files")
+	stateDir := fs.String("state-dir", provision.DefaultStateDir, "persistent machine-state directory")
+	runtimeDir := fs.String("runtime-dir", provision.DefaultRuntimeDir, "ephemeral runtime (tmpfs) directory")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+
+	root := os.Geteuid() == 0
+	if *stateDir == provision.DefaultStateDir && !root {
+		return fmt.Errorf("provision must run as root to write %s", provision.DefaultStateDir)
+	}
+
+	cfg, err := provision.Load(*oemDir)
+	if err != nil {
+		return err
+	}
+	if !cfg.Enabled {
+		fmt.Fprintln(stdout, "hadron_agent is disabled; nothing to provision")
+		return nil
+	}
+
+	m := provision.NewMaterializer(provision.Options{
+		StateDir:   *stateDir,
+		RuntimeDir: *runtimeDir,
+		Chown:      root,
+	})
+	res, err := m.Materialize(cfg)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "provisioned: fingerprint=%s admin=%t first_run_token=%t\n",
+		res.CertFingerprint, res.AdminEnabled, res.TokenWritten)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// token rotate
+// ---------------------------------------------------------------------------
+
+// runToken dispatches the `token` subcommands (currently only `rotate`).
+func runToken(args []string, stdout, stderr io.Writer) error {
+	var action string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		action, args = args[0], args[1:]
+	}
+	switch action {
+	case "rotate":
+		return runTokenRotate(args, stdout, stderr)
+	case "":
+		return fmt.Errorf("%w: token requires an action: rotate", errUsage)
+	default:
+		return fmt.Errorf("%w: unknown token action %q (want rotate)", errUsage, action)
+	}
+}
+
+// runTokenRotate rotates a user or admin bearer. The new bearer is printed
+// ONLY to the controlling terminal: when stdout is not a TTY (a journal or a
+// pipe) the rotation still happens but the secret is never emitted. A failed
+// service reload rolls the persisted digest state back.
+func runTokenRotate(args []string, stdout, stderr io.Writer) error {
+	// The class is a positional argument preceding the flags:
+	//   hadron-agent token rotate user --overlap 15m
+	var classArg string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		classArg, args = args[0], args[1:]
+	}
+
+	fs := newFlagSet("token rotate", stderr)
+	overlap := fs.Duration("overlap", 15*time.Minute, "how long the outgoing bearer stays valid (max 24h)")
+	stateDir := fs.String("state-dir", provision.DefaultStateDir, "persistent machine-state directory")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+
+	var class auth.Class
+	switch classArg {
+	case "user":
+		class = auth.ClassUser
+	case "admin":
+		class = auth.ClassAdmin
+	case "":
+		return fmt.Errorf("%w: token rotate requires a class: user | admin", errUsage)
+	default:
+		return fmt.Errorf("%w: unknown bearer class %q (want user | admin)", errUsage, classArg)
+	}
+
+	root := os.Geteuid() == 0
+	if *stateDir == provision.DefaultStateDir && !root {
+		return fmt.Errorf("token rotate must run as root to write %s", provision.DefaultStateDir)
+	}
+
+	// Present the secret only when stdout is a real terminal.
+	var tty io.Writer
+	if f, ok := stdout.(*os.File); ok && isTerminal(f) {
+		tty = f
+	}
+
+	m := provision.NewMaterializer(provision.Options{StateDir: *stateDir, Chown: root})
+	res, err := m.Rotate(provision.RotateOptions{
+		Class:   class,
+		Overlap: *overlap,
+		TTY:     tty,
+		Reload:  reloadServices,
+	})
+	if err != nil {
+		return err
+	}
+	if !res.Printed {
+		// No TTY: the secret was withheld on purpose. Report the digest (safe
+		// to log) so the operator knows the rotation took effect.
+		fmt.Fprintf(stderr, "rotated %s bearer (no terminal; new bearer withheld). new digest: %s\n", class, res.Digest)
+	}
+	return nil
+}
+
+// reloadServices signals the running gateway (and, when present, the root
+// helper) to reload their bearer digests after a rotation. Wiring the actual
+// systemd reload is Phase-3 Task 5; until then this is a no-op hook so a
+// rotation on a not-yet-serviced system still succeeds.
+func reloadServices() error { return nil }
+
+// isTerminal reports whether f refers to a terminal, using a TCGETS ioctl (the
+// same, cgo-free mechanism as golang.org/x/term on Linux).
+func isTerminal(f *os.File) bool {
+	_, err := unix.IoctlGetTermios(int(f.Fd()), unix.TCGETS)
+	return err == nil
 }
 
 // ---------------------------------------------------------------------------
