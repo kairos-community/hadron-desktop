@@ -1,0 +1,37 @@
+# Hadron agent privileged root helper.
+#
+# This unit is the explicit root-equivalent admin contract: it is INTENTIONALLY
+# NOT sandboxed. It permits arbitrary filesystem and child-process access, and
+# no RestrictAddressFamilies (or any other sandbox) is applied to it or its
+# children. The controls that make this safe are, by design, external to the
+# process: it listens on a Unix socket only (no network listener), it validates
+# an admin bearer independently of the gateway, and the whole appliance runs
+# inside a VM boundary.
+#
+# It is gated on /var/lib/hadron-agent/root/enabled, which the provisioner
+# writes only when an admin bearer was configured, so a machine with no admin
+# credential never runs the helper at all. The unit is not auto-enabled by a
+# baked wants-symlink; the OEM stage links it into multi-user.target.wants only
+# once that enabled marker exists.
+[Unit]
+Description=Hadron agent privileged root helper (admin MCP broker)
+ConditionPathExists=/etc/hadron-agent/profile
+ConditionPathExists=/var/lib/hadron-agent/root/enabled
+Requires=hadron-agent-provision.service
+After=hadron-agent-provision.service
+
+[Service]
+Type=simple
+# Runs as root (no User=): this is the root-equivalent admin path by design.
+ExecStart=/usr/bin/hadron-agent root-helper
+# SIGHUP triggers a parse-then-atomically-swap reload of the admin digest.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+RestartSteps=5
+RestartMaxDelaySec=30s
+# Own a delegated cgroup subtree so MCP commands can be placed in child cgroups.
+Delegate=yes
+
+[Install]
+WantedBy=multi-user.target

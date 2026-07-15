@@ -1,0 +1,29 @@
+# Hadron agent session broker (unprivileged, per-user).
+#
+# Installed globally into the user manager but gated with ConditionUser=agent,
+# so it only ever runs inside the `agent` account's systemd --user instance and
+# is a no-op for any other user's manager.
+#
+# It is deliberately useful WITHOUT display variables: it starts before the
+# XLibre/i3 session exists and serves the session broker socket immediately.
+# Task 6's display watchdog re-imports DISPLAY/XAUTHORITY into the user manager
+# and restarts this unit once the desktop is up, at which point Cua runs as its
+# child; until then it simply runs without a display. It must therefore tolerate
+# starting with no DISPLAY, which it does (no display-dependent ExecStartPre).
+[Unit]
+Description=Hadron agent session broker (unprivileged)
+ConditionUser=agent
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hadron-agent session
+Restart=on-failure
+RestartSec=2s
+RestartSteps=5
+RestartMaxDelaySec=30s
+# Delegated child cgroup: production startup fails if the broker cannot create
+# a child cgroup for MCP-owned terminal/process work, so this is required.
+Delegate=yes
+
+[Install]
+WantedBy=default.target

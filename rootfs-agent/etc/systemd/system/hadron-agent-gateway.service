@@ -1,0 +1,47 @@
+# Hadron agent public HTTPS MCP gateway.
+#
+# This is the ONLY internet-facing agent process, so it is the most tightly
+# sandboxed one: it runs as the locked, no-login `hadron-agent-gateway` system
+# account with no supplementary groups, no capabilities at all, no ability to
+# gain privilege, a read-only view of the whole filesystem, and write access to
+# nothing but its two runtime socket directories. Everything it needs to serve
+# (TLS material + bearer digests in config.json) is provisioned into the
+# read-only state dir by hadron-agent-provision.service first.
+[Unit]
+Description=Hadron agent public HTTPS MCP gateway
+ConditionPathExists=/etc/hadron-agent/profile
+Requires=hadron-agent-provision.service
+After=hadron-agent-provision.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hadron-agent-gateway
+Group=hadron-agent-gateway
+# No supplementary (privileged) groups: only the primary gateway group.
+SupplementaryGroups=
+# Drop every capability; the gateway needs none.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+# Read-only view of the entire filesystem hierarchy...
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+# ...with write access ONLY to its runtime status + control socket dirs, and a
+# read-only view of the provisioned state dir it loads config/TLS from.
+ReadWritePaths=/run/hadron-agent/status /run/hadron-agent/control
+ReadOnlyPaths=/var/lib/hadron-agent
+# Optional per-boot environment (bearer digests) provisioned into the tmpfs.
+EnvironmentFile=-/run/hadron-agent/gateway/env
+ExecStart=/usr/bin/hadron-agent gateway --tls-cert /var/lib/hadron-agent/gateway/tls.crt --tls-key /var/lib/hadron-agent/gateway/tls.key
+# SIGHUP triggers a parse-then-atomically-swap config reload in the gateway.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+RestartSteps=5
+RestartMaxDelaySec=30s
+
+[Install]
+WantedBy=multi-user.target

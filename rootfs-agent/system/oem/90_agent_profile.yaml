@@ -1,0 +1,75 @@
+# Hadron agent appliance: account, linger, and runtime socket bootstrap.
+#
+# Runs on every LIVE or INSTALLED-NORMAL boot of the agent image, and is skipped
+# during the installer (install-mode) boot. It is additionally a hard no-op on
+# any non-agent image via the /etc/hadron-agent/profile marker guard, so the
+# stage can never touch an ordinary desktop install.
+#
+# Before any agent service starts (this is a cos-setup `boot` stage, which runs
+# well ahead of the agent units that reach for network-online.target) it:
+#   1. creates the locked, UID-1000 human `agent` account if absent, ABORTING
+#      if UID 1000 is already owned by a different account;
+#   2. constrains `agent` to ONLY the approved supplemental groups -- never
+#      admin/sudo/docker -- intersected with the groups that actually exist;
+#   3. owns /home/agent to the agent account;
+#   4. enables linger so the agent user manager (and its session broker) runs
+#      without an interactive login;
+#   5. materializes the /run/hadron-agent socket dir tree with the exact
+#      owners/modes now that the `agent` account exists;
+#   6. links the root helper into multi-user.target.wants iff the provisioner
+#      previously marked admin as enabled (the unit is otherwise not started).
+name: "Hadron agent profile"
+stages:
+  boot:
+    - if: '! grep -q "install-mode" /proc/cmdline && [ -f /etc/hadron-agent/profile ]'
+      name: "create locked agent account, linger, and socket dirs"
+      commands:
+        - |
+          set -eu
+
+          # Refuse to hijack UID 1000 if it already belongs to someone else.
+          existing="$(getent passwd 1000 | cut -d: -f1 || true)"
+          if [ -n "$existing" ] && [ "$existing" != "agent" ]; then
+            echo "hadron-agent: UID 1000 already used by '$existing'; refusing to create agent" >&2
+            exit 1
+          fi
+
+          # Create the locked, no-interactive-password agent account if absent.
+          if ! getent passwd agent >/dev/null 2>&1; then
+            useradd --uid 1000 --user-group --create-home --home-dir /home/agent \
+              --shell /bin/bash --comment "Hadron agent" agent
+          fi
+          # Lock the password (no password login); the account is driven only by
+          # linger + the session's display manager, never by a typed password.
+          passwd -l agent >/dev/null 2>&1 || true
+
+          # Constrain to ONLY the approved supplemental groups that exist. Never
+          # admin/sudo/docker. usermod -G replaces the full supplemental set, so
+          # any stray privileged membership is removed here too.
+          approved=""
+          for g in audio video render input bluetooth seat hadron-agent-control; do
+            if getent group "$g" >/dev/null 2>&1; then
+              approved="${approved:+$approved,}$g"
+            fi
+          done
+          usermod -G "$approved" agent
+
+          # Own the home directory.
+          mkdir -p /home/agent
+          chown agent:agent /home/agent
+
+          # Enable linger so the agent's systemd --user manager runs at boot.
+          loginctl enable-linger agent || true
+
+          # Now that `agent` exists, (re)create the runtime socket dir tree with
+          # the exact owners/modes declared in the tmpfiles fragment. /run is a
+          # per-boot tmpfs, so this is the authoritative first-boot creation.
+          systemd-tmpfiles --create /etc/tmpfiles.d/hadron-agent.conf || true
+
+          # Link the root helper only if provisioning previously enabled admin.
+          if [ -f /var/lib/hadron-agent/root/enabled ]; then
+            mkdir -p /etc/systemd/system/multi-user.target.wants
+            ln -sf /etc/systemd/system/hadron-agent-root-helper.service \
+              /etc/systemd/system/multi-user.target.wants/hadron-agent-root-helper.service
+            systemctl daemon-reload || true
+          fi
