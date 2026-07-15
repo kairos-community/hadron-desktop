@@ -403,6 +403,84 @@ func TestComputerUseDisconnectDuringMutationIsNotReplayed(t *testing.T) {
 	}
 }
 
+// TestComputerUseRetryableReflectsMutationHazard covers Fix I1: Retryable on
+// a failed action must depend on whether a replay could double-execute a
+// mutation, not just on the error code. A mutation is Retryable only when
+// the failure provably predates dispatch (ErrDisconnected, *Client's
+// pre-transport fast path); every other mutation failure, and every
+// read-only-action failure regardless of cause, keeps its prior behavior.
+func TestComputerUseRetryableReflectsMutationHazard(t *testing.T) {
+	t.Run("mutation failing mid-flight is not retryable", func(t *testing.T) {
+		fake := &fakeCaller{handler: func(context.Context, string, map[string]any) (*mcp.CallToolResult, error) {
+			// The fakeCaller records the call before invoking handler, so this
+			// error models a failure discovered only after the call already
+			// reached the transport (e.g. an EOF mid-response) -- exactly the
+			// case a retry could double-execute.
+			return nil, errors.New("connection reset by peer")
+		}}
+		adapter := NewAdapter(fake)
+
+		out, err := adapter.ComputerUse(t.Context(), api.ComputerUseInput{
+			Action: api.ActionClick, X: intPtr(1), Y: intPtr(1),
+		})
+		if err != nil {
+			t.Fatalf("ComputerUse returned an error: %v", err)
+		}
+		if out.Code != api.CodeSessionUnavailable {
+			t.Fatalf("code = %q, want %q", out.Code, api.CodeSessionUnavailable)
+		}
+		if out.Retryable {
+			t.Fatal("mutation failing mid-flight must not be marked Retryable")
+		}
+		if n := fake.callCount(); n != 1 {
+			t.Fatalf("mutation was sent %d times, want exactly 1 (no replay)", n)
+		}
+	})
+
+	t.Run("mutation failing via pre-dispatch ErrDisconnected is retryable", func(t *testing.T) {
+		fake := &fakeCaller{handler: func(context.Context, string, map[string]any) (*mcp.CallToolResult, error) {
+			// *Client.Call returns ErrDisconnected from its pre-transport fast
+			// path without ever touching the transport, so this failure
+			// provably predates dispatch.
+			return nil, ErrDisconnected
+		}}
+		adapter := NewAdapter(fake)
+
+		out, err := adapter.ComputerUse(t.Context(), api.ComputerUseInput{
+			Action: api.ActionType, Text: "hello",
+		})
+		if err != nil {
+			t.Fatalf("ComputerUse returned an error: %v", err)
+		}
+		if out.Code != api.CodeSessionUnavailable {
+			t.Fatalf("code = %q, want %q", out.Code, api.CodeSessionUnavailable)
+		}
+		if !out.Retryable {
+			t.Fatal("mutation failing via pre-dispatch ErrDisconnected must be marked Retryable")
+		}
+	})
+
+	t.Run("read-only action failure stays retryable", func(t *testing.T) {
+		fake := &fakeCaller{handler: func(context.Context, string, map[string]any) (*mcp.CallToolResult, error) {
+			return nil, errors.New("connection reset by peer")
+		}}
+		adapter := NewAdapter(fake)
+
+		out, err := adapter.ComputerUse(t.Context(), api.ComputerUseInput{
+			Action: api.ActionAccessibility,
+		})
+		if err != nil {
+			t.Fatalf("ComputerUse returned an error: %v", err)
+		}
+		if out.Code != api.CodeSessionUnavailable {
+			t.Fatalf("code = %q, want %q", out.Code, api.CodeSessionUnavailable)
+		}
+		if !out.Retryable {
+			t.Fatal("read-only action failure must stay Retryable")
+		}
+	})
+}
+
 func TestComputerUseCancellationIsDeadlineExceeded(t *testing.T) {
 	fake := &fakeCaller{handler: func(ctx context.Context, _ string, _ map[string]any) (*mcp.CallToolResult, error) {
 		return nil, ctx.Err()
@@ -421,8 +499,12 @@ func TestComputerUseCancellationIsDeadlineExceeded(t *testing.T) {
 	if out.Code != api.CodeDeadlineExceeded {
 		t.Fatalf("code = %q, want %q", out.Code, api.CodeDeadlineExceeded)
 	}
-	if n := fake.callCount(); n != 1 {
-		t.Fatalf("cancelled call issued %d Cua calls, want exactly 1 (no replay)", n)
+	// The ctx is already cancelled before ComputerUse is even called, so the
+	// belt-and-suspenders check (Fix I2) must catch it before invoke ever
+	// dispatches to Cua: 0 calls, not 1. Dispatching a mutation with an
+	// already-dead ctx is exactly the hazard that check exists to close.
+	if n := fake.callCount(); n != 0 {
+		t.Fatalf("cancelled call issued %d Cua calls, want exactly 0 (never dispatched)", n)
 	}
 }
 
@@ -523,6 +605,38 @@ func TestComputerUseDesktopCaptureRestoreFailureDoesNotOverrideSuccess(t *testin
 	}
 }
 
+// TestComputerUseDesktopCaptureFailureStillRestoresScope covers Fix M1: when
+// get_desktop_state itself fails (not just the restore), capture_scope must
+// still be flipped back to "window" on the way out. Without the restore, a
+// live session would leak the flipped scope and corrupt the next
+// window-scoped call in this seat or the next ComputerUse call entirely.
+func TestComputerUseDesktopCaptureFailureStillRestoresScope(t *testing.T) {
+	fake := &fakeCaller{handler: func(_ context.Context, name string, _ map[string]any) (*mcp.CallToolResult, error) {
+		if name == toolGetDesktopState {
+			return nil, errors.New("desktop read failed")
+		}
+		return okResult()
+	}}
+	adapter := NewAdapter(fake)
+
+	out, err := adapter.ComputerUse(t.Context(), api.ComputerUseInput{Action: api.ActionCapture})
+	if err != nil {
+		t.Fatalf("ComputerUse returned an error: %v", err)
+	}
+	// The original failure must not be masked by the restore.
+	if out.Code != api.CodeSessionUnavailable {
+		t.Fatalf("code = %q, want %q (original get_desktop_state failure preserved)", out.Code, api.CodeSessionUnavailable)
+	}
+
+	calls := fake.Calls()
+	if len(calls) != 3 {
+		t.Fatalf("got %d Cua calls, want 3 (set desktop, failed get, restore window): %#v", len(calls), calls)
+	}
+	if calls[2].name != toolSetConfig || calls[2].args["capture_scope"] != "window" {
+		t.Fatalf("final call = %#v, want a set_config(capture_scope=window) restore even on failure", calls[2])
+	}
+}
+
 func TestComputerUseAccessibilityPreservesElements(t *testing.T) {
 	fake := &fakeCaller{handler: func(context.Context, string, map[string]any) (*mcp.CallToolResult, error) {
 		return &mcp.CallToolResult{
@@ -592,6 +706,66 @@ func TestComputerUseSerializesConcurrentCalls(t *testing.T) {
 	}
 	if max := atomic.LoadInt32(&fake.maxActive); max != 1 {
 		t.Fatalf("maximum concurrent Cua calls = %d, want 1", max)
+	}
+}
+
+// TestComputerUseCancelledWaiterNeverDispatches covers Fix I2: a caller
+// queued behind another caller holding the seat must be preempted by its own
+// ctx instead of blocking until the seat frees up and then dispatching a
+// mutation whose ctx already expired.
+func TestComputerUseCancelledWaiterNeverDispatches(t *testing.T) {
+	holding := make(chan struct{})
+	release := make(chan struct{})
+	fake := &fakeCaller{handler: func(context.Context, string, map[string]any) (*mcp.CallToolResult, error) {
+		close(holding)
+		<-release
+		return okResult()
+	}}
+	adapter := NewAdapter(fake)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := adapter.ComputerUse(t.Context(), api.ComputerUseInput{
+			Action: api.ActionClick, X: intPtr(1), Y: intPtr(1),
+		})
+		if err != nil {
+			t.Errorf("holder ComputerUse returned an error: %v", err)
+		}
+	}()
+
+	<-holding // the holder now has the seat and is inside its (blocked) Cua call
+
+	waiterCtx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	go func() {
+		// Cancel while the waiter is still queued behind the holder, which
+		// won't release the seat until the test closes release below.
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	out, err := adapter.ComputerUse(waiterCtx, api.ComputerUseInput{
+		Action: api.ActionType, Text: "hello",
+	})
+	if err != nil {
+		t.Fatalf("ComputerUse returned an error: %v", err)
+	}
+	if out.Code != api.CodeDeadlineExceeded {
+		t.Fatalf("code = %q, want %q", out.Code, api.CodeDeadlineExceeded)
+	}
+	// The waiter must never have dispatched to Cua: the only call so far is
+	// the holder's still-in-flight one.
+	if n := fake.callCount(); n != 1 {
+		t.Fatalf("cancelled waiter caused %d Cua calls, want exactly 1 (the holder's; the waiter's mutation was never dispatched)", n)
+	}
+
+	close(release)
+	wg.Wait()
+
+	if n := fake.callCount(); n != 1 {
+		t.Fatalf("after the holder released the seat, Cua saw %d calls, want 1 (the cancelled waiter still never dispatched)", n)
 	}
 }
 

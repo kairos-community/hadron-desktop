@@ -1,9 +1,9 @@
 // Package cua's adapter.go turns the one unified computer_use action defined
 // by agent/internal/api into the matching Cua MCP tool call(s), and turns
 // Cua's response back into api.ComputerUseOutput. It is the single seat for
-// computer control: every computer_use call funnels through Adapter.seatMu,
-// so concurrent callers queue rather than interleave against the one Cua
-// child.
+// computer control: every computer_use call funnels through Adapter.seat, a
+// ctx-aware semaphore, so concurrent callers queue rather than interleave
+// against the one Cua child.
 package cua
 
 import (
@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -58,20 +57,23 @@ type Caller interface {
 	Call(ctx context.Context, name string, arguments any) (*mcp.CallToolResult, error)
 }
 
-// Adapter maps computer_use calls onto a Caller. seatMu is the single seat:
-// it is held for the full duration of a ComputerUse call, including any
-// multi-call sequence a single action needs (for example the capture_scope
-// flip before a desktop capture), so those sub-calls are never split by a
-// concurrent computer_use request.
+// Adapter maps computer_use calls onto a Caller. seat is the single seat: a
+// capacity-1 channel semaphore held for the full duration of a ComputerUse
+// call, including any multi-call sequence a single action needs (for example
+// the capture_scope flip before a desktop capture), so those sub-calls are
+// never split by a concurrent computer_use request. Unlike a plain
+// sync.Mutex, acquiring it is ctx-aware: a waiter queued behind another
+// caller can be preempted by its own ctx instead of dispatching a mutation
+// with an already-dead ctx once it finally gets the seat.
 type Adapter struct {
 	caller Caller
 
-	seatMu sync.Mutex
+	seat chan struct{}
 }
 
 // NewAdapter returns an Adapter that maps computer_use calls onto caller.
 func NewAdapter(caller Caller) *Adapter {
-	return &Adapter{caller: caller}
+	return &Adapter{caller: caller, seat: make(chan struct{}, 1)}
 }
 
 // ComputerUse maps in onto the Cua call(s) it requires and returns the
@@ -89,8 +91,22 @@ func (a *Adapter) ComputerUse(ctx context.Context, in api.ComputerUseInput) (api
 		return a.wait(ctx, in)
 	}
 
-	a.seatMu.Lock()
-	defer a.seatMu.Unlock()
+	select {
+	case a.seat <- struct{}{}:
+	case <-ctx.Done():
+		// Queued behind another caller and preempted by our own ctx: nothing
+		// was ever dispatched to Cua, so this is unambiguously safe to retry.
+		return api.ComputerUseOutput{ResultMeta: metaFor(api.CodeDeadlineExceeded, "computer_use: cancelled while waiting for the computer-use seat: "+ctx.Err().Error(), true)}, nil
+	}
+	defer func() { <-a.seat }()
+
+	// Belt-and-suspenders: even after winning the seat, ctx may have expired
+	// in the gap between the select above unblocking and here. Check again
+	// before dispatching anything so an abandoned mutation is never written
+	// to the transport with an already-dead ctx.
+	if err := ctx.Err(); err != nil {
+		return api.ComputerUseOutput{ResultMeta: metaFor(api.CodeDeadlineExceeded, "computer_use: ctx expired after acquiring the computer-use seat, before dispatch: "+err.Error(), true)}, nil
+	}
 
 	switch in.Action {
 	case api.ActionCapture:
@@ -127,7 +143,7 @@ func (a *Adapter) ComputerUse(ctx context.Context, in api.ComputerUseInput) (api
 
 func (a *Adapter) capture(ctx context.Context, in api.ComputerUseInput) (api.ComputerUseOutput, error) {
 	if in.Scope == api.ScopeWindow {
-		result, rmeta := a.invoke(ctx, toolGetWindowState, windowArgs(in))
+		result, rmeta := a.invoke(ctx, toolGetWindowState, windowArgs(in), true)
 		if rmeta.Code != "" {
 			return api.ComputerUseOutput{ResultMeta: rmeta}, nil
 		}
@@ -139,16 +155,20 @@ func (a *Adapter) capture(ctx context.Context, in api.ComputerUseInput) (api.Com
 	// back. capture_scope is process-global cua-driver state (it outlives
 	// this one call), so leaving it on "desktop" would silently change the
 	// behavior of a later window-scoped call in this seat or in the next
-	// ComputerUse call entirely. The restore is best-effort: it never
-	// overrides the capture's own result, since the screenshot already in
-	// hand is valid regardless of whether the restore itself lands.
-	if _, rmeta := a.invoke(ctx, toolSetConfig, map[string]any{"capture_scope": "desktop"}); rmeta.Code != "" {
+	// ComputerUse call entirely. The restore is deferred so it runs on BOTH
+	// the success and failure path of get_desktop_state: a failed desktop
+	// read with an otherwise-live session must not leave capture_scope
+	// flipped, or the next window-scoped call gets corrupted. It is
+	// best-effort either way: it never overrides get_desktop_state's own
+	// result (success or failure), since that result is valid regardless of
+	// whether the restore itself lands.
+	if _, rmeta := a.invoke(ctx, toolSetConfig, map[string]any{"capture_scope": "desktop"}, true); rmeta.Code != "" {
 		return api.ComputerUseOutput{ResultMeta: rmeta}, nil
 	}
-	result, rmeta := a.invoke(ctx, toolGetDesktopState, map[string]any{})
-	if rmeta.Code == "" {
-		_, _ = a.invoke(ctx, toolSetConfig, map[string]any{"capture_scope": "window"})
-	}
+	defer func() {
+		_, _ = a.invoke(ctx, toolSetConfig, map[string]any{"capture_scope": "window"}, true)
+	}()
+	result, rmeta := a.invoke(ctx, toolGetDesktopState, map[string]any{}, true)
 	if rmeta.Code != "" {
 		return api.ComputerUseOutput{ResultMeta: rmeta}, nil
 	}
@@ -159,7 +179,7 @@ func (a *Adapter) accessibility(ctx context.Context, in api.ComputerUseInput) (a
 	if in.Scope == api.ScopeWindow {
 		args := windowArgs(in)
 		args["include_screenshot"] = false
-		result, rmeta := a.invoke(ctx, toolGetWindowState, args)
+		result, rmeta := a.invoke(ctx, toolGetWindowState, args, true)
 		if rmeta.Code != "" {
 			return api.ComputerUseOutput{ResultMeta: rmeta}, nil
 		}
@@ -180,7 +200,7 @@ func (a *Adapter) accessibility(ctx context.Context, in api.ComputerUseInput) (a
 	if in.MaxDepth != nil {
 		args["max_depth"] = *in.MaxDepth
 	}
-	result, rmeta := a.invoke(ctx, toolGetAccessibilityTree, args)
+	result, rmeta := a.invoke(ctx, toolGetAccessibilityTree, args, true)
 	if rmeta.Code != "" {
 		return api.ComputerUseOutput{ResultMeta: rmeta}, nil
 	}
@@ -210,7 +230,7 @@ func (a *Adapter) pointAction(ctx context.Context, tool string, in api.ComputerU
 	if in.Button != "" {
 		args["button"] = string(in.Button)
 	}
-	_, rmeta := a.invoke(ctx, tool, args)
+	_, rmeta := a.invoke(ctx, tool, args, false)
 	return api.ComputerUseOutput{ResultMeta: rmeta}, nil
 }
 
@@ -232,7 +252,7 @@ func (a *Adapter) drag(ctx context.Context, in api.ComputerUseInput) (api.Comput
 	if in.Button != "" {
 		args["button"] = string(in.Button)
 	}
-	_, rmeta := a.invoke(ctx, toolDrag, args)
+	_, rmeta := a.invoke(ctx, toolDrag, args, false)
 	return api.ComputerUseOutput{ResultMeta: rmeta}, nil
 }
 
@@ -251,7 +271,7 @@ func (a *Adapter) scroll(ctx context.Context, in api.ComputerUseInput) (api.Comp
 	if in.Amount != nil {
 		args["amount"] = *in.Amount
 	}
-	_, rmeta := a.invoke(ctx, toolScroll, args)
+	_, rmeta := a.invoke(ctx, toolScroll, args, false)
 	return api.ComputerUseOutput{ResultMeta: rmeta}, nil
 }
 
@@ -262,7 +282,7 @@ func (a *Adapter) typeText(ctx context.Context, in api.ComputerUseInput) (api.Co
 	if in.ElementIndex != nil {
 		args["element_index"] = *in.ElementIndex
 	}
-	_, rmeta := a.invoke(ctx, toolTypeText, args)
+	_, rmeta := a.invoke(ctx, toolTypeText, args, false)
 	return api.ComputerUseOutput{ResultMeta: rmeta}, nil
 }
 
@@ -281,7 +301,7 @@ func (a *Adapter) key(ctx context.Context, in api.ComputerUseInput) (api.Compute
 		args["modifiers"] = modifiers
 	}
 
-	_, rmeta := a.invoke(ctx, tool, args)
+	_, rmeta := a.invoke(ctx, tool, args, false)
 	return api.ComputerUseOutput{ResultMeta: rmeta}, nil
 }
 
@@ -290,7 +310,7 @@ func (a *Adapter) key(ctx context.Context, in api.ComputerUseInput) (api.Compute
 // ---------------------------------------------------------------------------
 
 func (a *Adapter) listApplications(ctx context.Context, in api.ComputerUseInput) (api.ComputerUseOutput, error) {
-	result, rmeta := a.invoke(ctx, toolListWindows, map[string]any{})
+	result, rmeta := a.invoke(ctx, toolListWindows, map[string]any{}, true)
 	if rmeta.Code != "" {
 		return api.ComputerUseOutput{ResultMeta: rmeta}, nil
 	}
@@ -302,7 +322,11 @@ func (a *Adapter) listApplications(ctx context.Context, in api.ComputerUseInput)
 }
 
 func (a *Adapter) focusApplication(ctx context.Context, in api.ComputerUseInput) (api.ComputerUseOutput, error) {
-	_, rmeta := a.invoke(ctx, toolBringToFront, windowArgs(in))
+	// bring_to_front is idempotent from the caller's point of view (bringing
+	// an already-front window to the front again is a no-op), so unlike
+	// click/type/drag/scroll/key it carries none of the double-execution
+	// hazard the mutation classification exists to guard against.
+	_, rmeta := a.invoke(ctx, toolBringToFront, windowArgs(in), true)
 	if rmeta.Code != "" {
 		return api.ComputerUseOutput{ResultMeta: rmeta}, nil
 	}
@@ -344,10 +368,18 @@ func (a *Adapter) wait(ctx context.Context, in api.ComputerUseInput) (api.Comput
 // exactly once per logical sub-step: neither invoke nor its callers ever
 // retry a call themselves, so a mutation that fails mid-flight (a
 // disconnect, a cancellation) is reported once and never replayed.
-func (a *Adapter) invoke(ctx context.Context, name string, args map[string]any) (*mcp.CallToolResult, api.ResultMeta) {
+//
+// readOnly tells classifyErr whether name is one of the actions that never
+// mutates on-screen state (capture, accessibility, list_applications,
+// focus_application): for those it is always safe to advertise Retryable,
+// since replaying them cannot double-execute a user-visible effect. Mutation
+// sub-calls (click, double_click, drag, scroll, type_text, press_key/hotkey)
+// pass readOnly=false, which narrows Retryable to only the case classifyErr
+// can prove the call never reached the transport.
+func (a *Adapter) invoke(ctx context.Context, name string, args map[string]any, readOnly bool) (*mcp.CallToolResult, api.ResultMeta) {
 	result, err := a.caller.Call(ctx, name, args)
 	if err != nil {
-		return nil, classifyErr(err)
+		return nil, classifyErr(err, readOnly)
 	}
 	if result != nil && result.IsError {
 		return result, metaFor(api.CodeInternal, fmt.Sprintf("%s: %s", name, contentText(result)), false)
@@ -359,14 +391,26 @@ func (a *Adapter) invoke(ctx context.Context, name string, args map[string]any) 
 // requires: context cancellation/timeout becomes DEADLINE_EXCEEDED, and
 // every other transport-level failure (child absent, display gone, a
 // disconnect detected by the client, an in-flight reconnect not yet done)
-// becomes SESSION_UNAVAILABLE. Both are marked retryable: it is safe for the
-// caller to issue a fresh request later, but this call itself is never
-// retried here.
-func classifyErr(err error) api.ResultMeta {
+// becomes SESSION_UNAVAILABLE.
+//
+// Retryable is not simply "always true": for a mutation (readOnly=false) the
+// adapter cannot tell "the call never reached the transport" (safe to
+// retry) apart from "the call was dispatched and then the child died or ctx
+// expired mid-flight" (a retry could double-execute a click/type/drag/etc.)
+// except in one provable case — *Client.Call's pre-transport fast path
+// returns ErrDisconnected without ever touching the transport when it is
+// already disconnected. So a mutation is Retryable only when err is
+// ErrDisconnected; every other mutation failure (EOF/disconnect mid-call,
+// ctx cancel/deadline observed after dispatch) is not. Read-only actions
+// have no such hazard: replaying a capture/accessibility/list/focus read
+// cannot double-execute a user-visible effect, so they stay Retryable
+// regardless of err.
+func classifyErr(err error, readOnly bool) api.ResultMeta {
+	retryable := readOnly || errors.Is(err, ErrDisconnected)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return metaFor(api.CodeDeadlineExceeded, "computer_use: deadline exceeded: "+err.Error(), true)
+		return metaFor(api.CodeDeadlineExceeded, "computer_use: deadline exceeded: "+err.Error(), retryable)
 	}
-	return metaFor(api.CodeSessionUnavailable, "computer_use: Cua session unavailable: "+err.Error(), true)
+	return metaFor(api.CodeSessionUnavailable, "computer_use: Cua session unavailable: "+err.Error(), retryable)
 }
 
 func metaFor(code api.ErrorCode, message string, retryable bool) api.ResultMeta {
