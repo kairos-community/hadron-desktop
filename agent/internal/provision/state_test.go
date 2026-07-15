@@ -106,14 +106,14 @@ func TestMaterializeLiveFirstBoot(t *testing.T) {
 	if !res.TokenWritten {
 		t.Fatal("expected TokenWritten=true on live first boot")
 	}
-	tokenPath := filepath.Join(runtimeDir, "first-run-token")
+	tokenPath := filepath.Join(runtimeDir, "first-run", "token")
 	raw, err := os.ReadFile(tokenPath)
 	if err != nil {
-		t.Fatalf("read first-run-token: %v", err)
+		t.Fatalf("read first-run token: %v", err)
 	}
 	bearer := strings.TrimSpace(string(raw))
 	if !strings.HasPrefix(bearer, "hdn_u_") {
-		t.Fatalf("first-run-token is not a user bearer: %q", bearer)
+		t.Fatalf("first-run token is not a user bearer: %q", bearer)
 	}
 
 	// Its digest is what was persisted in the gateway config.
@@ -199,7 +199,7 @@ func TestMaterializeInstalledReuseNoPlaintext(t *testing.T) {
 	if second.TokenWritten {
 		t.Fatal("subsequent installed boot must NOT recreate the plaintext token")
 	}
-	if _, err := os.Stat(filepath.Join(runtimeDir, "first-run-token")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(runtimeDir, "first-run", "token")); !os.IsNotExist(err) {
 		t.Fatalf("first-run-token should not be recreated on reuse (stat err = %v)", err)
 	}
 
@@ -255,7 +255,7 @@ func TestMaterializeCorruptGatewayConfigFailsWithoutRotating(t *testing.T) {
 
 	// No new plaintext token must have been written -- corruption must never
 	// mint a fresh credential.
-	if _, statErr := os.Stat(filepath.Join(runtimeDir, "first-run-token")); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(filepath.Join(runtimeDir, "first-run", "token")); !os.IsNotExist(statErr) {
 		t.Fatalf("first-run-token must not be (re)written when the gateway config is corrupt (stat err = %v)", statErr)
 	}
 }
@@ -281,7 +281,7 @@ func TestMaterializeCIProvidedDigestNoPlaintext(t *testing.T) {
 	if res.TokenWritten {
 		t.Fatal("a CI-provided digest must not create a plaintext token")
 	}
-	if _, err := os.Stat(filepath.Join(runtimeDir, "first-run-token")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(runtimeDir, "first-run", "token")); !os.IsNotExist(err) {
 		t.Fatalf("first-run-token should be absent for a CI digest (stat err = %v)", err)
 	}
 	if got := readGateway(t, stateDir).User.Current; got != string(digest) {
@@ -467,8 +467,8 @@ func TestMaterializeNoPlaintextBearerUnderStateDir(t *testing.T) {
 			return fmt.Errorf("read %s: %w", path, readErr)
 		}
 		if containsBearer(data) {
-			if filepath.Base(path) != "first-run-token" {
-				t.Fatalf("plaintext bearer found outside first-run-token at %s", path)
+			if filepath.Base(path) != "token" || filepath.Base(filepath.Dir(path)) != "first-run" {
+				t.Fatalf("plaintext bearer found outside first-run/token at %s", path)
 			}
 			plaintextFiles++
 		}
@@ -477,7 +477,7 @@ func TestMaterializeNoPlaintextBearerUnderStateDir(t *testing.T) {
 		t.Fatalf("walk runtime dir: %v", err)
 	}
 	if plaintextFiles != 1 {
-		t.Fatalf("expected exactly one plaintext bearer file (first-run-token), found %d", plaintextFiles)
+		t.Fatalf("expected exactly one plaintext bearer file (first-run/token), found %d", plaintextFiles)
 	}
 }
 

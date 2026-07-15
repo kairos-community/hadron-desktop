@@ -4,7 +4,7 @@
 # a NO-OP unless a plaintext first-run bearer is actually waiting.
 #
 # Flow:
-#   1. Guard: if /run/hadron-agent/first-run-token does not exist, exit 0
+#   1. Guard: if /run/hadron-agent/first-run/token does not exist, exit 0
 #      immediately. A CI-provided digest (Phase 3 Task 2) never creates this
 #      file, so this guard alone is what makes the panel silent on a CI/
 #      preseeded image.
@@ -55,7 +55,7 @@ set -u
 # Configuration (overridable via env for testing; production defaults match
 # the tmpfiles/provisioning contract from Tasks 2 and this task's brief).
 # ---------------------------------------------------------------------------
-TOKEN_FILE="${HADRON_AGENT_FIRST_RUN_TOKEN:-/run/hadron-agent/first-run-token}"
+TOKEN_FILE="${HADRON_AGENT_FIRST_RUN_TOKEN:-/run/hadron-agent/first-run/token}"
 STATUS_JSON="${HADRON_AGENT_STATUS_JSON:-/run/hadron-agent/status/status.json}"
 DEFAULTS_JSON="${HADRON_AGENT_DEFAULTS_JSON:-/etc/hadron-agent/defaults.json}"
 ST_BIN="${HADRON_AGENT_ST:-st}"
@@ -200,13 +200,11 @@ st_pid=$!
 IFS= read -r _ <"$ack"
 wait "$st_pid" 2>/dev/null || true
 
-# Unlink last, only after the operator has acknowledged. NOTE: /run/hadron-agent
-# is root:root 0755 (Task 2/5 tmpfiles contract); the unprivileged `agent`
-# user this script runs as has no write permission on that directory, so this
-# unlink can fail with EACCES in the current rootfs layout even though it owns
-# the file. `-f` keeps that failure silent and non-fatal rather than crashing
-# the panel after the secret was already shown; see the Task 7 report for the
-# flagged fix (either relocate first-run-token under an agent-writable
-# subdirectory, or loosen /run/hadron-agent's mode for this one entry).
+# Unlink last, only after the operator has acknowledged. The token lives under
+# /run/hadron-agent/first-run, which the tmpfiles contract makes agent:agent
+# 0700 -- the `agent` user this script runs as OWNS that directory, so it has
+# the directory write permission POSIX unlink requires and this succeeds. `-f`
+# keeps any residual failure silent and non-fatal rather than crashing the
+# panel after the secret was already shown.
 rm -f "$TOKEN_FILE" 2>/dev/null || true
 exit 0

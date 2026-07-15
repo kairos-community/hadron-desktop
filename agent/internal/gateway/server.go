@@ -35,6 +35,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
@@ -107,6 +108,17 @@ type Config struct {
 	// Controller owns the pause state and per-call generation. Required.
 	Controller *control.Controller
 
+	// CertFingerprint, MDNS, and StatusFile drive the redacted status.json the
+	// gateway publishes for the appliance's status bar and first-run panel.
+	// CertFingerprint and MDNS are the static, provisioned config values
+	// republished verbatim (redacted); both are absent (empty / false) when the
+	// gateway runs without a --config. StatusFile is the path the redacted
+	// status is written to; an empty StatusFile DISABLES the writer entirely, so
+	// tests and the contract suite need no writable status directory.
+	CertFingerprint string
+	MDNS            bool
+	StatusFile      string
+
 	// RequiredScopes, when non-empty, are enforced by the bearer middleware:
 	// a valid token lacking any of them is refused with 403. Left empty, any
 	// valid bearer of either class is admitted to /mcp.
@@ -145,12 +157,21 @@ type Gateway struct {
 	scopes     []string
 	logger     *slog.Logger
 
+	certFingerprint string
+	mdns            bool
+	statusFile      string
+
 	maxBodyBytes     int64
 	maxResponseBytes int
 	maxConnections   int
 	requestTimeout   time.Duration
 	tokenTTL         time.Duration
 	now              func() time.Time
+
+	// computerUse counts the remote computer_use tool calls CURRENTLY executing
+	// (only computer_use, never another tool nor a merely-open MCP connection).
+	// ComputerUseActive reports whether the count is above zero.
+	computerUse atomic.Int64
 
 	sem     chan struct{}
 	handler http.Handler
@@ -203,6 +224,9 @@ func New(cfg Config) (*Gateway, error) {
 		controller:       cfg.Controller,
 		scopes:           cfg.RequiredScopes,
 		logger:           logger,
+		certFingerprint:  cfg.CertFingerprint,
+		mdns:             cfg.MDNS,
+		statusFile:       cfg.StatusFile,
 		maxBodyBytes:     orInt64(cfg.MaxBodyBytes, DefaultMaxBodyBytes),
 		maxResponseBytes: orInt(cfg.MaxResponseBytes, DefaultMaxResponseBytes),
 		maxConnections:   orInt(cfg.MaxConnections, DefaultMaxConnections),
@@ -388,6 +412,15 @@ func route[Out any](ctx context.Context, g *Gateway, req *mcp.CallToolRequest, t
 		*meta(&out) = api.ResultMeta{Code: api.CodeInternal, Message: "routing unavailable"}
 		g.audit(ctx, rid, tokenID, class, tool, g.now().Sub(start), api.CodeInternal, false, false)
 		return nil, out, nil
+	}
+
+	// Track in-flight computer_use so the redacted status.json can report
+	// computer_use_active. Only computer_use is counted -- never another tool,
+	// and never a merely-open MCP connection. The count is incremented around
+	// the dispatch and decremented when it returns (success, error, or cancel).
+	if tool == api.ToolComputerUse {
+		g.computerUse.Add(1)
+		defer g.computerUse.Add(-1)
 	}
 
 	resp, callErr := client.Call(genCtx, rpc.CallRequest{

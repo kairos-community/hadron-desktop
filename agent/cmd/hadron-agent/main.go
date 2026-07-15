@@ -200,6 +200,7 @@ func runGateway(args []string, stderr io.Writer) error {
 	sessSock := fs.String("session-socket", rpc.SessionSocketPath, "path of the session broker's Unix socket")
 	rootSock := fs.String("root-socket", rpc.RootSocketPath, "path of the root helper's Unix socket")
 	ctrlSock := fs.String("control-socket", rpc.ControlSocketPath, "path of the local control Unix socket")
+	statusFile := fs.String("status-file", gateway.DefaultStatusFile, "path the redacted status.json is published to (empty disables the writer)")
 	userDigest := fs.String("user-digest", "", "sha256 digest of the user bearer (default $"+envUserDigest+")")
 	adminDigest := fs.String("admin-digest", "", "sha256 digest of the admin bearer (default $"+envAdminDigest+")")
 	if err := parseFlags(fs, args); err != nil {
@@ -277,6 +278,17 @@ func runGateway(args []string, stderr io.Writer) error {
 		maxBodyBytes = int64(gwCfg.Limits.MaxRequestBytes)
 	}
 
+	// Static values republished (redacted) in status.json: the certificate
+	// fingerprint and mDNS flag come from the provisioned config; the listen
+	// address the gateway resolves is reported by the gateway itself. Absent a
+	// --config, both are empty/false.
+	var certFingerprint string
+	var mdns bool
+	if gwCfg != nil {
+		certFingerprint = gwCfg.CertFingerprint
+		mdns = gwCfg.MDNS
+	}
+
 	sessionClient := rpc.NewClient(*sessSock)
 	defer sessionClient.Close()
 	rootClient := rpc.NewClient(*rootSock)
@@ -305,6 +317,9 @@ func runGateway(args []string, stderr io.Writer) error {
 		Logger:             logger,
 		MaxConcurrentCalls: maxConcurrent,
 		MaxBodyBytes:       maxBodyBytes,
+		CertFingerprint:    certFingerprint,
+		MDNS:               mdns,
+		StatusFile:         *statusFile,
 	})
 	if err != nil {
 		return err
@@ -329,13 +344,24 @@ func runGateway(args []string, stderr io.Writer) error {
 		_ = l.Close()
 	}()
 
+	// Publish the redacted status.json once the listener is up, until shutdown.
+	// A nil/empty --status-file disables the writer (RunStatusWriter returns at
+	// once), so a manual run without one touches no status directory.
+	statusDone := make(chan struct{})
+	go func() {
+		defer close(statusDone)
+		g.RunStatusWriter(ctx, gateway.DefaultStatusInterval)
+	}()
+
 	logger.Info("gateway listening", slog.String("addr", g.ListenAddr()), slog.Bool("tls", tlsConf != nil))
 	serveErr := g.Serve(l)
 	if errors.Is(serveErr, net.ErrClosed) {
 		serveErr = nil
 	}
 
-	// Give the control socket goroutine a moment to unwind on shutdown.
+	// Stop the status writer (ctx is already cancelled on shutdown) and give the
+	// control socket goroutine a moment to unwind.
+	<-statusDone
 	select {
 	case <-ctrlErr:
 	case <-time.After(2 * time.Second):

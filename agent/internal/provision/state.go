@@ -301,9 +301,12 @@ func (m *Materializer) Materialize(cfg Config) (Result, error) {
 	}
 
 	// The one-shot plaintext token is written LAST and only into the runtime
-	// (tmpfs) dir, never under the state dir.
+	// (tmpfs) dir, never under the state dir. It goes under the agent-owned
+	// first-run/ subdirectory (tmpfiles creates it 0700 agent:agent) rather than
+	// directly under the root-owned runtime root, so the unprivileged `agent`
+	// user -- which owns the parent dir -- can unlink the token after showing it.
 	if plaintext != "" {
-		tokenPath := filepath.Join(m.opts.RuntimeDir, "first-run-token")
+		tokenPath := filepath.Join(m.opts.RuntimeDir, "first-run", "token")
 		rec, err := m.writeFile(fileSpec{
 			path: tokenPath, data: []byte(plaintext + "\n"), mode: 0o400, user: ownerAgent, group: ownerAgent,
 		})

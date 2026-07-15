@@ -110,7 +110,7 @@ func TestProvisionMaterializesIntoTempDirs(t *testing.T) {
 			t.Fatalf("expected %s to be materialized: %v", rel, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(runtimeDir, "first-run-token")); err != nil {
+	if _, err := os.Stat(filepath.Join(runtimeDir, "first-run", "token")); err != nil {
 		t.Fatalf("expected a one-shot first-run token: %v", err)
 	}
 }
