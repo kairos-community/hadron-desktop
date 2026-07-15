@@ -1,0 +1,586 @@
+// Command hadron-agent is the single MCP service binary for the Hadron "Cua
+// agent appliance". It composes the Phase-2 packages into a small set of
+// subcommands:
+//
+//	hadron-agent gateway       run the public HTTPS MCP gateway
+//	hadron-agent session       run the unprivileged session broker
+//	hadron-agent root-helper   run the privileged root helper
+//	hadron-agent control ...   pause | resume | toggle the local runtime
+//	hadron-agent status        print the local runtime status
+//	hadron-agent version       print the build version and cua revision
+//	hadron-agent provision     (reserved for Phase 3; currently unsupported)
+//
+// Exit codes: an unknown command or an unparseable flag exits 2; a runtime
+// failure exits 1; -h/-help exits 0.
+//
+// This binary does NOT provision system users, TLS material, or systemd units:
+// it reads its configuration (listen address, socket paths, TLS files, bearer
+// digests) from flags and environment variables and fails cleanly when a
+// required value is absent. Provisioning is Phase 3's responsibility.
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/mudler/hadron-desktop/agent/internal/auth"
+	"github.com/mudler/hadron-desktop/agent/internal/buildinfo"
+	"github.com/mudler/hadron-desktop/agent/internal/control"
+	"github.com/mudler/hadron-desktop/agent/internal/files"
+	"github.com/mudler/hadron-desktop/agent/internal/gateway"
+	"github.com/mudler/hadron-desktop/agent/internal/process"
+	"github.com/mudler/hadron-desktop/agent/internal/roothelper"
+	"github.com/mudler/hadron-desktop/agent/internal/rpc"
+	"github.com/mudler/hadron-desktop/agent/internal/session"
+)
+
+// Environment variables that supply the bearer digests when the matching flag
+// is not given. Digests are safe to carry in the environment; raw bearers are
+// never accepted here.
+const (
+	envUserDigest  = "HADRON_AGENT_USER_DIGEST"
+	envAdminDigest = "HADRON_AGENT_ADMIN_DIGEST"
+)
+
+// unusableDigest is a format-valid sha256 digest (all zeros) that no real
+// bearer can ever hash to. It stands in for a class that a given process does
+// not authenticate (e.g. the user class inside the root helper), so a Verifier
+// can always be constructed while that class remains effectively disabled.
+const unusableDigest = auth.Digest("sha256:0000000000000000000000000000000000000000000000000000000000000000")
+
+// Sentinel errors that steer the exit-code mapping in run.
+var (
+	// errUsage marks a usage/flag error: an unknown flag, a missing or unknown
+	// positional argument. It maps to exit code 2.
+	errUsage = errors.New("usage")
+	// errUnsupported marks a recognized-but-not-yet-implemented command
+	// (provision). It maps to exit code 1.
+	errUnsupported = errors.New("unsupported")
+)
+
+func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// run dispatches argv (excluding the program name) to the selected subcommand
+// and maps the result to a process exit code: 0 on success or -h/-help, 2 for
+// an unknown command or a usage/flag error, 1 for any other runtime failure.
+// It is the single testable entry point; main only wires it to os.Exit.
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		usage(stderr)
+		return 2
+	}
+
+	cmd, rest := args[0], args[1:]
+
+	var err error
+	switch cmd {
+	case "version", "-v", "--version":
+		err = runVersion(rest, stdout, stderr)
+	case "gateway":
+		err = runGateway(rest, stderr)
+	case "session":
+		err = runSession(rest, stderr)
+	case "root-helper":
+		err = runRootHelper(rest, stderr)
+	case "control":
+		err = runControl(rest, stdout, stderr)
+	case "status":
+		err = runStatus(rest, stdout, stderr)
+	case "provision":
+		err = fmt.Errorf("%w: `provision` is reserved for Phase 3 and is not available yet", errUnsupported)
+	case "-h", "--help", "help":
+		usage(stdout)
+		return 0
+	default:
+		fmt.Fprintf(stderr, "hadron-agent: unknown command %q\n", cmd)
+		usage(stderr)
+		return 2
+	}
+
+	if err == nil {
+		return 0
+	}
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
+	if errors.Is(err, errUsage) {
+		fmt.Fprintf(stderr, "hadron-agent %s: %v\n", cmd, err)
+		return 2
+	}
+	fmt.Fprintf(stderr, "hadron-agent %s: %v\n", cmd, err)
+	return 1
+}
+
+func usage(w io.Writer) {
+	fmt.Fprint(w, `hadron-agent - MCP service binary for the Hadron Cua agent appliance
+
+Usage:
+  hadron-agent <command> [flags]
+
+Commands:
+  gateway       Run the public HTTPS MCP gateway.
+  session       Run the unprivileged session broker.
+  root-helper   Run the privileged root helper.
+  control       pause | resume | toggle the local runtime.
+  status        Print the local runtime status.
+  version       Print the build version and cua-driver revision.
+  provision     Reserved for Phase 3 (currently unsupported).
+
+Run "hadron-agent <command> -h" for command-specific flags.
+`)
+}
+
+// newFlagSet builds a FlagSet in ContinueOnError mode whose parse errors are
+// written to stderr. It centralizes the flag-error -> exit-code mapping: -h
+// returns flag.ErrHelp (exit 0), any other parse failure is wrapped in errUsage
+// (exit 2).
+func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	return fs
+}
+
+// parseFlags runs fs.Parse and normalizes its error into the sentinel scheme.
+func parseFlags(fs *flag.FlagSet, args []string) error {
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return flag.ErrHelp
+		}
+		return fmt.Errorf("%w: %v", errUsage, err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// version
+// ---------------------------------------------------------------------------
+
+func runVersion(args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("version", stderr)
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, buildinfo.String())
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// gateway
+// ---------------------------------------------------------------------------
+
+func runGateway(args []string, stderr io.Writer) error {
+	fs := newFlagSet("gateway", stderr)
+	listen := fs.String("listen", gateway.DefaultListenAddr, "host:port to bind the HTTPS MCP endpoint")
+	tlsCert := fs.String("tls-cert", "", "path to the server TLS certificate (PEM)")
+	tlsKey := fs.String("tls-key", "", "path to the server TLS private key (PEM)")
+	insecure := fs.Bool("insecure-loopback", false, "serve plain HTTP; permitted ONLY on a loopback --listen address")
+	sessSock := fs.String("session-socket", rpc.SessionSocketPath, "path of the session broker's Unix socket")
+	rootSock := fs.String("root-socket", rpc.RootSocketPath, "path of the root helper's Unix socket")
+	ctrlSock := fs.String("control-socket", rpc.ControlSocketPath, "path of the local control Unix socket")
+	userDigest := fs.String("user-digest", "", "sha256 digest of the user bearer (default $"+envUserDigest+")")
+	adminDigest := fs.String("admin-digest", "", "sha256 digest of the admin bearer (default $"+envAdminDigest+")")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+
+	logger := newLogger(stderr)
+
+	userDig := resolveDigest(*userDigest, envUserDigest)
+	adminDig := resolveDigest(*adminDigest, envAdminDigest)
+	if userDig == "" && adminDig == "" {
+		return fmt.Errorf("no bearer digests configured: set --user-digest/--admin-digest or $%s/$%s", envUserDigest, envAdminDigest)
+	}
+	verifier, err := buildVerifier(userDig, adminDig)
+	if err != nil {
+		return err
+	}
+
+	tlsConf, err := loadTLS(*tlsCert, *tlsKey)
+	if err != nil {
+		return err
+	}
+
+	sessionClient := rpc.NewClient(*sessSock)
+	defer sessionClient.Close()
+	rootClient := rpc.NewClient(*rootSock)
+	defer rootClient.Close()
+
+	ctrl := control.New(control.Config{
+		Version: buildinfo.Version,
+		// The controller reaches the session broker over its NON-authenticated
+		// lifecycle path (the session socket). Root-helper pause is gated behind
+		// the auth'd root socket and is wired by Phase-3 provisioning; the local
+		// generation cancellation below already stops all forwarding on pause.
+		Brokers:        []control.Broker{lifecycleBroker{client: sessionClient}},
+		SessionHealthy: healthProbe(sessionClient),
+		Logger:         logger,
+	})
+
+	g, err := gateway.New(gateway.Config{
+		Version:          buildinfo.Version,
+		ListenAddr:       *listen,
+		TLSConfig:        tlsConf,
+		InsecureLoopback: *insecure,
+		Session:          sessionClient,
+		Root:             rootClient,
+		Verifier:         verifier,
+		Controller:       ctrl,
+		Logger:           logger,
+	})
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Serve the local control socket so `hadron-agent control ...` can drive the
+	// in-process controller. Runs alongside the HTTPS gateway.
+	ctrlErr := make(chan error, 1)
+	go func() {
+		ctrlErr <- serveUnix(ctx, *ctrlSock, control.NewSocketHandler(ctrl), false, logger)
+	}()
+
+	l, err := net.Listen("tcp", g.ListenAddr())
+	if err != nil {
+		return fmt.Errorf("bind %s: %w", g.ListenAddr(), err)
+	}
+	go func() {
+		<-ctx.Done()
+		_ = l.Close()
+	}()
+
+	logger.Info("gateway listening", slog.String("addr", g.ListenAddr()), slog.Bool("tls", tlsConf != nil))
+	serveErr := g.Serve(l)
+	if errors.Is(serveErr, net.ErrClosed) {
+		serveErr = nil
+	}
+
+	// Give the control socket goroutine a moment to unwind on shutdown.
+	select {
+	case <-ctrlErr:
+	case <-time.After(2 * time.Second):
+	}
+	return serveErr
+}
+
+// ---------------------------------------------------------------------------
+// session
+// ---------------------------------------------------------------------------
+
+func runSession(args []string, stderr io.Writer) error {
+	fs := newFlagSet("session", stderr)
+	sock := fs.String("socket", rpc.SessionSocketPath, "path of the session broker's Unix socket to serve")
+	cuaBinary := fs.String("cua-binary", "cua-driver", "cua-driver executable for computer_use")
+	osConcurrency := fs.Int("os-concurrency", 0, "max concurrent shell/file calls (0 = default)")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+
+	logger := newLogger(stderr)
+
+	broker := session.New(session.Config{
+		Files:         files.NewService(),
+		Process:       process.New(process.DefaultConfig()),
+		Computer:      session.NewCuaComputer(session.CuaConfig{Binary: *cuaBinary}),
+		OSConcurrency: *osConcurrency,
+	})
+	defer func() { _ = broker.Close() }()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	logger.Info("session broker serving", slog.String("socket", *sock))
+	// The session socket is NON-authenticated: the gateway routes to it and the
+	// controller drives its pause/resume lifecycle over the same socket.
+	return serveUnix(ctx, *sock, sessionHandler{broker: broker}, false, logger)
+}
+
+// ---------------------------------------------------------------------------
+// root-helper
+// ---------------------------------------------------------------------------
+
+func runRootHelper(args []string, stderr io.Writer) error {
+	fs := newFlagSet("root-helper", stderr)
+	sock := fs.String("socket", rpc.RootSocketPath, "path of the root helper's Unix socket to serve")
+	adminDigest := fs.String("admin-digest", "", "sha256 digest of the admin bearer (default $"+envAdminDigest+")")
+	osConcurrency := fs.Int("os-concurrency", 0, "max concurrent OS calls (0 = default)")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+
+	logger := newLogger(stderr)
+
+	adminDig := resolveDigest(*adminDigest, envAdminDigest)
+	if adminDig == "" {
+		return fmt.Errorf("no admin digest configured: set --admin-digest or $%s", envAdminDigest)
+	}
+	// The root helper authenticates ONLY the admin class; the user class is left
+	// unusable so a user bearer can never reach a privileged executor.
+	verifier, err := buildVerifier(unusableDigest, adminDig)
+	if err != nil {
+		return err
+	}
+
+	helper, err := roothelper.New(roothelper.Config{
+		Verifier:      verifier,
+		Files:         files.NewService(),
+		Process:       process.New(process.DefaultConfig()),
+		OSConcurrency: *osConcurrency,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = helper.Close() }()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	logger.Info("root helper serving", slog.String("socket", *sock))
+	// The root socket REQUIRES an Authorization header on every request; the
+	// helper re-verifies the forwarded admin bearer locally before dispatch.
+	return serveUnix(ctx, *sock, rootHandler{helper: helper}, true, logger)
+}
+
+// ---------------------------------------------------------------------------
+// control
+// ---------------------------------------------------------------------------
+
+func runControl(args []string, stdout, stderr io.Writer) error {
+	// The action is a positional argument that precedes any flags:
+	//   hadron-agent control pause --socket /path
+	var action string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		action, args = args[0], args[1:]
+	}
+
+	fs := newFlagSet("control", stderr)
+	sock := fs.String("socket", rpc.ControlSocketPath, "path of the local control Unix socket")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+
+	if action == "" {
+		return fmt.Errorf("%w: control requires an action: pause | resume | toggle", errUsage)
+	}
+
+	client := rpc.NewClient(*sock)
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	switch action {
+	case "pause":
+		if err := client.Pause(ctx, ""); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "paused")
+	case "resume":
+		if err := client.Resume(ctx, ""); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "resumed")
+	case "toggle":
+		h, err := client.Health(ctx, "")
+		if err != nil {
+			return err
+		}
+		if h.Paused {
+			if err := client.Resume(ctx, ""); err != nil {
+				return err
+			}
+			fmt.Fprintln(stdout, "resumed")
+		} else {
+			if err := client.Pause(ctx, ""); err != nil {
+				return err
+			}
+			fmt.Fprintln(stdout, "paused")
+		}
+	default:
+		return fmt.Errorf("%w: unknown control action %q (want pause | resume | toggle)", errUsage, action)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// status
+// ---------------------------------------------------------------------------
+
+func runStatus(args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("status", stderr)
+	sock := fs.String("socket", rpc.ControlSocketPath, "path of the local control Unix socket")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+
+	client := rpc.NewClient(*sock)
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	h, err := client.Health(ctx, "")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "version: %s\nready:   %t\npaused:  %t\n", buildinfo.Version, h.OK, h.Paused)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Wiring adapters
+// ---------------------------------------------------------------------------
+
+// sessionHandler adapts a *session.Broker to the rpc.Handler served on the
+// (non-authenticated) session socket. The session broker does not itself
+// consume the forwarded Authorization header, so Call ignores it.
+type sessionHandler struct{ broker *session.Broker }
+
+func (h sessionHandler) Call(ctx context.Context, req rpc.CallRequest, _ string) (*rpc.CallResponse, error) {
+	return h.broker.Call(ctx, req.Tool, req.Arguments)
+}
+
+func (h sessionHandler) Health(_ context.Context) (rpc.HealthStatus, error) {
+	s := h.broker.Status()
+	// Shell/file tools stay live whenever the broker is not paused, regardless
+	// of Cua readiness, so OK tracks the pause state.
+	return rpc.HealthStatus{OK: !s.Paused, Paused: s.Paused}, nil
+}
+
+func (h sessionHandler) Pause(ctx context.Context) error  { return h.broker.Pause(ctx) }
+func (h sessionHandler) Resume(ctx context.Context) error { return h.broker.Resume(ctx) }
+
+// rootHandler adapts a *roothelper.Helper to the rpc.Handler served on the
+// (authenticated) root socket. Call forwards the raw Authorization header so
+// the helper can re-verify the admin bearer locally.
+type rootHandler struct{ helper *roothelper.Helper }
+
+func (h rootHandler) Call(ctx context.Context, req rpc.CallRequest, authHeader string) (*rpc.CallResponse, error) {
+	return h.helper.Call(ctx, req.Tool, req.Arguments, authHeader)
+}
+
+func (h rootHandler) Health(_ context.Context) (rpc.HealthStatus, error) {
+	s := h.helper.Status()
+	return rpc.HealthStatus{OK: !s.Paused, Paused: s.Paused}, nil
+}
+
+func (h rootHandler) Pause(ctx context.Context) error  { return h.helper.Pause(ctx) }
+func (h rootHandler) Resume(ctx context.Context) error { return h.helper.Resume(ctx) }
+
+// lifecycleBroker adapts an *rpc.Client to control.Broker so the controller can
+// fan pause/resume out to a broker over its lifecycle socket. auth is the
+// Authorization header to present (empty for a non-authenticated socket).
+type lifecycleBroker struct {
+	client *rpc.Client
+	auth   string
+}
+
+func (b lifecycleBroker) Pause(ctx context.Context) error  { return b.client.Pause(ctx, b.auth) }
+func (b lifecycleBroker) Resume(ctx context.Context) error { return b.client.Resume(ctx, b.auth) }
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+// resolveDigest returns the flag value if set, otherwise the named environment
+// variable, as an auth.Digest ("" when neither is present).
+func resolveDigest(flagVal, envKey string) auth.Digest {
+	if flagVal != "" {
+		return auth.Digest(flagVal)
+	}
+	return auth.Digest(os.Getenv(envKey))
+}
+
+// buildVerifier constructs a Verifier for the two bearer classes. An empty
+// digest for a class is replaced with the unusable all-zero digest so that
+// class is effectively disabled while the Verifier still validates.
+func buildVerifier(userDigest, adminDigest auth.Digest) (*auth.Verifier, error) {
+	if userDigest == "" {
+		userDigest = unusableDigest
+	}
+	if adminDigest == "" {
+		adminDigest = unusableDigest
+	}
+	return auth.NewVerifier(
+		auth.RotationConfig{Current: userDigest},
+		auth.RotationConfig{Current: adminDigest},
+	)
+}
+
+// loadTLS loads a certificate/key pair into a *tls.Config, or returns (nil,
+// nil) when neither path is given (the caller then relies on --insecure-loopback
+// for a loopback bind). Supplying only one of the two is an error.
+func loadTLS(certPath, keyPath string) (*tls.Config, error) {
+	if certPath == "" && keyPath == "" {
+		return nil, nil
+	}
+	if certPath == "" || keyPath == "" {
+		return nil, errors.New("both --tls-cert and --tls-key must be provided together")
+	}
+	cert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("load TLS keypair: %w", err)
+	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}}, nil
+}
+
+// healthProbe returns a control.HealthFunc that reports a broker healthy when
+// its Health RPC succeeds and returns OK.
+func healthProbe(client *rpc.Client) control.HealthFunc {
+	return func(ctx context.Context) bool {
+		s, err := client.Health(ctx, "")
+		return err == nil && s.OK
+	}
+}
+
+// newLogger builds a structured JSON logger writing to w.
+func newLogger(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(w, nil))
+}
+
+// serveUnix creates (and cleans up) the Unix socket at path, serves handler on
+// it with the given auth requirement, and shuts the server down when ctx is
+// cancelled. It creates the parent directory and removes any stale socket file
+// first; Phase-3 provisioning owns the socket's ownership and permissions.
+func serveUnix(ctx context.Context, path string, handler rpc.Handler, requireAuth bool, logger *slog.Logger) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create socket dir for %s: %w", path, err)
+	}
+	// Remove a stale socket left by a previous run so Listen does not fail with
+	// "address already in use".
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale socket %s: %w", path, err)
+	}
+
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		return fmt.Errorf("listen unix %s: %w", path, err)
+	}
+
+	srv := rpc.NewServer(handler, rpc.Config{RequireAuth: requireAuth})
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+
+	err = srv.Serve(l)
+	_ = os.Remove(path)
+	return err
+}
