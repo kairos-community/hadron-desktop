@@ -612,6 +612,19 @@ func (s *Service) Patch(ctx context.Context, in api.PatchInput) api.PatchOutput 
 		return api.PatchOutput{ResultMeta: invalidArgument(err)}
 	}
 
+	// Reject duplicate paths up front, before any file is read: applying two
+	// entries for the same path would have the second's backup capture the
+	// first's already-updated content as "original", silently losing the
+	// first entry's edits while reporting the path as changed twice.
+	seen := make(map[string]struct{}, len(in.Files))
+	for _, pf := range in.Files {
+		clean := filepath.Clean(pf.Path)
+		if _, dup := seen[clean]; dup {
+			return api.PatchOutput{ResultMeta: fail(api.CodeInvalidArgument, fmt.Sprintf("duplicate path in patch: %s", pf.Path), false)}
+		}
+		seen[clean] = struct{}{}
+	}
+
 	plans := make([]patchPlan, 0, len(in.Files))
 	totalReplacements := 0
 	var aggregateBytes int64
@@ -626,6 +639,15 @@ func (s *Service) Patch(ctx context.Context, in api.PatchInput) api.PatchOutput 
 		}
 		if lst.IsDir() {
 			return api.PatchOutput{ResultMeta: invalidArgument(fmt.Errorf("%s is a directory", pf.Path))}
+		}
+		// Reject an oversized file by its on-disk size (from the Lstat
+		// above) before reading it into memory: the aggregate cap is
+		// re-checked after reading below too, but that check alone would
+		// still have already paid for a multi-GB ReadFile by the time it
+		// fires. This package also runs as the root helper, so an
+		// unbounded read here is an OOM vector, not just a slow path.
+		if lst.Size() > MaxPatchAggregateBytes {
+			return api.PatchOutput{ResultMeta: fail(api.CodeResourceExhausted, fmt.Sprintf("%s is %d bytes, exceeding max aggregate patch size of %d bytes", pf.Path, lst.Size(), MaxPatchAggregateBytes), false)}
 		}
 
 		original, err := os.ReadFile(pf.Path)
@@ -680,9 +702,9 @@ func (s *Service) Patch(ctx context.Context, in api.PatchInput) api.PatchOutput 
 	for i, p := range plans {
 		backupPath := p.path + fmt.Sprintf(backupPattern, os.Getpid(), time.Now().UnixNano())
 		if err := os.WriteFile(backupPath, p.original, 0o600); err != nil {
-			rollbackPatch(backups)
+			failed := rollbackPatch(backups)
 			cleanupBackups(backups)
-			return api.PatchOutput{ResultMeta: fail(api.CodeInternal, fmt.Sprintf("create backup for %s: %v", p.path, err), false)}
+			return api.PatchOutput{ResultMeta: fail(api.CodeInternal, rollbackMessage(fmt.Sprintf("create backup for %s: %v", p.path, err), failed), false)}
 		}
 		backups = append(backups, patchBackup{path: p.path, backupPath: backupPath, mode: p.mode, owner: p.owner})
 
@@ -691,9 +713,9 @@ func (s *Service) Patch(ctx context.Context, in api.PatchInput) api.PatchOutput 
 			// the rename itself failed), so it still holds its original
 			// content and needs no restore. Everything before it in this
 			// call (backups[:i]) was already replaced and does.
-			rollbackPatch(backups[:i])
+			failed := rollbackPatch(backups[:i])
 			cleanupBackups(backups)
-			return api.PatchOutput{ResultMeta: fail(api.CodeInternal, fmt.Sprintf("write %s: %v", p.path, err), false)}
+			return api.PatchOutput{ResultMeta: fail(api.CodeInternal, rollbackMessage(fmt.Sprintf("write %s: %v", p.path, err), failed), false)}
 		}
 		changed = append(changed, p.path)
 	}
@@ -702,16 +724,33 @@ func (s *Service) Patch(ctx context.Context, in api.PatchInput) api.PatchOutput 
 	return api.PatchOutput{FilesChanged: changed, ReplacementsApplied: totalReplacements}
 }
 
+// rollbackMessage appends a "rollback incomplete" note listing the paths
+// (never contents) that failed to restore to base, so a caller cannot
+// mistake a partially-rolled-back patch for a fully-undone one.
+func rollbackMessage(base string, failedRestores []string) string {
+	if len(failedRestores) == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s; rollback incomplete for %s: these files may still hold patched content", base, strings.Join(failedRestores, ", "))
+}
+
 // rollbackPatch restores every file in backups to its pre-patch content,
-// using the same atomic replace path as a normal write.
-func rollbackPatch(backups []patchBackup) {
+// using the same atomic replace path as a normal write. It keeps restoring
+// the remaining files even if one restore fails, and returns the paths of
+// any files whose restore did not succeed so the caller can surface that a
+// rollback left the filesystem in a partially-modified state.
+func rollbackPatch(backups []patchBackup) (failedRestores []string) {
 	for _, b := range backups {
 		data, err := os.ReadFile(b.backupPath)
 		if err != nil {
+			failedRestores = append(failedRestores, b.path)
 			continue
 		}
-		_ = replaceFile(b.path, data, b.mode, b.owner)
+		if err := replaceFile(b.path, data, b.mode, b.owner); err != nil {
+			failedRestores = append(failedRestores, b.path)
+		}
 	}
+	return failedRestores
 }
 
 // cleanupBackups best-effort removes every backup file, whether the patch

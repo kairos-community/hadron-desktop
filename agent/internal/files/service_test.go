@@ -682,6 +682,135 @@ func TestPatchRollsBackOnPartialFailure(t *testing.T) {
 	}
 }
 
+// TestPatchOversizedFileRejectedBeforeRead asserts that a file whose on-disk
+// size (per Lstat) already exceeds MaxPatchAggregateBytes is rejected via the
+// stat-based guard, without patch ever reading its contents into memory. A
+// sparse file created with os.Truncate reports the requested size from Stat
+// without allocating real disk blocks for it, so this exercises the guard
+// without needing a real multi-GB file.
+func TestPatchOversizedFileRejectedBeforeRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "huge.bin")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(MaxPatchAggregateBytes + 1); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	out := newService().Patch(context.Background(), api.PatchInput{Files: []api.PatchFile{
+		{Path: path, Replacements: []api.PatchReplacement{{Old: "x", New: "y"}}},
+	}})
+	if out.Code != api.CodeResourceExhausted {
+		t.Fatalf("code = %q, want RESOURCE_EXHAUSTED", out.Code)
+	}
+}
+
+// TestPatchDuplicatePathRejected asserts that a patch listing the same path
+// twice is rejected up front (before any write), rather than silently
+// dropping the first entry's edits.
+func TestPatchDuplicatePathRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	mustWrite(t, path, "hello world")
+
+	out := newService().Patch(context.Background(), api.PatchInput{Files: []api.PatchFile{
+		{Path: path, Replacements: []api.PatchReplacement{{Old: "hello", New: "goodbye"}}},
+		{Path: path, Replacements: []api.PatchReplacement{{Old: "world", New: "there"}}},
+	}})
+	if out.Code != api.CodeInvalidArgument {
+		t.Fatalf("code = %q, want INVALID_ARGUMENT", out.Code)
+	}
+	if mustRead(t, path) != "hello world" {
+		t.Fatalf("file was modified despite rejected duplicate-path patch")
+	}
+}
+
+// TestPatchRollbackIncompleteSurfacesPath exercises rollbackPatch directly
+// (the function Patch calls to undo already-applied files after a later
+// file in the same call fails to write): it sets up a valid backup for a
+// file, then makes the file's parent directory unwritable — simulating the
+// state after a successful backup but before restore — so the restore
+// itself fails. rollbackPatch must keep going rather than abort, report the
+// path whose restore failed, and rollbackMessage must fold that into a
+// caller-visible "rollback incomplete" note naming only the path.
+func TestPatchRollbackIncompleteSurfacesPath(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root: directory permission bits do not block writes")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.txt")
+	mustWrite(t, path, "ALPHA patched")
+
+	backupPath := path + ".bak"
+	mustWrite(t, backupPath, "alpha original")
+
+	// Simulate the post-backup state where the parent directory has become
+	// unwritable, so replaceFile's atomic restore (which needs to create a
+	// temp file in dir) cannot succeed.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+
+	backups := []patchBackup{{path: path, backupPath: backupPath, mode: 0o644}}
+	failed := rollbackPatch(backups)
+	if len(failed) != 1 || failed[0] != path {
+		t.Fatalf("rollbackPatch failed-restores = %v, want [%s]", failed, path)
+	}
+
+	// The file must be left exactly as it was found (still patched, since
+	// the restore failed) — not silently reported as rolled back.
+	os.Chmod(dir, 0o755)
+	if got := mustRead(t, path); got != "ALPHA patched" {
+		t.Fatalf("path = %q, want left untouched at %q since its restore failed", got, "ALPHA patched")
+	}
+
+	msg := rollbackMessage("write some/other/file: boom", failed)
+	if !strings.Contains(msg, "rollback incomplete") {
+		t.Fatalf("rollback message = %q, want it to mention rollback incomplete", msg)
+	}
+	if !strings.Contains(msg, path) {
+		t.Fatalf("rollback message = %q, want it to name %s", msg, path)
+	}
+}
+
+// TestPatchRollbackContinuesPastFirstFailure asserts rollbackPatch restores
+// every backup it can even when an earlier one in the list fails, rather
+// than aborting the whole rollback on the first error.
+func TestPatchRollbackContinuesPastFirstFailure(t *testing.T) {
+	dir := t.TempDir()
+
+	goodPath := filepath.Join(dir, "good.txt")
+	mustWrite(t, goodPath, "patched")
+	goodBackup := filepath.Join(dir, "good.bak")
+	mustWrite(t, goodBackup, "original")
+
+	badPath := filepath.Join(dir, "bad.txt")
+	mustWrite(t, badPath, "patched")
+	// No backup file created at this path: ReadFile will fail, forcing the
+	// "restore failed" branch without needing directory permission tricks.
+	badBackup := filepath.Join(dir, "missing.bak")
+
+	backups := []patchBackup{
+		{path: badPath, backupPath: badBackup, mode: 0o644},
+		{path: goodPath, backupPath: goodBackup, mode: 0o644},
+	}
+	failed := rollbackPatch(backups)
+	if len(failed) != 1 || failed[0] != badPath {
+		t.Fatalf("rollbackPatch failed-restores = %v, want [%s]", failed, badPath)
+	}
+	if got := mustRead(t, goodPath); got != "original" {
+		t.Fatalf("goodPath = %q, want restored to %q despite an earlier failure", got, "original")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // test helpers
 // ---------------------------------------------------------------------------
