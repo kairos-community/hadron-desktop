@@ -22,8 +22,10 @@ After=hadron-agent-provision.service
 
 [Service]
 Type=simple
-# Runs as root (no User=): this is the root-equivalent admin path by design.
-ExecStart=/usr/bin/hadron-agent root-helper
+# Runs as root (no User=): this is the root-equivalent admin path by design. It
+# re-verifies the admin bearer against the digest (with rotation) provisioned
+# into its own config.json, independently of the gateway.
+ExecStart=/usr/bin/hadron-agent root-helper --config /var/lib/hadron-agent/root/config.json
 # SIGHUP triggers a parse-then-atomically-swap reload of the admin digest.
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

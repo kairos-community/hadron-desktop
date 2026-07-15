@@ -6,8 +6,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/mudler/hadron-desktop/agent/internal/auth"
 	"github.com/mudler/hadron-desktop/agent/internal/buildinfo"
+	"github.com/mudler/hadron-desktop/agent/internal/provision"
 )
 
 // runArgs drives the dispatch entry point with a fresh set of buffers and
@@ -126,6 +129,138 @@ func TestTokenRotateWithoutTTYWithholdsSecret(t *testing.T) {
 	// The bearers-buffers are not a TTY, so no bearer must appear anywhere.
 	if strings.Contains(stdout, "hdn_") || strings.Contains(stderr, "hdn_") {
 		t.Fatalf("bearer leaked without a TTY:\nstdout: %s\nstderr: %s", stdout, stderr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// gateway --config: the provisioned config.json drives the verifier (rotation)
+// ---------------------------------------------------------------------------
+
+// TestGatewayConfigAuthenticatesProvisionedBearer proves the core integration
+// gap is closed: a bearer whose digest `provision` persisted into config.json
+// authenticates through the exact building blocks runGateway uses to construct
+// its Verifier from --config, and that both the current and the unexpired
+// previous (rotated-out) bearer are accepted while an unrelated bearer is not.
+func TestGatewayConfigAuthenticatesProvisionedBearer(t *testing.T) {
+	// A current and a previous user bearer, plus an admin bearer; provision
+	// persists their digests (with a bounded overlap) into config.json.
+	curBearer, curDigest, err := auth.Generate(auth.ClassUser)
+	if err != nil {
+		t.Fatalf("generate current: %v", err)
+	}
+	prevBearer, prevDigest, err := auth.Generate(auth.ClassUser)
+	if err != nil {
+		t.Fatalf("generate previous: %v", err)
+	}
+	adminBearer, adminDigest, err := auth.Generate(auth.ClassAdmin)
+	if err != nil {
+		t.Fatalf("generate admin: %v", err)
+	}
+	otherBearer, _, err := auth.Generate(auth.ClassUser)
+	if err != nil {
+		t.Fatalf("generate other: %v", err)
+	}
+
+	stateDir := t.TempDir()
+	m := provision.NewMaterializer(provision.Options{StateDir: stateDir, RuntimeDir: t.TempDir()})
+	cfg := provision.Config{
+		Enabled:  true,
+		Endpoint: provision.Endpoint{Listen: "127.0.0.1:7443"},
+		Auth: provision.Auth{
+			UserTokenHash:          string(curDigest),
+			UserPreviousTokenHash:  string(prevDigest),
+			UserPreviousValidUntil: time.Now().Add(1 * time.Hour),
+			AdminTokenHash:         string(adminDigest),
+		},
+		Limits: provision.Limits{MaxConcurrentCalls: 8, MaxProcesses: 8, MaxRequestBytes: 1 << 20},
+	}
+	if _, err := m.Materialize(cfg); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+
+	// Reconstruct the verifier exactly as runGateway does from --config.
+	gw, err := provision.LoadGatewayConfig(filepath.Join(stateDir, "gateway", "config.json"))
+	if err != nil {
+		t.Fatalf("LoadGatewayConfig: %v", err)
+	}
+	userRot, err := resolveRotation("", "no-such-env", &gw.User)
+	if err != nil {
+		t.Fatalf("resolveRotation user: %v", err)
+	}
+	adminRot, err := resolveRotation("", "no-such-env", &gw.Admin)
+	if err != nil {
+		t.Fatalf("resolveRotation admin: %v", err)
+	}
+	verifier, err := auth.NewVerifier(userRot, adminRot)
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	if _, err := verifier.Verify(curBearer, auth.ClassUser); err != nil {
+		t.Errorf("current user bearer rejected: %v", err)
+	}
+	if _, err := verifier.Verify(prevBearer, auth.ClassUser); err != nil {
+		t.Errorf("unexpired previous user bearer rejected (rotation not honored): %v", err)
+	}
+	if _, err := verifier.Verify(adminBearer, auth.ClassAdmin); err != nil {
+		t.Errorf("provisioned admin bearer rejected: %v", err)
+	}
+	if _, err := verifier.Verify(otherBearer, auth.ClassUser); err == nil {
+		t.Error("an unrelated user bearer was accepted, want rejection")
+	}
+}
+
+// TestGatewayConfigMissingIsError proves --config pointing at a missing file is
+// a clean runtime error (exit 1), not a panic or a silent credential-less start.
+func TestGatewayConfigMissingIsError(t *testing.T) {
+	code, _, stderr := runArgs("gateway", "--config", filepath.Join(t.TempDir(), "absent.json"))
+	if code != 1 {
+		t.Fatalf("gateway --config <missing> exit = %d, want 1\nstderr: %s", code, stderr)
+	}
+}
+
+// TestRootHelperConfigAuthenticatesProvisionedAdmin proves the root helper
+// builds its admin verifier from the provisioned root config.json and leaves
+// the user class unusable.
+func TestRootHelperConfigAuthenticatesProvisionedAdmin(t *testing.T) {
+	adminBearer, adminDigest, err := auth.Generate(auth.ClassAdmin)
+	if err != nil {
+		t.Fatalf("generate admin: %v", err)
+	}
+	userBearer, _, err := auth.Generate(auth.ClassUser)
+	if err != nil {
+		t.Fatalf("generate user: %v", err)
+	}
+
+	stateDir := t.TempDir()
+	m := provision.NewMaterializer(provision.Options{StateDir: stateDir, RuntimeDir: t.TempDir()})
+	cfg := provision.Config{
+		Enabled:  true,
+		Endpoint: provision.Endpoint{Listen: "127.0.0.1:7443"},
+		Auth:     provision.Auth{AdminTokenHash: string(adminDigest)},
+		Limits:   provision.Limits{MaxConcurrentCalls: 8, MaxProcesses: 8, MaxRequestBytes: 1 << 20},
+	}
+	if _, err := m.Materialize(cfg); err != nil {
+		t.Fatalf("Materialize: %v", err)
+	}
+
+	rc, err := provision.LoadRootConfig(filepath.Join(stateDir, "root", "config.json"))
+	if err != nil {
+		t.Fatalf("LoadRootConfig: %v", err)
+	}
+	adminRot, err := resolveRotation("", "no-such-env", &rc.Admin)
+	if err != nil {
+		t.Fatalf("resolveRotation: %v", err)
+	}
+	verifier, err := auth.NewVerifier(auth.RotationConfig{Current: unusableDigest}, adminRot)
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	if _, err := verifier.Verify(adminBearer, auth.ClassAdmin); err != nil {
+		t.Errorf("provisioned admin bearer rejected by root helper: %v", err)
+	}
+	if _, err := verifier.Verify(userBearer, auth.ClassUser); err == nil {
+		t.Error("root helper accepted a user bearer, want the user class unusable")
 	}
 }
 

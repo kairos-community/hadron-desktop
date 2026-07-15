@@ -77,13 +77,13 @@ func findFile(files []PersistedFile, suffix string) (PersistedFile, bool) {
 	return PersistedFile{}, false
 }
 
-func readGateway(t *testing.T, stateDir string) gatewayConfig {
+func readGateway(t *testing.T, stateDir string) GatewayConfig {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(stateDir, "gateway", "config.json"))
 	if err != nil {
 		t.Fatalf("read gateway config: %v", err)
 	}
-	var gw gatewayConfig
+	var gw GatewayConfig
 	if err := json.Unmarshal(data, &gw); err != nil {
 		t.Fatalf("unmarshal gateway config: %v", err)
 	}
@@ -676,7 +676,7 @@ func TestRotateAdminUpdatesGatewayAndRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read root config: %v", err)
 	}
-	var rc rootConfig
+	var rc RootConfig
 	if err := json.Unmarshal(rootData, &rc); err != nil {
 		t.Fatalf("unmarshal root config: %v", err)
 	}

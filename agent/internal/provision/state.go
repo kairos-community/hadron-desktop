@@ -164,45 +164,52 @@ type Result struct {
 	Files []PersistedFile
 }
 
-// rotationJSON is the on-disk representation of one bearer class's rotation
+// Rotation is the on-disk representation of one bearer class's rotation
 // state, mirroring auth.RotationConfig: a current digest plus an optional
-// previous digest accepted until previous_valid_until (RFC3339).
-type rotationJSON struct {
+// previous digest accepted until previous_valid_until (RFC3339). It is the
+// single shape both the provision writer (Materialize/Rotate) and the service
+// reader (LoadGatewayConfig/LoadRootConfig) share, so the on-disk JSON can
+// never drift between them. See AuthRotation for converting it into the
+// auth.RotationConfig the gateway/root-helper verifier is built from.
+type Rotation struct {
 	Current            string `json:"current,omitempty"`
 	Previous           string `json:"previous,omitempty"`
 	PreviousValidUntil string `json:"previous_valid_until,omitempty"`
 }
 
-type limitsJSON struct {
+// ServiceLimits is the on-disk concurrency/size bound shared by the gateway and
+// session config files.
+type ServiceLimits struct {
 	MaxConcurrentCalls int `json:"max_concurrent_calls"`
 	MaxProcesses       int `json:"max_processes"`
 	MaxRequestBytes    int `json:"max_request_bytes"`
 }
 
-// gatewayConfig is /var/lib/hadron-agent/gateway/config.json: everything the
-// public gateway process needs. It carries only digests, never bearers.
-type gatewayConfig struct {
-	Listen           string       `json:"listen"`
-	InsecureLoopback bool         `json:"insecure_loopback"`
-	MDNS             bool         `json:"mdns"`
-	TLSCertPath      string       `json:"tls_cert_path"`
-	TLSKeyPath       string       `json:"tls_key_path"`
-	CertFingerprint  string       `json:"cert_fingerprint"`
-	User             rotationJSON `json:"user"`
-	Admin            rotationJSON `json:"admin"`
-	Limits           limitsJSON   `json:"limits"`
+// GatewayConfig is /var/lib/hadron-agent/gateway/config.json: everything the
+// public gateway process needs. It carries only digests, never bearers. The
+// gateway service loads it via LoadGatewayConfig at startup.
+type GatewayConfig struct {
+	Listen           string        `json:"listen"`
+	InsecureLoopback bool          `json:"insecure_loopback"`
+	MDNS             bool          `json:"mdns"`
+	TLSCertPath      string        `json:"tls_cert_path"`
+	TLSKeyPath       string        `json:"tls_key_path"`
+	CertFingerprint  string        `json:"cert_fingerprint"`
+	User             Rotation      `json:"user"`
+	Admin            Rotation      `json:"admin"`
+	Limits           ServiceLimits `json:"limits"`
 }
 
-// sessionConfig is /var/lib/hadron-agent/session/config.json: the unprivileged
+// SessionConfig is /var/lib/hadron-agent/session/config.json: the unprivileged
 // broker's limits. It holds no credentials.
-type sessionConfig struct {
-	Limits limitsJSON `json:"limits"`
+type SessionConfig struct {
+	Limits ServiceLimits `json:"limits"`
 }
 
-// rootConfig is /var/lib/hadron-agent/root/config.json: the admin digest the
+// RootConfig is /var/lib/hadron-agent/root/config.json: the admin digest the
 // root helper independently re-verifies. Written only when admin is enabled.
-type rootConfig struct {
-	Admin rotationJSON `json:"admin"`
+type RootConfig struct {
+	Admin Rotation `json:"admin"`
 }
 
 // ---------------------------------------------------------------------------
@@ -239,13 +246,13 @@ func (m *Materializer) Materialize(cfg Config) (Result, error) {
 	}
 	adminRot, adminEnabled := resolveAdminRotation(cfg, existing)
 
-	limits := limitsJSON{
+	limits := ServiceLimits{
 		MaxConcurrentCalls: cfg.Limits.MaxConcurrentCalls,
 		MaxProcesses:       cfg.Limits.MaxProcesses,
 		MaxRequestBytes:    cfg.Limits.MaxRequestBytes,
 	}
 
-	gwCfg := gatewayConfig{
+	gwCfg := GatewayConfig{
 		Listen:           cfg.Endpoint.Listen,
 		InsecureLoopback: cfg.Endpoint.InsecureLoopback,
 		MDNS:             cfg.Endpoint.MDNS,
@@ -260,7 +267,7 @@ func (m *Materializer) Materialize(cfg Config) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("provision: marshal gateway config: %w", err)
 	}
-	sessJSON, err := marshalJSON(sessionConfig{Limits: limits})
+	sessJSON, err := marshalJSON(SessionConfig{Limits: limits})
 	if err != nil {
 		return Result{}, fmt.Errorf("provision: marshal session config: %w", err)
 	}
@@ -274,7 +281,7 @@ func (m *Materializer) Materialize(cfg Config) (Result, error) {
 		{path: filepath.Join(stateDir, "session", "config.json"), data: sessJSON, mode: 0o440, user: ownerRoot, group: ownerAgent},
 	}
 	if adminEnabled {
-		rootJSON, err := marshalJSON(rootConfig{Admin: adminRot})
+		rootJSON, err := marshalJSON(RootConfig{Admin: adminRot})
 		if err != nil {
 			return Result{}, fmt.Errorf("provision: marshal root config: %w", err)
 		}
@@ -318,7 +325,7 @@ func (m *Materializer) Materialize(cfg Config) (Result, error) {
 //     (installed reuse / idempotent re-run);
 //   - otherwise a fresh 256-bit hdn_u_ bearer is generated: its digest is
 //     persisted and its plaintext returned for the one-shot token.
-func resolveUserRotation(cfg Config, existing *gatewayConfig) (rotationJSON, string, error) {
+func resolveUserRotation(cfg Config, existing *GatewayConfig) (Rotation, string, error) {
 	if cfg.Auth.UserTokenHash != "" {
 		return rotationFromConfig(cfg.Auth.UserTokenHash, cfg.Auth.UserPreviousTokenHash, cfg.Auth.UserPreviousValidUntil), "", nil
 	}
@@ -327,27 +334,27 @@ func resolveUserRotation(cfg Config, existing *gatewayConfig) (rotationJSON, str
 	}
 	bearer, digest, err := auth.Generate(auth.ClassUser)
 	if err != nil {
-		return rotationJSON{}, "", fmt.Errorf("generate user bearer: %w", err)
+		return Rotation{}, "", fmt.Errorf("generate user bearer: %w", err)
 	}
-	return rotationJSON{Current: string(digest)}, bearer, nil
+	return Rotation{Current: string(digest)}, bearer, nil
 }
 
 // resolveAdminRotation decides the admin rotation state. Admin is never
 // auto-generated: it is enabled only by a CI-provided digest or a
 // previously-persisted one.
-func resolveAdminRotation(cfg Config, existing *gatewayConfig) (rotationJSON, bool) {
+func resolveAdminRotation(cfg Config, existing *GatewayConfig) (Rotation, bool) {
 	if cfg.Auth.AdminTokenHash != "" {
 		return rotationFromConfig(cfg.Auth.AdminTokenHash, cfg.Auth.AdminPreviousTokenHash, cfg.Auth.AdminPreviousValidUntil), true
 	}
 	if existing != nil && existing.Admin.Current != "" {
 		return existing.Admin, true
 	}
-	return rotationJSON{}, false
+	return Rotation{}, false
 }
 
-// rotationFromConfig builds a rotationJSON from Config's string+time fields.
-func rotationFromConfig(current, previous string, validUntil time.Time) rotationJSON {
-	r := rotationJSON{Current: current, Previous: previous}
+// rotationFromConfig builds a Rotation from Config's string+time fields.
+func rotationFromConfig(current, previous string, validUntil time.Time) Rotation {
+	r := Rotation{Current: current, Previous: previous}
 	if !validUntil.IsZero() {
 		r.PreviousValidUntil = validUntil.UTC().Format(time.RFC3339)
 	}
@@ -461,7 +468,7 @@ func (m *Materializer) Rotate(opts RotateOptions) (RotateResult, error) {
 	specs = append(specs, fileSpec{path: gatewayPath, data: gwJSON, mode: 0o440, user: ownerRoot, group: ownerGateway})
 
 	if opts.Class == auth.ClassAdmin {
-		rootJSON, err := marshalJSON(rootConfig{Admin: gw.Admin})
+		rootJSON, err := marshalJSON(RootConfig{Admin: gw.Admin})
 		if err != nil {
 			return RotateResult{}, fmt.Errorf("provision: rotate marshal root: %w", err)
 		}
@@ -505,8 +512,8 @@ func (m *Materializer) Rotate(opts RotateOptions) (RotateResult, error) {
 // makeRotation builds the new rotation state: the new digest becomes current,
 // and the old current becomes the bounded-overlap previous (only when there is
 // a nonzero overlap and an outgoing digest to keep alive).
-func makeRotation(old rotationJSON, newDigest, validUntil string, overlap time.Duration) rotationJSON {
-	r := rotationJSON{Current: newDigest}
+func makeRotation(old Rotation, newDigest, validUntil string, overlap time.Duration) Rotation {
+	r := Rotation{Current: newDigest}
 	if overlap > 0 && old.Current != "" {
 		r.Previous = old.Current
 		r.PreviousValidUntil = validUntil
@@ -642,7 +649,7 @@ func marshalJSON(v any) ([]byte, error) {
 // mint a brand-new user bearer, invalidating the one already issued to the
 // user: exactly the "never silently rotate trust" hazard this package
 // protects the TLS identity from, extended to the user credential.
-func readGatewayConfigOrNil(path string) (*gatewayConfig, error) {
+func readGatewayConfigOrNil(path string) (*GatewayConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -650,7 +657,7 @@ func readGatewayConfigOrNil(path string) (*gatewayConfig, error) {
 		}
 		return nil, fmt.Errorf("read gateway config %s: %w", path, err)
 	}
-	var gw gatewayConfig
+	var gw GatewayConfig
 	if err := json.Unmarshal(data, &gw); err != nil {
 		return nil, fmt.Errorf("gateway config %s is corrupt: %w", path, err)
 	}

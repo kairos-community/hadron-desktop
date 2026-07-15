@@ -31,11 +31,16 @@ PrivateTmp=yes
 PrivateDevices=yes
 # ...with write access ONLY to its runtime status + control socket dirs, and a
 # read-only view of the provisioned state dir it loads config/TLS from.
+# ProtectSystem=strict leaves /var visible; ReadOnlyPaths pins the state dir
+# read-only. The gateway process runs as the hadron-agent-gateway user, which is
+# the group that owns config.json/tls.crt/tls.key (0440, group-readable), so it
+# can READ everything it needs under /var/lib/hadron-agent/gateway/ and write
+# nowhere in /var.
 ReadWritePaths=/run/hadron-agent/status /run/hadron-agent/control
 ReadOnlyPaths=/var/lib/hadron-agent
-# Optional per-boot environment (bearer digests) provisioned into the tmpfs.
-EnvironmentFile=-/run/hadron-agent/gateway/env
-ExecStart=/usr/bin/hadron-agent gateway --tls-cert /var/lib/hadron-agent/gateway/tls.crt --tls-key /var/lib/hadron-agent/gateway/tls.key
+# The gateway derives its listen address, TLS cert/key paths, bearer digests
+# (with rotation), and limits entirely from the provisioned config.json.
+ExecStart=/usr/bin/hadron-agent gateway --config /var/lib/hadron-agent/gateway/config.json
 # SIGHUP triggers a parse-then-atomically-swap config reload in the gateway.
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

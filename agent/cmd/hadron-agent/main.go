@@ -14,10 +14,13 @@
 // Exit codes: an unknown command or an unparseable flag exits 2; a runtime
 // failure exits 1; -h/-help exits 0.
 //
-// This binary does NOT provision system users, TLS material, or systemd units:
-// it reads its configuration (listen address, socket paths, TLS files, bearer
-// digests) from flags and environment variables and fails cleanly when a
-// required value is absent. Provisioning is Phase 3's responsibility.
+// This binary does NOT provision system users, TLS material, or systemd units.
+// The gateway, session, and root-helper services take their configuration from
+// the config.json that `hadron-agent provision` persists under the state dir,
+// selected with --config; explicit flags and environment variables still
+// override individual values (so tests and manual runs need no config file),
+// and each service fails cleanly when a required value is absent from both.
+// Materializing that config.json is Phase 3's provisioning responsibility.
 package main
 
 import (
@@ -185,6 +188,7 @@ func runVersion(args []string, stdout, stderr io.Writer) error {
 
 func runGateway(args []string, stderr io.Writer) error {
 	fs := newFlagSet("gateway", stderr)
+	configPath := fs.String("config", "", "path to the provisioned gateway config.json (explicit flags/env override its values)")
 	listen := fs.String("listen", gateway.DefaultListenAddr, "host:port to bind the HTTPS MCP endpoint")
 	tlsCert := fs.String("tls-cert", "", "path to the server TLS certificate (PEM)")
 	tlsKey := fs.String("tls-key", "", "path to the server TLS private key (PEM)")
@@ -197,22 +201,76 @@ func runGateway(args []string, stderr io.Writer) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
+	set := flagsSet(fs)
 
 	logger := newLogger(stderr)
 
-	userDig := resolveDigest(*userDigest, envUserDigest)
-	adminDig := resolveDigest(*adminDigest, envAdminDigest)
-	if userDig == "" && adminDig == "" {
-		return fmt.Errorf("no bearer digests configured: set --user-digest/--admin-digest or $%s/$%s", envUserDigest, envAdminDigest)
+	// When --config is given, every value below is derived from the provisioned
+	// config.json unless an explicit flag or environment variable overrides it.
+	var gwCfg *provision.GatewayConfig
+	if *configPath != "" {
+		loaded, err := provision.LoadGatewayConfig(*configPath)
+		if err != nil {
+			return err
+		}
+		gwCfg = &loaded
 	}
-	verifier, err := buildVerifier(userDig, adminDig)
+
+	// Bearer verifier: an explicit --user-digest/--admin-digest (or its env)
+	// replaces that class's whole rotation with a single current digest;
+	// otherwise the provisioned rotation (current + bounded-overlap previous) is
+	// honored; otherwise the class is disabled with the unusable digest.
+	var userSrc, adminSrc *provision.Rotation
+	if gwCfg != nil {
+		userSrc, adminSrc = &gwCfg.User, &gwCfg.Admin
+	}
+	userRot, err := resolveRotation(*userDigest, envUserDigest, userSrc)
+	if err != nil {
+		return err
+	}
+	adminRot, err := resolveRotation(*adminDigest, envAdminDigest, adminSrc)
+	if err != nil {
+		return err
+	}
+	if userRot.Current == unusableDigest && adminRot.Current == unusableDigest {
+		return fmt.Errorf("no bearer digests configured: set --config, --user-digest/--admin-digest, or $%s/$%s", envUserDigest, envAdminDigest)
+	}
+	verifier, err := auth.NewVerifier(userRot, adminRot)
 	if err != nil {
 		return err
 	}
 
-	tlsConf, err := loadTLS(*tlsCert, *tlsKey)
+	// listen / insecure-loopback / TLS: explicit flag wins, else the provisioned
+	// value.
+	listenAddr := *listen
+	if gwCfg != nil && !set["listen"] {
+		listenAddr = gwCfg.Listen
+	}
+	insecureLoopback := *insecure
+	if gwCfg != nil && !set["insecure-loopback"] {
+		insecureLoopback = gwCfg.InsecureLoopback
+	}
+	certPath, keyPath := *tlsCert, *tlsKey
+	if gwCfg != nil {
+		if certPath == "" {
+			certPath = gwCfg.TLSCertPath
+		}
+		if keyPath == "" {
+			keyPath = gwCfg.TLSKeyPath
+		}
+	}
+	tlsConf, err := loadTLS(certPath, keyPath)
 	if err != nil {
 		return err
+	}
+
+	// Limits: the provisioned bounds map onto the gateway's; zero leaves the
+	// gateway's own defaults in place.
+	var maxConcurrent int
+	var maxBodyBytes int64
+	if gwCfg != nil {
+		maxConcurrent = gwCfg.Limits.MaxConcurrentCalls
+		maxBodyBytes = int64(gwCfg.Limits.MaxRequestBytes)
 	}
 
 	sessionClient := rpc.NewClient(*sessSock)
@@ -232,15 +290,17 @@ func runGateway(args []string, stderr io.Writer) error {
 	})
 
 	g, err := gateway.New(gateway.Config{
-		Version:          buildinfo.Version,
-		ListenAddr:       *listen,
-		TLSConfig:        tlsConf,
-		InsecureLoopback: *insecure,
-		Session:          sessionClient,
-		Root:             rootClient,
-		Verifier:         verifier,
-		Controller:       ctrl,
-		Logger:           logger,
+		Version:            buildinfo.Version,
+		ListenAddr:         listenAddr,
+		TLSConfig:          tlsConf,
+		InsecureLoopback:   insecureLoopback,
+		Session:            sessionClient,
+		Root:               rootClient,
+		Verifier:           verifier,
+		Controller:         ctrl,
+		Logger:             logger,
+		MaxConcurrentCalls: maxConcurrent,
+		MaxBodyBytes:       maxBodyBytes,
 	})
 	if err != nil {
 		return err
@@ -285,20 +345,42 @@ func runGateway(args []string, stderr io.Writer) error {
 
 func runSession(args []string, stderr io.Writer) error {
 	fs := newFlagSet("session", stderr)
+	configPath := fs.String("config", "", "path to the provisioned session config.json (explicit flags override its values)")
 	sock := fs.String("socket", rpc.SessionSocketPath, "path of the session broker's Unix socket to serve")
 	cuaBinary := fs.String("cua-binary", "cua-driver", "cua-driver executable for computer_use")
 	osConcurrency := fs.Int("os-concurrency", 0, "max concurrent shell/file calls (0 = default)")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
+	set := flagsSet(fs)
 
 	logger := newLogger(stderr)
 
+	// Provisioned limits bound the broker: max_concurrent_calls caps concurrent
+	// shell/file calls and max_processes caps live processes. An explicit
+	// --os-concurrency still overrides the concurrency bound.
+	var limits provision.ServiceLimits
+	if *configPath != "" {
+		sc, err := provision.LoadSessionConfig(*configPath)
+		if err != nil {
+			return err
+		}
+		limits = sc.Limits
+	}
+	osConc := *osConcurrency
+	if !set["os-concurrency"] && limits.MaxConcurrentCalls > 0 {
+		osConc = limits.MaxConcurrentCalls
+	}
+	procCfg := process.DefaultConfig()
+	if limits.MaxProcesses > 0 {
+		procCfg.MaxLive = limits.MaxProcesses
+	}
+
 	broker := session.New(session.Config{
 		Files:         files.NewService(),
-		Process:       process.New(process.DefaultConfig()),
+		Process:       process.New(procCfg),
 		Computer:      session.NewCuaComputer(session.CuaConfig{Binary: *cuaBinary}),
-		OSConcurrency: *osConcurrency,
+		OSConcurrency: osConc,
 	})
 	defer func() { _ = broker.Close() }()
 
@@ -317,6 +399,7 @@ func runSession(args []string, stderr io.Writer) error {
 
 func runRootHelper(args []string, stderr io.Writer) error {
 	fs := newFlagSet("root-helper", stderr)
+	configPath := fs.String("config", "", "path to the provisioned root config.json (explicit flag/env overrides its value)")
 	sock := fs.String("socket", rpc.RootSocketPath, "path of the root helper's Unix socket to serve")
 	adminDigest := fs.String("admin-digest", "", "sha256 digest of the admin bearer (default $"+envAdminDigest+")")
 	osConcurrency := fs.Int("os-concurrency", 0, "max concurrent OS calls (0 = default)")
@@ -326,13 +409,27 @@ func runRootHelper(args []string, stderr io.Writer) error {
 
 	logger := newLogger(stderr)
 
-	adminDig := resolveDigest(*adminDigest, envAdminDigest)
-	if adminDig == "" {
-		return fmt.Errorf("no admin digest configured: set --admin-digest or $%s", envAdminDigest)
+	// The admin digest comes from the provisioned root config.json unless an
+	// explicit --admin-digest (or its env) overrides it, honoring the persisted
+	// rotation (current + bounded-overlap previous).
+	var adminSrc *provision.Rotation
+	if *configPath != "" {
+		rc, err := provision.LoadRootConfig(*configPath)
+		if err != nil {
+			return err
+		}
+		adminSrc = &rc.Admin
+	}
+	adminRot, err := resolveRotation(*adminDigest, envAdminDigest, adminSrc)
+	if err != nil {
+		return err
+	}
+	if adminRot.Current == unusableDigest {
+		return fmt.Errorf("no admin digest configured: set --config, --admin-digest or $%s", envAdminDigest)
 	}
 	// The root helper authenticates ONLY the admin class; the user class is left
 	// unusable so a user bearer can never reach a privileged executor.
-	verifier, err := buildVerifier(unusableDigest, adminDig)
+	verifier, err := auth.NewVerifier(auth.RotationConfig{Current: unusableDigest}, adminRot)
 	if err != nil {
 		return err
 	}
@@ -645,6 +742,31 @@ func resolveDigest(flagVal, envKey string) auth.Digest {
 		return auth.Digest(flagVal)
 	}
 	return auth.Digest(os.Getenv(envKey))
+}
+
+// flagsSet returns the set of flag names that were explicitly present on the
+// command line, so a value provisioned via --config can be distinguished from a
+// flag left at its default (and correctly overridden only when set).
+func flagsSet(fs *flag.FlagSet) map[string]bool {
+	set := make(map[string]bool)
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	return set
+}
+
+// resolveRotation selects the bearer rotation for one class. An explicit flag
+// value, or the named environment variable, takes precedence and installs a
+// single current digest with no rotation window. Otherwise a provisioned
+// rotation is honored (current + bounded-overlap previous). When neither is
+// present the class is disabled with the unusable all-zero digest, so the
+// Verifier still validates while no real bearer can ever authenticate.
+func resolveRotation(flagVal, envKey string, provisioned *provision.Rotation) (auth.RotationConfig, error) {
+	if d := resolveDigest(flagVal, envKey); d != "" {
+		return auth.RotationConfig{Current: d}, nil
+	}
+	if provisioned != nil && provisioned.Current != "" {
+		return provisioned.AuthRotation()
+	}
+	return auth.RotationConfig{Current: unusableDigest}, nil
 }
 
 // buildVerifier constructs a Verifier for the two bearer classes. An empty

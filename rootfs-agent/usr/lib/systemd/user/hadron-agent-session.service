@@ -16,7 +16,11 @@ ConditionUser=agent
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/hadron-agent session
+# Applies the provisioned limits (max_concurrent_calls, max_processes) from the
+# session config.json. That file is 0440 root:agent, and this broker runs in the
+# `agent` user's manager (ConditionUser=agent), so its group read lets the
+# unprivileged broker load the config; it carries no credentials.
+ExecStart=/usr/bin/hadron-agent session --config /var/lib/hadron-agent/session/config.json
 Restart=on-failure
 RestartSec=2s
 RestartSteps=5
