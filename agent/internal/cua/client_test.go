@@ -146,6 +146,84 @@ func TestClientReportsChildExit(t *testing.T) {
 	}
 }
 
+func TestClientFailsFastAfterDisconnectWithoutReconnect(t *testing.T) {
+	// No OnReady configured: the client must not spend any effort respawning
+	// on its own, and every Call after the disconnect must fail immediately
+	// with ErrDisconnected rather than touching the dead transport again.
+	client := startHelper(t)
+
+	if _, err := client.Call(t.Context(), "echo", echoInput{Exit: true}); !errors.Is(err, io.EOF) {
+		t.Fatalf("Call(echo) returned %v after the child exited, want EOF", err)
+	}
+
+	if client.Connected() {
+		t.Fatal("Connected() reported true immediately after the child exited")
+	}
+
+	_, err := client.Call(t.Context(), "echo", echoInput{Value: "should not run"})
+	if !errors.Is(err, ErrDisconnected) {
+		t.Fatalf("Call(echo) after disconnection returned %v, want ErrDisconnected", err)
+	}
+}
+
+func TestClientReconnectsAfterChildExit(t *testing.T) {
+	events := make(chan bool, 8)
+	client := startHelperWithOptions(t, func(connected bool) {
+		events <- connected
+	})
+
+	if _, err := client.Call(t.Context(), "echo", echoInput{Exit: true}); !errors.Is(err, io.EOF) {
+		t.Fatalf("Call(echo) returned %v after the child exited, want EOF", err)
+	}
+
+	select {
+	case connected := <-events:
+		if connected {
+			t.Fatal("first OnReady event reported connected=true, want false")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not observe a disconnected OnReady event")
+	}
+
+	select {
+	case connected := <-events:
+		if !connected {
+			t.Fatal("second OnReady event reported connected=false, want true")
+		}
+	case <-time.After(reconnectBudget + 2*time.Second):
+		t.Fatal("did not observe a reconnected OnReady event within the reconnect budget")
+	}
+
+	if !client.Connected() {
+		t.Fatal("Connected() reported false after a reconnected OnReady event")
+	}
+
+	result, err := client.Call(t.Context(), "echo", echoInput{Value: "reconnected"})
+	if err != nil {
+		t.Fatalf("Call(echo) after reconnect returned an error: %v", err)
+	}
+	if got := resultText(t, result); got != "reconnected" {
+		t.Fatalf("Call(echo) after reconnect returned %q, want %q", got, "reconnected")
+	}
+}
+
+func TestClientCloseDuringReconnectDoesNotHang(t *testing.T) {
+	events := make(chan bool, 8)
+	client := startHelperWithOptions(t, func(connected bool) {
+		events <- connected
+	})
+
+	if _, err := client.Call(t.Context(), "echo", echoInput{Exit: true}); !errors.Is(err, io.EOF) {
+		t.Fatalf("Call(echo) returned %v after the child exited, want EOF", err)
+	}
+
+	// Race Close against the background reconnect campaign; it must return
+	// promptly either way, and never leave a respawned child dangling.
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close returned an error: %v", err)
+	}
+}
+
 func TestClientSerializesCalls(t *testing.T) {
 	client := startHelper(t)
 
@@ -197,15 +275,21 @@ func TestClientSerializesCalls(t *testing.T) {
 
 func startHelper(t *testing.T) *Client {
 	t.Helper()
+	return startHelperWithOptions(t, nil)
+}
+
+func startHelperWithOptions(t *testing.T, onReady func(bool)) *Client {
+	t.Helper()
 
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatalf("finding test executable: %v", err)
 	}
 	client, err := Start(t.Context(), Options{
-		Binary: executable,
-		Args:   []string{"-test.run=^TestHelperProcess$"},
-		Env:    []string{helperProcessEnv + "=1"},
+		Binary:  executable,
+		Args:    []string{"-test.run=^TestHelperProcess$"},
+		Env:     []string{helperProcessEnv + "=1"},
+		OnReady: onReady,
 	})
 	if err != nil {
 		t.Fatalf("Start returned an error: %v", err)
