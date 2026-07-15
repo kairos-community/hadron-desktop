@@ -107,6 +107,37 @@ extract_one() {
   tar -xOf "$1" "$2" 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# secret-scan regexes, factored into functions so BOTH the real docker-export
+# scan (section 4 below) and the hermetic fixture self-test (section 5) run
+# the exact same logic -- no risk of the two silently diverging.
+# ---------------------------------------------------------------------------
+
+# scan_bearer <dir> -> stdout: any live hdn_u_/hdn_a_ bearer found under <dir>.
+# Prefix + exactly the 43-char unpadded base64url payload (32 random bytes)
+# that auth.Generate produces -- see agent/internal/auth/token.go.
+scan_bearer() {
+  grep -rIoE 'hdn_[ua]_[A-Za-z0-9_-]{43}' "$1" 2>/dev/null || true
+}
+
+# scan_digest <dir> -> stdout: any configured (non-placeholder) bearer
+# digest. The only digest the generic image may legitimately contain is
+# auth's all-zero "unusable" placeholder (cmd/hadron-agent/main.go); any
+# OTHER sha256:<64 hex> is a real configured credential.
+scan_digest() {
+  grep -rIoE 'sha256:[0-9a-f]{64}' "$1" 2>/dev/null | grep -vE ':sha256:0{64}$' || true
+}
+
+# scan_pem <dir> -> stdout: paths of files containing a PEM private-key
+# block. Requires BOTH a BEGIN and a matching END marker in the SAME file
+# (not just the word "PRIVATE KEY" appearing once -- e.g. the shared
+# mime-type magic database legitimately lists the
+# "-----BEGIN PGP PRIVATE KEY BLOCK-----" signature string for sniffing,
+# with no matching END and no key body; that is not a leaked key).
+scan_pem() {
+  grep -rIlzP '(?s)-----BEGIN[ A-Z]*PRIVATE KEY-----.*?-----END[ A-Z]*PRIVATE KEY-----' "$1" 2>/dev/null | tr '\0' '\n' || true
+}
+
 export_image "$SWAY_IMAGE" SWAY
 export_image "$I3_IMAGE" I3
 export_image "$AGENT_IMAGE" AGENT
@@ -125,6 +156,23 @@ AGENT_UNIT_BASENAMES=(
 )
 AGENT_USER_UNIT_BASENAMES=(
   hadron-agent-session.service
+)
+
+# Additional agent-exclusive paths introduced by rootfs-agent/ that exist in
+# NO other rootfs overlay (rootfs, rootfs-sway, rootfs-i3). Matched via
+# in_list on the exact exported-tar path (as COPY rootfs-agent/ / in
+# Dockerfile.agent places them 1:1 at the filesystem root). NOTE:
+# usr/bin/hadron-status is deliberately NOT included here: rootfs-agent's
+# copy is a CONTENT OVERRIDE of a path that already exists in rootfs-i3, not
+# a novel path, so it would be a false positive in an absence check.
+AGENT_ONLY_PATHS=(
+  system/oem/90_agent_profile.yaml
+  system/oem/91_agent_installer.yaml
+  etc/i3/config.d/90-hadron-agent.conf
+  etc/tmpfiles.d/hadron-agent.conf
+  usr/bin/hadron-agent-first-run
+  usr/bin/hadron-agent-session-ready
+  usr/local/bin/hadron-agent-install
 )
 
 # ---------------------------------------------------------------------------
@@ -159,6 +207,15 @@ assert_ordinary_lacks_agent() {
     fi
   done
   [ "$hit" -eq 0 ] && ok "$label: no hadron-agent-*.service units"
+
+  local p hit2=0
+  for p in "${AGENT_ONLY_PATHS[@]}"; do
+    if in_list "$listfile" "$p"; then
+      err "$label: unexpectedly contains $p"
+      hit2=1
+    fi
+  done
+  [ "$hit2" -eq 0 ] && ok "$label: no agent-exclusive OEM/i3/tmpfiles/binary paths"
 
   if in_list "$listfile" 'etc/systemd/system/ly@.service.d/20-agent-profile.conf'; then
     err "$label: unexpectedly contains the agent Ly override 20-agent-profile.conf"
@@ -219,11 +276,27 @@ else
   err "agent: missing /etc/hadron-agent/profile"
 fi
 
+# Content, not just presence: rootfs-agent/etc/hadron-agent/profile ships
+# `PROFILE=agent` (plus ENABLED=true) -- assert the exported file actually
+# carries that marker, not merely that a path with this name exists.
+profile_content="$(extract_one "$AGENT_TAR" etc/hadron-agent/profile)"
+if printf '%s\n' "$profile_content" | grep -q '^PROFILE=agent$'; then
+  ok "agent: /etc/hadron-agent/profile content says PROFILE=agent"
+else
+  err "agent: /etc/hadron-agent/profile content does not say PROFILE=agent (got: $profile_content)"
+fi
+
 miss=0
 for u in "${AGENT_UNIT_BASENAMES[@]}" "${AGENT_USER_UNIT_BASENAMES[@]}"; do
   grep -q "$u\$" "$AGENT_LIST" || { err "agent: missing rootfs-agent unit $u"; miss=1; }
 done
 [ "$miss" -eq 0 ] && ok "agent: has all hadron-agent-*.service units"
+
+miss2=0
+for p in "${AGENT_ONLY_PATHS[@]}"; do
+  in_list "$AGENT_LIST" "$p" || { err "agent: missing $p"; miss2=1; }
+done
+[ "$miss2" -eq 0 ] && ok "agent: has all agent-exclusive OEM/i3/tmpfiles/binary paths"
 
 if in_list "$AGENT_LIST" 'etc/systemd/system/ly@.service.d/20-agent-profile.conf'; then
   ok "agent: has the agent Ly override (ly@.service.d/20-agent-profile.conf)"
@@ -283,9 +356,8 @@ fi
 # as source code). -I keeps the scan focused on the surface a real leak
 # would actually appear on.
 
-# 4a. A live bearer: prefix + exactly the 43-char unpadded base64url payload
-# (32 random bytes) that auth.Generate produces -- see agent/internal/auth/token.go.
-bearer_hits="$(grep -rIoE 'hdn_[ua]_[A-Za-z0-9_-]{43}' "$secrets_dir" 2>/dev/null || true)"
+# 4a. A live bearer (see scan_bearer above).
+bearer_hits="$(scan_bearer "$secrets_dir")"
 if [ -n "$bearer_hits" ]; then
   err "agent image embeds a live hdn_u_/hdn_a_ bearer:"
   printf '%s\n' "$bearer_hits" >&2
@@ -293,13 +365,8 @@ else
   ok "agent image embeds no hdn_u_/hdn_a_ bearer"
 fi
 
-# 4b. A configured (real) bearer digest. The only digest the generic image
-# may legitimately contain is auth's all-zero "unusable" placeholder
-# (cmd/hadron-agent/main.go); defaults.json itself ships no digest field at
-# all. Any OTHER sha256:<64 hex> is a real configured credential and must
-# never be baked into the generic ISO.
-digest_hits="$(grep -rIoE 'sha256:[0-9a-f]{64}' "$secrets_dir" 2>/dev/null \
-  | grep -vE ':sha256:0{64}$' || true)"
+# 4b. A configured (real) bearer digest (see scan_digest above).
+digest_hits="$(scan_digest "$secrets_dir")"
 if [ -n "$digest_hits" ]; then
   err "agent image embeds a configured (non-placeholder) bearer digest:"
   printf '%s\n' "$digest_hits" >&2
@@ -307,17 +374,82 @@ else
   ok "agent image embeds no configured bearer digest (only the all-zero placeholder, if any)"
 fi
 
-# 4c. A PEM private-key block. Require BOTH a BEGIN and a matching END
-# marker in the same file (not just the word "PRIVATE KEY" appearing once --
-# e.g. the shared mime-type magic database legitimately lists the
-# "-----BEGIN PGP PRIVATE KEY BLOCK-----" signature string for sniffing,
-# with no matching END and no key body; that is not a leaked key).
-pem_hits="$(grep -rIlzP '(?s)-----BEGIN[ A-Z]*PRIVATE KEY-----.*?-----END[ A-Z]*PRIVATE KEY-----' "$secrets_dir" 2>/dev/null | tr '\0' '\n' || true)"
+# 4c. A PEM private-key block (see scan_pem above).
+pem_hits="$(scan_pem "$secrets_dir")"
 if [ -n "$pem_hits" ]; then
   err "agent image embeds a PEM private-key block in:"
   printf '%s\n' "$pem_hits" >&2
 else
   ok "agent image embeds no PEM private-key block"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Regression fixture: prove the scan_bearer/scan_digest/scan_pem regexes
+# THEMSELVES still catch a real-shaped secret. Section 4 above only proves
+# the real generic agent filesystem has no secrets in it -- that scan would
+# pass just as "cleanly" if a future typo silently broke a regex to match
+# nothing. This feeds synthetic fixtures to the SAME functions used in
+# section 4 (no separate/divergent copy of the logic) and requires no
+# docker/image access, so it runs unconditionally.
+# ---------------------------------------------------------------------------
+log "Self-test: secret-scan regexes still catch real-shaped secrets (fixture, hermetic)"
+
+selftest_dir="$work/secretscan-selftest"
+
+# 1. A real-shaped bearer must be CAUGHT by scan_bearer.
+mkdir -p "$selftest_dir/bearer_pos"
+printf 'HADRON_BEARER=hdn_u_GlWBixHL8fvQwK0m0_sCeLFMxeJRWp7DwCS3Dd7rhcQ\n' \
+  > "$selftest_dir/bearer_pos/fixture.env"
+if [ -n "$(scan_bearer "$selftest_dir/bearer_pos")" ]; then
+  ok "self-test: scan_bearer catches a real-shaped hdn_u_<43-char> bearer"
+else
+  err "self-test: scan_bearer FAILED to catch a real-shaped hdn_u_<43-char> bearer -- regex regressed!"
+fi
+
+# 2. A real (non-zero) digest must be CAUGHT by scan_digest.
+mkdir -p "$selftest_dir/digest_pos"
+printf 'bearer_digest: sha256:dc691a72424bad001b67b4852275139a47a35689f4a99e9c9b7670cb89cb6c85\n' \
+  > "$selftest_dir/digest_pos/fixture.yaml"
+if [ -n "$(scan_digest "$selftest_dir/digest_pos")" ]; then
+  ok "self-test: scan_digest catches a real (non-zero) sha256:<64 hex> digest"
+else
+  err "self-test: scan_digest FAILED to catch a real sha256 digest -- regex regressed!"
+fi
+
+# 3. The all-zeros placeholder digest must NOT be caught (it is the
+# documented "unusable" default, not a leaked credential).
+mkdir -p "$selftest_dir/digest_neg"
+printf 'bearer_digest: sha256:%s\n' "$(printf '0%.0s' $(seq 1 64))" \
+  > "$selftest_dir/digest_neg/fixture.yaml"
+if [ -z "$(scan_digest "$selftest_dir/digest_neg")" ]; then
+  ok "self-test: scan_digest correctly excludes the all-zeros placeholder digest"
+else
+  err "self-test: scan_digest unexpectedly flagged the all-zeros placeholder digest -- exclusion regressed!"
+fi
+
+# 4. A real PEM private-key block (BEGIN + matching END) must be CAUGHT.
+mkdir -p "$selftest_dir/pem_pos"
+{
+  echo "-----BEGIN EC PRIVATE KEY-----"
+  echo "MIGkAgEBBDBGarbageNotARealKeyBodyJustFixtureDataForTheSelfTest=="
+  echo "-----END EC PRIVATE KEY-----"
+} > "$selftest_dir/pem_pos/fixture.pem"
+if [ -n "$(scan_pem "$selftest_dir/pem_pos")" ]; then
+  ok "self-test: scan_pem catches a real BEGIN/END EC PRIVATE KEY block"
+else
+  err "self-test: scan_pem FAILED to catch a real PEM private-key block -- regex regressed!"
+fi
+
+# 5. A benign lookalike (BEGIN marker with no matching END, e.g. the kind of
+# signature string a mime-type magic database legitimately ships) must NOT
+# be caught.
+mkdir -p "$selftest_dir/pem_neg"
+printf -- '-----BEGIN PGP PRIVATE KEY BLOCK-----\n(magic-db signature string, no key body, no END marker)\n' \
+  > "$selftest_dir/pem_neg/fixture.txt"
+if [ -z "$(scan_pem "$selftest_dir/pem_neg")" ]; then
+  ok "self-test: scan_pem correctly ignores a BEGIN-only lookalike with no END marker"
+else
+  err "self-test: scan_pem unexpectedly flagged a BEGIN-only lookalike -- false-positive regressed!"
 fi
 
 # ---------------------------------------------------------------------------
