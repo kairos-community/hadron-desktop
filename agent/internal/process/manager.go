@@ -26,9 +26,9 @@ package process
 import (
 	"context"
 	crand "crypto/rand"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -68,6 +68,18 @@ const (
 	// signal before escalating to cgroup.kill + SIGKILL.
 	DefaultTerminateGrace = 2 * time.Second
 
+	// DefaultReapTimeout bounds the FINAL join in teardown (the wait for
+	// cmd.Wait after the kill escalation, and the reader-goroutine join). In
+	// the production require-cgroup path this join always completes promptly
+	// because cgroup.kill kills every fd holder, so the readers EOF and
+	// cmd.Wait returns. It exists only as an escape hatch for the documented
+	// pgroup-fallback path, where a setsid grandchild can escape both the
+	// process group and (absent a cgroup) the kill, holding an inherited
+	// pipe/pty write-end open so the readers never EOF: without a bound the
+	// join would hang forever. On timeout teardown force-closes the child IO
+	// to unblock the readers, guaranteeing reap/Close return in bounded time.
+	DefaultReapTimeout = 5 * time.Second
+
 	// DefaultPidsMax and DefaultMemoryMax are the cgroup limits applied to a
 	// tracked process's leaf when the controllers are delegated.
 	DefaultPidsMax   int64 = 128
@@ -96,6 +108,10 @@ type Config struct {
 	RingSize         int
 	MaxLive          int
 	TerminateGrace   time.Duration
+	// ReapTimeout bounds the final teardown join (see DefaultReapTimeout). It
+	// is only ever reached on the degraded pgroup-fallback survivor path;
+	// production teardown completes well within it.
+	ReapTimeout time.Duration
 
 	// RequireCgroup makes cgroup-leaf placement mandatory: a start whose
 	// placement fails returns an error instead of degrading. Production sets
@@ -112,9 +128,10 @@ type Config struct {
 	MemoryMax  int64
 
 	// Clock and NewID are test seams. NewID must return a fresh opaque handle
-	// per call.
+	// per call, or an error (e.g. crypto/rand failure) which the start path
+	// surfaces as INTERNAL rather than minting a guessable/PID-derived handle.
 	Clock Clock
-	NewID func() string
+	NewID func() (string, error)
 }
 
 // DefaultConfig returns the production defaults: cgroup placement required, no
@@ -128,6 +145,7 @@ func DefaultConfig() Config {
 		RingSize:            DefaultRingSize,
 		MaxLive:             DefaultMaxLive,
 		TerminateGrace:      DefaultTerminateGrace,
+		ReapTimeout:         DefaultReapTimeout,
 		RequireCgroup:       true,
 		AllowPgroupFallback: false,
 		PidsMax:             DefaultPidsMax,
@@ -158,6 +176,9 @@ func (c *Config) fillDefaults() {
 	}
 	if c.TerminateGrace <= 0 {
 		c.TerminateGrace = DefaultTerminateGrace
+	}
+	if c.ReapTimeout <= 0 {
+		c.ReapTimeout = DefaultReapTimeout
 	}
 	if c.PidsMax <= 0 {
 		c.PidsMax = DefaultPidsMax
@@ -304,6 +325,13 @@ type tracked struct {
 	leaf *cgroupLeaf
 	done chan struct{} // closed once cmd.Wait has returned
 	once sync.Once
+	// forceClose, when set, closes EVERY child IO endpoint (including the
+	// reader-owned pipe read ends and the pty master). reap invokes it only on
+	// the bounded fallback-survivor timeout path, to interrupt a reader
+	// goroutine that is stuck on an inherited fd a setsid grandchild kept open.
+	// nil for tracked trees with no reader goroutines to unblock (e.g.
+	// terminal, which joins its readers itself).
+	forceClose func()
 }
 
 // reap performs the fixed teardown sequence, at most once per tracked:
@@ -312,7 +340,18 @@ type tracked struct {
 //  2. wait up to TerminateGrace for the process to exit;
 //  3. write cgroup.kill (SIGKILLs the whole subtree, escapees included);
 //  4. SIGKILL the process group as a final fallback;
-//  5. wait for reaping, then remove the empty leaf.
+//  5. wait (bounded) for reaping, then remove the empty leaf.
+//
+// Step 5's wait is bounded by ReapTimeout so teardown cannot hang forever. In
+// the production require-cgroup path it always completes promptly: cgroup.kill
+// kills every fd holder, the reader goroutines EOF, and cmd.Wait returns. The
+// bound only ever fires on the documented pgroup-fallback path, where a setsid
+// grandchild can escape both the process group and (absent a cgroup) the kill
+// and hold an inherited pipe/pty write-end open — so the readers never EOF and
+// t.done never closes. On timeout reap force-closes the child IO (interrupting
+// the stuck readers) and bound-waits once more; if a grandchild somehow still
+// pins cmd.Wait we return rather than hang, leaving that already-degraded tree
+// detached. The normal path always joins cleanly.
 func (m *Manager) reap(t *tracked, sig syscall.Signal) {
 	t.once.Do(func() {
 		if t.pgid > 0 {
@@ -326,9 +365,55 @@ func (m *Manager) reap(t *tracked, sig syscall.Signal) {
 		if t.pgid > 0 {
 			_ = syscall.Kill(-t.pgid, syscall.SIGKILL)
 		}
-		<-t.done // guaranteed by SIGKILL / cgroup.kill; the waiter closes it
+		// Final, bounded wait for cmd.Wait (the waiter closes t.done).
+		select {
+		case <-t.done:
+		case <-m.clock.After(m.cfg.ReapTimeout):
+			// Fallback survivor: unblock the readers stuck on the escapee's
+			// inherited fd, then give cmd.Wait a bounded moment to return.
+			if t.forceClose != nil {
+				t.forceClose()
+			}
+			select {
+			case <-t.done:
+			case <-m.clock.After(m.cfg.ReapTimeout):
+			}
+		}
 		_ = t.leaf.remove()
 	})
+}
+
+// waitWG waits for wg, bounded by timeout via the injected clock. It reports
+// whether wg completed (true) or the bound fired first (false). The helper
+// goroutine it spawns always exits once wg completes, so a caller that
+// force-closes the readers' fds after a false return will not leak it.
+func waitWG(wg *sync.WaitGroup, clock Clock, timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-clock.After(timeout):
+		return false
+	}
+}
+
+// joinReaders joins wg, bounded by timeout. If the readers do not finish in
+// time — only possible on the pgroup-fallback path, where a surviving setsid
+// grandchild holds a stream's write end open so the read end never EOFs — it
+// runs forceClose (which closes the read ends, interrupting the stuck readers)
+// and joins once more, bounded again, so the caller never blocks forever. In
+// the production require-cgroup path cgroup.kill has already killed every fd
+// holder before this is reached, so the first join returns immediately.
+func joinReaders(wg *sync.WaitGroup, clock Clock, timeout time.Duration, forceClose func()) {
+	if waitWG(wg, clock, timeout) {
+		return
+	}
+	forceClose()
+	waitWG(wg, clock, timeout)
 }
 
 // ---------------------------------------------------------------------------
@@ -367,16 +452,15 @@ func clampCap(n *int, def, max int) int {
 }
 
 // newOpaqueID returns a 128-bit handle as a 32-character hex string, drawn
-// from crypto/rand. It never encodes or exposes an OS pid.
-func newOpaqueID() string {
+// from crypto/rand. It never encodes or exposes an OS pid. If crypto/rand
+// fails it returns an error rather than falling back to a guessable,
+// time/pid-derived value: the start path surfaces that as INTERNAL.
+func newOpaqueID() (string, error) {
 	var b [16]byte
 	if _, err := crand.Read(b[:]); err != nil {
-		// crypto/rand failing is catastrophic; fall back to time-based bytes
-		// rather than panicking a long-lived service.
-		binary.BigEndian.PutUint64(b[0:8], uint64(time.Now().UnixNano()))
-		binary.BigEndian.PutUint64(b[8:16], uint64(os.Getpid()))
+		return "", fmt.Errorf("generate opaque id: %w", err)
 	}
-	return hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:]), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -448,7 +532,9 @@ type procHandle struct {
 	pty     bool
 	ptmx    *os.File       // pty master; nil when not a pty
 	stdin   io.WriteCloser // stdin pipe, or the pty master
-	tracked *tracked
+	stdoutR *os.File       // stdout pipe read end (nil in pty mode); retained
+	stderrR *os.File       // stderr pipe read end (nil in pty mode); so teardown
+	tracked *tracked       // can force them closed to unblock a stuck reader
 
 	readersWG sync.WaitGroup
 	notify    chan struct{} // buffered(1) wakeup for a blocked poll
@@ -501,6 +587,23 @@ func (h *procHandle) closeIO() {
 	}
 	if h.ptmx != nil {
 		_ = h.ptmx.Close()
+	}
+}
+
+// forceCloseIO closes every IO endpoint, INCLUDING the reader-owned pipe read
+// ends (which closeIO leaves to the reader goroutines). Closing a read end
+// interrupts a reader blocked in Read on that fd (the poller returns an error),
+// letting it exit even while a surviving grandchild still holds the write end.
+// Used only on reap's bounded fallback-survivor timeout path. Safe to call
+// concurrently with the readers' own Close (os.File.Close is concurrency-safe)
+// and more than once.
+func (h *procHandle) forceCloseIO() {
+	h.closeIO()
+	if h.stdoutR != nil {
+		_ = h.stdoutR.Close()
+	}
+	if h.stderrR != nil {
+		_ = h.stderrR.Close()
 	}
 }
 
@@ -631,9 +734,14 @@ func (m *Manager) Terminal(ctx context.Context, in api.TerminalInput) (api.Termi
 	timeout := clampTimeout(in.TimeoutMs, m.cfg.DefaultTimeout, m.cfg.MaxTimeout)
 	streamCap := clampCap(in.MaxOutputBytes, m.cfg.DefaultStreamCap, m.cfg.MaxStreamCap)
 
+	id, idErr := m.cfg.NewID()
+	if idErr != nil {
+		return api.TerminalOutput{ResultMeta: failMeta(api.CodeInternal, "failed to generate process id", false)}, nil
+	}
+
 	// Create the cgroup leaf (if any) before spawning so the shell and every
 	// child it forks are born inside it.
-	leaf, cgFD, cerr := m.beginCgroup(m.cfg.NewID())
+	leaf, cgFD, cerr := m.beginCgroup(id)
 	if cerr != nil {
 		return api.TerminalOutput{ResultMeta: failMeta(api.CodeInternal, "sandbox unavailable", false)}, nil
 	}
@@ -653,6 +761,9 @@ func (m *Manager) Terminal(ctx context.Context, in api.TerminalInput) (api.Termi
 	errCap := &capWriter{limit: streamCap}
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
+		if cgFD != nil {
+			_ = cgFD.Close()
+		}
 		_ = leaf.remove()
 		return api.TerminalOutput{ResultMeta: failMeta(api.CodeInternal, "failed to start command", false)}, nil
 	}
@@ -660,6 +771,9 @@ func (m *Manager) Terminal(ctx context.Context, in api.TerminalInput) (api.Termi
 	if err != nil {
 		stdoutR.Close()
 		stdoutW.Close()
+		if cgFD != nil {
+			_ = cgFD.Close()
+		}
 		_ = leaf.remove()
 		return api.TerminalOutput{ResultMeta: failMeta(api.CodeInternal, "failed to start command", false)}, nil
 	}
@@ -713,8 +827,14 @@ func (m *Manager) Terminal(ctx context.Context, in api.TerminalInput) (api.Termi
 	// Always tear down the tracked tree so grandchildren cannot survive.
 	m.reap(t, syscall.SIGTERM)
 	// With the whole tree dead, the write ends are closed; join the readers so
-	// captured output is complete and no goroutine leaks.
-	readers.Wait()
+	// captured output is complete and no goroutine leaks. Bounded so a
+	// fallback-mode grandchild that escaped teardown and still holds a write
+	// end cannot hang the call: on timeout the read ends are force-closed to
+	// interrupt the stuck readers.
+	joinReaders(&readers, m.clock, m.cfg.ReapTimeout, func() {
+		_ = stdoutR.Close()
+		_ = stderrR.Close()
+	})
 
 	// t.done is closed (reap waited for it), so waitErr is safely visible.
 	code, _ := exitCodeOf(waitErr)
@@ -789,7 +909,11 @@ func (m *Manager) processStart(in api.ProcessInput) (api.ProcessOutput, error) {
 	m.live++
 	m.mu.Unlock()
 
-	id := m.cfg.NewID()
+	id, idErr := m.cfg.NewID()
+	if idErr != nil {
+		m.releaseLive()
+		return api.ProcessOutput{ResultMeta: failMeta(api.CodeInternal, "failed to generate process id", false)}, nil
+	}
 
 	// Create the leaf before spawning so the child is born inside it.
 	leaf, cgFD, cerr := m.beginCgroup(id)
@@ -817,7 +941,7 @@ func (m *Manager) processStart(in api.ProcessInput) (api.ProcessOutput, error) {
 		_ = leaf.placeExisting(pid)
 	}
 
-	h.tracked = &tracked{pgid: pid, leaf: leaf, done: make(chan struct{})}
+	h.tracked = &tracked{pgid: pid, leaf: leaf, done: make(chan struct{}), forceClose: h.forceCloseIO}
 	go m.waitChild(h)
 
 	m.mu.Lock()
@@ -885,6 +1009,8 @@ func (m *Manager) startChild(h *procHandle, usePTY bool, cgFD *os.File) error {
 	stdinR.Close()
 
 	h.stdin = stdinW
+	h.stdoutR = stdoutR
+	h.stderrR = stderrR
 	h.stdout = newRing(m.cfg.RingSize)
 	h.stderr = newRing(m.cfg.RingSize)
 	h.readersWG.Add(2)

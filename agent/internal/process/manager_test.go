@@ -2,6 +2,7 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,8 +27,11 @@ func testConfig() Config {
 	cfg.RequireCgroup = false
 	cfg.AllowPgroupFallback = true
 	cfg.TerminateGrace = 100 * time.Millisecond
-	cfg.NewID = func() string {
-		return fmt.Sprintf("test-%s-%016x", seed, n.Add(1))
+	// Keep the final teardown-join bound short so the fallback-survivor escape
+	// hatch (I1) is exercised quickly; the normal paths never reach it.
+	cfg.ReapTimeout = 300 * time.Millisecond
+	cfg.NewID = func() (string, error) {
+		return fmt.Sprintf("test-%s-%016x", seed, n.Add(1)), nil
 	}
 	return cfg
 }
@@ -426,6 +430,100 @@ func TestManagerCloseKillsGrandchildren(t *testing.T) {
 	s2 := fileSize(marker)
 	if s2 != s1 {
 		t.Fatalf("grandchild survived Close, still writing: %d -> %d bytes", s1, s2)
+	}
+}
+
+// TestFallbackTeardownDoesNotHang exercises the I1 escape hatch. In
+// pgroup-fallback mode (no cgroup) a setsid grandchild escapes the process
+// group AND keeps the inherited stdout/stderr pipe write-ends open. Without a
+// bounded final join, waitChild's readersWG.Wait() — and thus reap's wait on
+// t.done — would block forever because the pipes never EOF and the escapee is
+// out of reach of the process-group SIGKILL. Teardown must still return in
+// bounded time by force-closing the child IO.
+func TestFallbackTeardownDoesNotHang(t *testing.T) {
+	// Force genuine pgroup-fallback (leaf == nil) regardless of whether the
+	// host has a usable delegated cgroup: point at a bogus root so cgroupProbe
+	// fails and beginCgroup takes the AllowPgroupFallback branch. In real
+	// cgroup mode cgroup.kill would reap the escapee and the bound would never
+	// be needed — this test must exercise the escape hatch itself.
+	cfg := testConfig()
+	cfg.CgroupRoot = filepath.Join(t.TempDir(), "no-such-cgroup")
+	m := New(cfg)
+	t.Cleanup(func() { _ = m.Close() })
+	if m.cgroupOK {
+		t.Fatal("expected cgroup placement to be unavailable (forcing pgroup fallback)")
+	}
+	start, err := m.Process(context.Background(), api.ProcessInput{
+		Action: api.ProcessStart,
+		// The shell replaces itself with a short sleep (exec) while a setsid
+		// grandchild leaves the process group and holds fds 1/2 open for a
+		// long time.
+		Command: `setsid sh -c "sleep 60" & exec sleep 0.1`,
+	})
+	if err != nil || start.Code != "" {
+		t.Fatalf("start failed: %v %q", err, start.Code)
+	}
+	// Let the shell exit and the grandchild detach.
+	time.Sleep(300 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = m.Process(context.Background(), api.ProcessInput{
+			Action: api.ProcessTerminate, ProcessID: start.ProcessID,
+		})
+		close(done)
+	}()
+	select {
+	case <-done:
+		// Returned in bounded time: success.
+	case <-time.After(15 * time.Second):
+		t.Fatal("terminate hung: fallback grandchild held the pipes open")
+	}
+
+	// Close must also return promptly even though the escapee survives.
+	closed := make(chan struct{})
+	go func() { _ = m.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Close hung after a fallback grandchild survived teardown")
+	}
+}
+
+// TestProcessStartIDGenerationFailure covers M3: when the opaque-id generator
+// fails (crypto/rand error, modelled via the NewID seam) the start must return
+// INTERNAL and mint no handle — never a guessable/PID-derived fallback id — and
+// must not leak the reserved live slot.
+func TestProcessStartIDGenerationFailure(t *testing.T) {
+	cfg := testConfig()
+	cfg.NewID = func() (string, error) { return "", errors.New("rand unavailable") }
+	m := New(cfg)
+	t.Cleanup(func() { _ = m.Close() })
+
+	// Repeat past the live cap: if the reserved slot leaked on failure, later
+	// calls would report RESOURCE_EXHAUSTED instead of INTERNAL.
+	for i := 0; i < DefaultMaxLive+2; i++ {
+		out, err := m.Process(context.Background(), api.ProcessInput{
+			Action: api.ProcessStart, Command: "echo hi",
+		})
+		if err != nil {
+			t.Fatalf("iter %d: unexpected error: %v", i, err)
+		}
+		if out.Code != api.CodeInternal {
+			t.Fatalf("iter %d: code = %q, want INTERNAL (live slot leaked?)", i, out.Code)
+		}
+		if out.ProcessID != "" {
+			t.Errorf("iter %d: a handle was minted on id failure: %q", i, out.ProcessID)
+		}
+	}
+
+	// Terminal shares the seam and must also fail cleanly.
+	tout, err := m.Terminal(context.Background(), api.TerminalInput{Command: "echo hi"})
+	if err != nil {
+		t.Fatalf("terminal unexpected error: %v", err)
+	}
+	if tout.Code != api.CodeInternal {
+		t.Fatalf("terminal code = %q, want INTERNAL", tout.Code)
 	}
 }
 
