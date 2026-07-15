@@ -125,6 +125,23 @@ The guest emits `SWAYTEST: PASS/FAIL <name>` markers on the serial console; the
 harness parses them and exits non-zero on any failure. Screenshots captured with
 `grim` are written to a scratch disk and extracted to `test/artifacts/`.
 
+The `test/agent/` directory holds the agent overlay's own test suite
+(`run.sh compatibility` boots the real graphical XLibre/i3 session in QEMU and
+drives it with `cua-driver`; focused scripts like `systemd_units_test.sh` and
+`session_launcher_test.sh` check narrower slices statically). Notably,
+`profile_isolation.sh` builds (or, with `SKIP_BUILD=1`, reuses) all three
+images — `sway-desktop:dev`, `i3-desktop:dev`, `agent-desktop:dev` — exports
+each one's real filesystem with `docker export`, and asserts against that
+export: the plain Sway/i3 images contain none of the agent-only files,
+units, or accounts, the agent image contains all of them, and the generic
+agent image's file contents carry no live bearer, no configured digest, and
+no PEM private key:
+
+```sh
+bash test/agent/profile_isolation.sh
+SKIP_BUILD=1 bash test/agent/profile_isolation.sh   # reuse already-built images
+```
+
 ### Users and login
 
 The image bakes in **no user**. The desktop user is created at install time and
@@ -177,6 +194,20 @@ hadron_agent:
   auth:
     user_token_hash: "sha256:..."
 ```
+
+**Tokens and keys are runtime seed data, never Docker build args.** The bearer
+digests (`user_token_hash`/`admin_token_hash`) and any TLS material for the
+gateway are written into the datasource/cloud-config that AuroraBoot or the
+installer feeds the *booted* image; they are read by the OEM provisioning
+stage at boot (`system/oem/90_agent_profile.yaml`), not baked into a layer by
+`agent-image`/`agent-iso`. Those two targets only ever take `BASE_IMAGE`,
+`AGENT_BASE_IMAGE` and `VERSION` as `--build-arg`s (see the `Makefile`) — no
+credential ever needs to (or should) flow through `docker build`. This is
+also why the generic `agent-desktop`/agent ISO ships with no bearer, no
+configured digest and no private key embedded in it:
+`test/agent/profile_isolation.sh` exports the actual built images and proves
+it (both that the plain Sway/i3 images carry none of the agent files, and
+that the generic agent image's filesystem contents contain no live secret).
 
 ### Production vs test launch
 
