@@ -1,0 +1,36 @@
+#!/bin/sh
+# Publish the live XLibre/i3 session environment into the agent's `systemd
+# --user` manager and restart the session broker so the broker (and its Cua
+# child) attach to the REAL foreground display.
+#
+# This is called by start-desktop AFTER Ly has established DISPLAY/XAUTHORITY and
+# after start-desktop has joined the user-manager bus. It imports EXACTLY the
+# three session variables into the user manager and restarts the broker unit.
+#
+# It NEVER scrapes another process's environment: it reads ONLY the variables it
+# inherited from start-desktop (which inherited them from the Ly session). If any
+# is missing, or DBUS_SESSION_BUS_ADDRESS does not point at THIS user's manager
+# bus, it refuses -- importing a stale or foreign bus would wire Cua to the wrong
+# session.
+set -u
+
+fail() {
+    echo "hadron-agent-session-ready: $1" >&2
+    exit 1
+}
+
+# All three must be present in the inherited environment.
+[ -n "${DISPLAY:-}" ] || fail "DISPLAY is not set; refusing to import a partial session"
+[ -n "${XAUTHORITY:-}" ] || fail "XAUTHORITY is not set; refusing to import a partial session"
+[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] || fail "DBUS_SESSION_BUS_ADDRESS is not set; refusing to import a partial session"
+
+# DBUS_SESSION_BUS_ADDRESS MUST be this user's manager bus. The lingering user
+# manager and the graphical session intentionally share ONE bus; anything else
+# means we would isolate Cua from the broker.
+expected="unix:path=/run/user/$(id -u)/bus"
+[ "$DBUS_SESSION_BUS_ADDRESS" = "$expected" ] || \
+    fail "DBUS_SESSION_BUS_ADDRESS ($DBUS_SESSION_BUS_ADDRESS) is not the user-manager bus ($expected); refusing"
+
+# Hand the live session to the user manager, then restart the broker onto it.
+systemctl --user import-environment DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS
+systemctl --user restart hadron-agent-session.service

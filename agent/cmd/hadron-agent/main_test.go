@@ -40,6 +40,8 @@ func TestExitCodes(t *testing.T) {
 		{"gateway unknown flag", []string{"gateway", "--nope"}, 2},
 		{"gateway help", []string{"gateway", "-h"}, 0},
 		{"session unknown flag", []string{"session", "--bogus"}, 2},
+		{"display-watchdog help", []string{"display-watchdog", "-h"}, 0},
+		{"display-watchdog unknown flag", []string{"display-watchdog", "--nope"}, 2},
 		{"control missing action", []string{"control"}, 2},
 		{"control unknown action", []string{"control", "wobble"}, 2},
 		{"token missing action", []string{"token"}, 2},

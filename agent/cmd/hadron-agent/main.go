@@ -49,6 +49,7 @@ import (
 	"github.com/mudler/hadron-desktop/agent/internal/roothelper"
 	"github.com/mudler/hadron-desktop/agent/internal/rpc"
 	"github.com/mudler/hadron-desktop/agent/internal/session"
+	"github.com/mudler/hadron-desktop/agent/internal/watchdog"
 
 	"golang.org/x/sys/unix"
 )
@@ -101,6 +102,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = runControl(rest, stdout, stderr)
 	case "status":
 		err = runStatus(rest, stdout, stderr)
+	case "display-watchdog":
+		err = runDisplayWatchdog(rest, stderr)
 	case "provision":
 		err = runProvision(rest, stdout, stderr)
 	case "token":
@@ -140,6 +143,7 @@ Commands:
   root-helper   Run the privileged root helper.
   control       pause | resume | toggle the local runtime.
   status        Print the local runtime status.
+  display-watchdog  Keep the agent's foreground XLibre/i3 session alive.
   version       Print the build version and cua-driver revision.
   provision     Materialize machine TLS, bearer digests, and service configs.
   token         rotate user | admin bearer.
@@ -538,6 +542,71 @@ func runStatus(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "version: %s\nready:   %t\npaused:  %t\n", buildinfo.Version, h.OK, h.Paused)
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// display-watchdog
+// ---------------------------------------------------------------------------
+
+// runDisplayWatchdog keeps the agent's foreground XLibre/i3 session alive. It
+// requires BOTH an agent logind graphical session AND an agent-owned i3
+// process; if either is absent past the grace period it restarts ly@tty1.service
+// so Ly performs its one allowed autologin again. It NEVER launches a display
+// itself. Restarts are rate-limited (three per five minutes) after which the
+// watchdog reports degraded rather than thrashing tty1.
+//
+// The unit that runs this carries ConditionKernelCommandLine=!install-mode; as
+// a belt-and-braces guard the binary also refuses to run when it detects
+// install-mode on the kernel command line, so it can never fight the installer
+// for tty1.
+func runDisplayWatchdog(args []string, stderr io.Writer) error {
+	fs := newFlagSet("display-watchdog", stderr)
+	user := fs.String("user", "agent", "account whose graphical session is guarded")
+	grace := fs.Duration("grace", watchdog.DefaultGrace, "how long the session may be absent before restarting Ly")
+	poll := fs.Duration("poll", watchdog.DefaultPollInterval, "how often to sample the session state")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+
+	if installModeActive() {
+		return errors.New("refusing to run in install-mode: the installer owns tty1")
+	}
+
+	logger := newLogger(stderr)
+	w := watchdog.New(watchdog.Config{
+		User:         *user,
+		Grace:        *grace,
+		PollInterval: *poll,
+		Detector:     watchdog.NewSystemDetector(*user),
+		Restarter:    watchdog.NewSystemRestarter(),
+		Logger:       logger,
+	})
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	logger.Info("display watchdog starting",
+		slog.String("user", *user), slog.Duration("grace", *grace))
+	if err := w.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	return nil
+}
+
+// installModeActive reports whether the kernel command line requests
+// install-mode. The watchdog refuses to run in that case so it never restarts
+// Ly while the installer needs tty1.
+func installModeActive() bool {
+	b, err := os.ReadFile("/proc/cmdline")
+	if err != nil {
+		return false
+	}
+	for _, f := range strings.Fields(string(b)) {
+		if f == "install-mode" {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

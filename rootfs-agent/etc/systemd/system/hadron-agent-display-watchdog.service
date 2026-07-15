@@ -1,0 +1,27 @@
+# Hadron agent display watchdog: keep the foreground XLibre/i3 session -- the
+# display Cua attaches to -- alive. After Ly has started, a healthy appliance
+# has BOTH an agent logind graphical session AND an agent-owned i3 process. If
+# either stays absent for the grace period the watchdog restarts ly@tty1.service
+# so Ly performs its one allowed autologin again. It NEVER launches X, i3, Xvfb,
+# or a nested session itself; restarting Ly on tty1 is its only recovery lever,
+# and even that is rate-limited (three per five minutes) before degrading.
+#
+# ConditionPathExists=/etc/hadron-agent/profile keeps this a no-op on any image
+# without the agent overlay. ConditionKernelCommandLine=!install-mode keeps it
+# off during the installer boot, where the installer owns tty1 (the binary also
+# refuses install-mode as a second guard).
+[Unit]
+Description=Hadron agent display watchdog (keep the foreground XLibre/i3 session alive)
+ConditionPathExists=/etc/hadron-agent/profile
+ConditionKernelCommandLine=!install-mode
+After=hadron-agent-provision.service ly@tty1.service
+
+[Service]
+Type=simple
+# Runs as root: it must be able to restart ly@tty1.service and read logind/proc.
+ExecStart=/usr/bin/hadron-agent display-watchdog --user agent --grace 30s
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

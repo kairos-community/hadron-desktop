@@ -1,0 +1,47 @@
+#!/bin/sh
+# Agent appliance XLibre/i3 session launcher (overrides the base
+# rootfs-i3/usr/bin/start-desktop). Ly owns the X server lifecycle and supplies
+# DISPLAY/XAUTHORITY; this wrapper brings up the i3 desktop for the `agent`
+# account AND hands the live session's environment to the lingering user manager
+# so the agent broker's Cua child attaches to the REAL foreground display.
+#
+# Unlike the base launcher, this deliberately does NOT call dbus-run-session.
+# The `agent` account lingers, so its `systemd --user` manager (and the
+# hadron-agent-session.service broker it starts before the display exists)
+# already owns a user bus at /run/user/$(id -u)/bus. The graphical session must
+# SHARE that one bus -- a fresh dbus-run-session bus would isolate Cua from the
+# broker, defeating the whole point. So we wait for the user-manager bus, point
+# DBUS_SESSION_BUS_ADDRESS at it, publish DISPLAY/XAUTHORITY/DBUS into the user
+# manager and restart the broker (via hadron-agent-session-ready), then exec i3
+# on that shared bus.
+#
+# Like the base launcher, this runs without `set -u` so a user-provided
+# env.local cannot abort the desktop login on an unset variable reference.
+
+# Source the normal i3 environment, exactly like the base launcher.
+[ -f /etc/i3-desktop/env ] && . /etc/i3-desktop/env
+[ -f /etc/i3-desktop/env.local ] && . /etc/i3-desktop/env.local
+
+# Ly already exported DISPLAY and XAUTHORITY for this session; preserve them.
+uid="$(id -u)"
+bus="/run/user/${uid}/bus"
+
+# Wait up to 10 seconds for the lingering user manager's bus socket to appear.
+# It is normally already up (the account lingers), but on a cold session the
+# manager may still be starting.
+i=0
+while [ ! -S "$bus" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
+
+# Join the user-manager bus (do NOT spawn a private one).
+DBUS_SESSION_BUS_ADDRESS="unix:path=${bus}"
+export DBUS_SESSION_BUS_ADDRESS
+
+# Import the live session environment into the user manager and restart the
+# broker so Cua re-parents onto this display. Failures here are logged by the
+# helper but must not block the desktop from coming up.
+hadron-agent-session-ready || true
+
+exec i3 --config /etc/i3/config

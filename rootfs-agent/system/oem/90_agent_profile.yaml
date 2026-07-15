@@ -22,6 +22,30 @@ name: "Hadron agent profile"
 stages:
   boot:
     - if: '! grep -q "install-mode" /proc/cmdline && [ -f /etc/hadron-agent/profile ]'
+      name: "configure ly autologin for the agent session"
+      commands:
+        - |
+          set -eu
+          # Ly autologin for the appliance: authenticate the locked `agent`
+          # account and start the i3 (XLibre) session unattended, using the
+          # ly-autologin PAM service. Task 6's ly@.service.d/20-agent-profile.conf
+          # relaxes ly's start condition to allow this on a live agent boot; the
+          # values below are the config side and must stay consistent with it.
+          # The systemd condition drop-in is set; here we set /etc/ly/config.ini.
+          cfg=/etc/ly/config.ini
+          [ -f "$cfg" ] || exit 0
+          set_kv() {
+            key="$1"; val="$2"
+            if grep -Eq "^[[:space:]]*#?[[:space:]]*${key}[[:space:]]*=" "$cfg"; then
+              sed -i "s|^[[:space:]]*#\?[[:space:]]*${key}[[:space:]]*=.*|${key} = ${val}|" "$cfg"
+            else
+              printf '%s = %s\n' "$key" "$val" >>"$cfg"
+            fi
+          }
+          set_kv auto_login_user agent
+          set_kv auto_login_session i3
+          set_kv auto_login_service ly-autologin
+    - if: '! grep -q "install-mode" /proc/cmdline && [ -f /etc/hadron-agent/profile ]'
       name: "create locked agent account, linger, and socket dirs"
       commands:
         - |
