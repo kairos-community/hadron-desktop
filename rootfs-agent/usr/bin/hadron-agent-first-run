@@ -1,0 +1,212 @@
+#!/bin/sh
+# hadron-agent-first-run: the one-time credential panel for the Cua agent
+# appliance. Run from i3 (agent profile, Task 7) on every session start; it is
+# a NO-OP unless a plaintext first-run bearer is actually waiting.
+#
+# Flow:
+#   1. Guard: if /run/hadron-agent/first-run-token does not exist, exit 0
+#      immediately. A CI-provided digest (Phase 3 Task 2) never creates this
+#      file, so this guard alone is what makes the panel silent on a CI/
+#      preseeded image.
+#   2. Poll the redacted gateway status for up to 60s (1s interval) waiting
+#      for "ready". The primary source is status.json under
+#      /run/hadron-agent/status/ (group-readable by `agent`, see the tmpfiles
+#      fragment); `hadron-agent status` (the control socket) is the fallback
+#      when status.json is not yet present.
+#   3. On success: open a small `st` window (mirrors the pattern in
+#      hadron-secret-prompt) showing the MCP URL, the certificate fingerprint,
+#      the plaintext token, and "shown once; store it now". Block for Enter,
+#      THEN unlink the token file.
+#   4. On timeout (status never becomes ready): open NO window and RETAIN the
+#      token file untouched, so the panel is retried the next time i3 starts
+#      (next login / session restart). Nothing about this attempt is written
+#      anywhere.
+#
+# Hard rule: this script NEVER calls `logger` or writes to the journal --
+# there is no channel by which the secret may reach a system log. The token
+# is only ever placed in a 0600 file inside a private mktemp -d, cat'd from
+# inside the `st` child's own pty, and is NEVER passed as a process argument
+# (which `ps`/`/proc/<pid>/cmdline` could expose) and NEVER echoed to this
+# script's own stdout/stderr.
+#
+# EXPECTED status.json SCHEMA (read-only contract; see the Task 7 report for
+# whether a writer exists yet):
+#   {
+#     "version": "<build version>",
+#     "gateway": true|false,
+#     "session": true|false,
+#     "cua": true|false,
+#     "paused": true|false,
+#     "degraded": true|false,
+#     "computer_use_active": true|false,
+#     "ready": true|false,
+#     "cert_fingerprint": "sha256:...",
+#     "mdns": true|false,
+#     "listen": "0.0.0.0:7443"
+#   }
+# "cert_fingerprint", "mdns", and "listen" reuse the exact field names already
+# defined by internal/provision/state.go's gatewayConfig, so a future status
+# writer can republish them verbatim (redacted) instead of inventing new
+# names. This script tolerates a MISSING or EMPTY status.json: it is simply
+# not-ready-yet, and the poll loop keeps waiting until the timeout.
+set -u
+
+# ---------------------------------------------------------------------------
+# Configuration (overridable via env for testing; production defaults match
+# the tmpfiles/provisioning contract from Tasks 2 and this task's brief).
+# ---------------------------------------------------------------------------
+TOKEN_FILE="${HADRON_AGENT_FIRST_RUN_TOKEN:-/run/hadron-agent/first-run-token}"
+STATUS_JSON="${HADRON_AGENT_STATUS_JSON:-/run/hadron-agent/status/status.json}"
+DEFAULTS_JSON="${HADRON_AGENT_DEFAULTS_JSON:-/etc/hadron-agent/defaults.json}"
+ST_BIN="${HADRON_AGENT_ST:-st}"
+AGENT_BIN="${HADRON_AGENT_BIN:-hadron-agent}"
+# Poll cadence for the readiness wait: up to MAX_WAIT iterations, POLL_INTERVAL
+# seconds apart (60 x 1s by default, i.e. "up to 60 seconds").
+MAX_WAIT="${HADRON_AGENT_FIRST_RUN_TIMEOUT:-60}"
+POLL_INTERVAL="${HADRON_AGENT_FIRST_RUN_POLL:-1}"
+
+# No token waiting -> nothing to show. This also covers the CI-digest path
+# (Task 2): a CI-provided digest never creates this file.
+[ -e "$TOKEN_FILE" ] || exit 0
+
+# json_field FILE KEY: prints the value of a top-level "KEY": VALUE pair from
+# a flat, one-key-per-line JSON object (the shape this contract assumes).
+# Strips surrounding quotes so both string and bare true/false/number values
+# come back unquoted. Prints nothing (and returns nonzero) if the key is
+# absent or the file cannot be read.
+json_field() {
+    file="$1"; key="$2"
+    [ -r "$file" ] || return 1
+    awk -v k="\"$key\"" '
+        {
+            i = index($0, k)
+            if (i == 0) next
+            rest = substr($0, i + length(k))
+            sub(/^[[:space:]]*:[[:space:]]*/, "", rest)
+            if (rest ~ /^"/) {
+                # String value: take up to the next quote, however far into
+                # the (possibly single-line/compact) rest of the file that is.
+                rest = substr(rest, 2)
+                end = index(rest, "\"")
+                if (end > 0) rest = substr(rest, 1, end - 1)
+            } else {
+                # Bare value (bool/number): stop at the first delimiter that
+                # can follow a JSON value, whether or not this key is alone
+                # on its own line (compact single-line JSON has no newline
+                # between values, only "," or the closing "}"/"]").
+                sub(/[,}\]].*$/, "", rest)
+                sub(/[[:space:]]+$/, "", rest)
+            }
+            print rest
+            exit
+        }
+    ' "$file"
+}
+
+# status_field KEY: reads KEY from status.json only (never falls back to the
+# CLI, which carries no fingerprint/mdns/listen data).
+status_field() {
+    json_field "$STATUS_JSON" "$1" 2>/dev/null || true
+}
+
+# is_ready: true if the redacted status source reports readiness. Prefers
+# status.json's "ready" field; falls back to `hadron-agent status`'s
+# "ready:   true" text line when status.json is not yet present/readable.
+is_ready() {
+    if [ -r "$STATUS_JSON" ]; then
+        r=$(status_field ready)
+        [ "$r" = "true" ]
+        return $?
+    fi
+    out=$("$AGENT_BIN" status 2>/dev/null) || return 1
+    printf '%s\n' "$out" | awk '/^ready:/{ if ($2=="true") found=1 } END{ exit !found }'
+}
+
+ready=0
+i=0
+while [ "$i" -lt "$MAX_WAIT" ]; do
+    if is_ready; then
+        ready=1
+        break
+    fi
+    i=$((i + 1))
+    sleep "$POLL_INTERVAL"
+done
+
+if [ "$ready" -ne 1 ]; then
+    # Never became ready within the window: retain the token untouched so the
+    # panel retries next i3 start. No window, no output, no log line.
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Build the display values.
+# ---------------------------------------------------------------------------
+fingerprint=$(status_field cert_fingerprint)
+[ -n "$fingerprint" ] || fingerprint="unavailable (gateway status not yet published)"
+
+mdns_enabled=$(status_field mdns)
+[ -n "$mdns_enabled" ] || mdns_enabled=$(json_field "$DEFAULTS_JSON" mdns 2>/dev/null || true)
+[ -n "$mdns_enabled" ] || mdns_enabled="false"
+
+listen=$(status_field listen)
+[ -n "$listen" ] || listen=$(json_field "$DEFAULTS_JSON" listen 2>/dev/null || true)
+[ -n "$listen" ] || listen="0.0.0.0:7443"
+port="${listen##*:}"
+
+if [ "$mdns_enabled" = "true" ]; then
+    host=$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo localhost)
+    host="${host%%.*}"
+    url="https://${host}.local:${port}/mcp"
+else
+    addr=$(hostname -I 2>/dev/null | awk '{print $1; exit}')
+    [ -n "$addr" ] || addr="127.0.0.1"
+    url="https://${addr}:${port}/mcp"
+fi
+
+# ---------------------------------------------------------------------------
+# Show the panel and block for Enter. The token is written to a private,
+# umask-0077 file inside a private mktemp -d and cat'd from inside `st`'s own
+# pty -- it is never passed as a process argument and never touched by this
+# script's own stdout/stderr.
+# ---------------------------------------------------------------------------
+dir=$(mktemp -d "${TMPDIR:-/tmp}/hadron-first-run.XXXXXX") || exit 1
+trap 'rm -rf "$dir"' EXIT HUP INT TERM
+content="$dir/panel.txt"
+ack="$dir/ack"
+mkfifo "$ack"
+
+(
+    umask 077
+    token=$(cat "$TOKEN_FILE") || exit 1
+    {
+        printf 'Hadron Agent -- first run credentials\n\n'
+        printf 'MCP URL:     %s\n' "$url"
+        printf 'Fingerprint: %s\n' "$fingerprint"
+        printf 'Token:       %s\n\n' "$token"
+        printf 'shown once; store it now\n\n'
+        printf 'Press Enter to continue...\n'
+    } >"$content"
+) || exit 1
+chmod 600 "$content"
+
+"$ST_BIN" -c HadronFirstRun -t "Hadron Agent - First Run" -e sh -c '
+    cat "$1"
+    IFS= read -r _
+    printf ack >"$2"
+' sh "$content" "$ack" &
+st_pid=$!
+
+IFS= read -r _ <"$ack"
+wait "$st_pid" 2>/dev/null || true
+
+# Unlink last, only after the operator has acknowledged. NOTE: /run/hadron-agent
+# is root:root 0755 (Task 2/5 tmpfiles contract); the unprivileged `agent`
+# user this script runs as has no write permission on that directory, so this
+# unlink can fail with EACCES in the current rootfs layout even though it owns
+# the file. `-f` keeps that failure silent and non-fatal rather than crashing
+# the panel after the secret was already shown; see the Task 7 report for the
+# flagged fix (either relocate first-run-token under an agent-writable
+# subdirectory, or loosen /run/hadron-agent's mode for this one entry).
+rm -f "$TOKEN_FILE" 2>/dev/null || true
+exit 0

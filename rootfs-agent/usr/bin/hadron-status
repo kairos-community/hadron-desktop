@@ -1,0 +1,148 @@
+#!/bin/sh
+# Agent-aware status producer for i3bar's plain-text protocol. This is the
+# AGENT-IMAGE OVERRIDE of rootfs-i3/usr/bin/hadron-status (Task 7): it
+# prepends exactly one "Agent: <State>" token to the SAME net/vol/mem/battery/
+# date line the base script has always produced -- the base fields and their
+# order are unchanged, only preceded by the agent state.
+#
+# State mapping (exactly one, in priority order):
+#   Paused    - the local emergency controller is paused (operator stopped it).
+#   Active    - a remote `computer_use` tool call is CURRENTLY executing (not
+#               merely an open MCP connection).
+#   Degraded  - the runtime reports itself unhealthy/not-fully-ready but is
+#               not paused (e.g. a broker probe is failing).
+#   Ready     - gateway, session, and cua are all healthy, not paused.
+#   Starting  - no status source is available yet, or none of the above match
+#               (first boot / mid-provisioning / status.json missing or
+#               unreadable). This is also the ONLY state a missing status.json
+#               ever produces -- see the integration-gap note below.
+#
+# Poll cadence: every 1s while Active or Paused (an operator or a running tool
+# call wants fast feedback), every 5s otherwise (Ready/Starting/Degraded are
+# comparatively static).
+#
+# EXPECTED status.json SCHEMA (read-only contract; matches the one documented
+# in hadron-agent-first-run -- see the Task 7 report for whether a writer
+# exists yet):
+#   {
+#     "version": "...", "gateway": true, "session": true, "cua": true,
+#     "paused": false, "degraded": false, "computer_use_active": false,
+#     "ready": true, "cert_fingerprint": "sha256:...", "mdns": true,
+#     "listen": "0.0.0.0:7443"
+#   }
+# A missing, empty, or unreadable status.json degrades gracefully to
+# "Agent: Starting" -- it is never treated as an error condition here.
+set -u
+
+STATUS_JSON="${HADRON_AGENT_STATUS_JSON:-/run/hadron-agent/status/status.json}"
+# Test-only seams: HADRON_STATUS_MAX_ITER caps the loop to N iterations
+# (0 = unlimited, the production default) so tests can capture exactly one
+# printed line without backgrounding+killing an infinite loop.
+MAX_ITER="${HADRON_STATUS_MAX_ITER:-0}"
+
+# json_field FILE KEY: see hadron-agent-first-run for the identical helper
+# and its "flat, one-key-per-line JSON" assumption.
+json_field() {
+    file="$1"; key="$2"
+    [ -r "$file" ] || return 1
+    awk -v k="\"$key\"" '
+        {
+            i = index($0, k)
+            if (i == 0) next
+            rest = substr($0, i + length(k))
+            sub(/^[[:space:]]*:[[:space:]]*/, "", rest)
+            if (rest ~ /^"/) {
+                # String value: take up to the next quote, however far into
+                # the (possibly single-line/compact) rest of the file that is.
+                rest = substr(rest, 2)
+                end = index(rest, "\"")
+                if (end > 0) rest = substr(rest, 1, end - 1)
+            } else {
+                # Bare value (bool/number): stop at the first delimiter that
+                # can follow a JSON value, whether or not this key is alone
+                # on its own line (compact single-line JSON has no newline
+                # between values, only "," or the closing "}"/"]").
+                sub(/[,}\]].*$/, "", rest)
+                sub(/[[:space:]]+$/, "", rest)
+            }
+            print rest
+            exit
+        }
+    ' "$file"
+}
+
+# agent_state: prints exactly one of Starting|Ready|Active|Paused|Degraded.
+agent_state() {
+    if ! [ -r "$STATUS_JSON" ]; then
+        echo Starting
+        return
+    fi
+
+    paused=$(json_field "$STATUS_JSON" paused 2>/dev/null || true)
+    active=$(json_field "$STATUS_JSON" computer_use_active 2>/dev/null || true)
+    degraded=$(json_field "$STATUS_JSON" degraded 2>/dev/null || true)
+    ready=$(json_field "$STATUS_JSON" ready 2>/dev/null || true)
+    gateway=$(json_field "$STATUS_JSON" gateway 2>/dev/null || true)
+    session=$(json_field "$STATUS_JSON" session 2>/dev/null || true)
+    cua=$(json_field "$STATUS_JSON" cua 2>/dev/null || true)
+
+    # An empty/unparseable file (no keys matched at all) is the same as
+    # "not present yet" from this reader's point of view.
+    if [ -z "$paused$active$degraded$ready$gateway$session$cua" ]; then
+        echo Starting
+        return
+    fi
+
+    if [ "$paused" = "true" ]; then
+        echo Paused
+        return
+    fi
+    if [ "$active" = "true" ]; then
+        echo Active
+        return
+    fi
+    if [ "$degraded" = "true" ]; then
+        echo Degraded
+        return
+    fi
+    if [ "$ready" = "true" ] || { [ "$gateway" = "true" ] && [ "$session" = "true" ] && [ "$cua" = "true" ]; }; then
+        echo Ready
+        return
+    fi
+    echo Starting
+}
+
+iter=0
+while :; do
+    state=$(agent_state)
+
+    net=$(nmcli -t -f TYPE,STATE,CONNECTION device 2>/dev/null |
+        awk -F: '$2=="connected" { print ($1=="wifi" ? "Wi-Fi " : "Net ") $3; exit }')
+    [ -n "$net" ] || net="Net offline"
+
+    volume=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null |
+        awk '{ if ($0 ~ /MUTED/) print "muted"; else printf "%.0f%%", $2 * 100 }')
+    [ -n "$volume" ] || volume="--"
+
+    memory=$(awk '/MemTotal:/ { total=$2 } /MemAvailable:/ { available=$2 }
+        END { if (total > 0) printf "%.0f%%", (total-available)*100/total; else print "--" }' /proc/meminfo)
+
+    battery=""
+    for capacity in /sys/class/power_supply/BAT*/capacity; do
+        [ -r "$capacity" ] || continue
+        battery=" | Bat $(cat "$capacity")%"
+        break
+    done
+
+    printf ' Agent: %s | %s | Vol %s | Mem %s%s | %s \n' "$state" "$net" "$volume" "$memory" "$battery" "$(date '+%a %d %b  %H:%M')"
+
+    iter=$((iter + 1))
+    if [ "$MAX_ITER" -gt 0 ] && [ "$iter" -ge "$MAX_ITER" ]; then
+        exit 0
+    fi
+
+    case "$state" in
+        Active|Paused) sleep 1 ;;
+        *) sleep 5 ;;
+    esac
+done
