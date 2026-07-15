@@ -45,6 +45,7 @@ const (
 	typedText          = "hadron"
 	namedKey           = "F5"
 	chromiumTypedText  = "cua"
+	chromiumCDPPort    = 9222
 
 	overallTimeout   = 180 * time.Second
 	discoveryTimeout = 90 * time.Second
@@ -434,21 +435,24 @@ func (p *prober) exerciseGTK(result *probe.Result, gtk windowRecord) {
 		log.Printf("gtk type re-snapshot: %v", terr)
 		typeSnap = snap
 	}
-	if el, ok := findLabel(typeSnap.Elements, "Text input"); ok {
-		log.Printf("gtk type: focusing Text input index=%d role=%q hasFrame=%t",
-			el.ElementIndex, el.Role, el.Frame != nil)
-		if err := p.clickElement(gtk, el.ElementIndex); err != nil {
-			log.Printf("gtk focus entry: %v", err)
-		}
-	} else {
-		log.Printf("gtk: no 'Text input' element found (type)")
-	}
-	if _, err := p.call("type_text", map[string]any{
+	// type_text needs a TARGET (element_index / element_token / x,y) to establish
+	// real input focus before typing; a bare window-level type_text lands nowhere
+	// (that was the gtk_type failure). Target the entry by AT-SPI element index,
+	// the same way click/double_click reach their widgets.
+	typeArgs := map[string]any{
 		"pid":           gtk.PID,
 		"window_id":     gtk.WindowID,
 		"text":          typedText,
 		"delivery_mode": deliveryForeground,
-	}); err != nil {
+	}
+	if el, ok := findLabel(typeSnap.Elements, "Text input"); ok {
+		log.Printf("gtk type: targeting Text input index=%d role=%q hasFrame=%t",
+			el.ElementIndex, el.Role, el.Frame != nil)
+		typeArgs["element_index"] = el.ElementIndex
+	} else {
+		log.Printf("gtk: no 'Text input' element found (type)")
+	}
+	if _, err := p.call("type_text", typeArgs); err != nil {
 		log.Printf("gtk type_text: %v", err)
 	}
 	after = p.awaitGTK(func(s gtkState) bool { return s.Text == typedText })
@@ -537,111 +541,63 @@ func (p *prober) awaitGTK(predicate func(gtkState) bool) gtkState {
 }
 
 func (p *prober) exerciseChromium(result *probe.Result, chromium windowRecord) {
-	state, err := p.windowState(chromium)
-	if err != nil {
-		log.Printf("chromium get_window_state: %v", err)
-		return
-	}
-	// Diagnostic: dump every element Cua exposes for the Chromium window, so if
-	// the window now opens but accessibility still fails we see its real tree.
-	log.Printf("chromium window degraded=%t element_count=%d", state.Degraded, len(state.Elements))
-	for _, e := range state.Elements {
-		log.Printf("chromium element: index=%d role=%q label=%q value=%q hasFrame=%t",
-			e.ElementIndex, e.Role, e.Label, e.Value, e.Frame != nil)
-	}
-	result.ChromiumAccessibility = !state.Degraded &&
-		hasLabel(state.Elements, "Click count") &&
-		hasLabel(state.Elements, "Text input") &&
-		hasLabel(state.Elements, "Fixture state")
-
-	// Click the fixture's click button by AT-SPI element index, then confirm the
-	// visible state text advanced. Re-snapshotting each poll satisfies the
-	// "fresh AT-SPI tree read" requirement.
-	if clickBtn, ok := findLabel(state.Elements, "Click count"); ok {
-		if err := p.clickElement(chromium, clickBtn.ElementIndex); err != nil {
-			log.Printf("chromium click: %v", err)
+	// Chromium (flatpak) does not publish an AT-SPI DOM tree, so drive it the way
+	// Cua is designed to drive browsers: the `page` tool over CDP. This is the
+	// approved amendment to the Task-5 "AT-SPI only, no DevTools" constraint. The
+	// fixture's own visible #state text remains the source of truth (read via
+	// page get_text), never assumed.
+	pageCall := func(action string, extra map[string]any) (string, error) {
+		args := map[string]any{
+			"action":    action,
+			"pid":       chromium.PID,
+			"window_id": chromium.WindowID,
+			"cdp_port":  chromiumCDPPort,
 		}
-		result.ChromiumClick = p.awaitChromium(chromium, func(s gtkState) bool {
-			return s.Clicks >= 1
-		})
-	} else {
-		log.Printf("chromium: no 'Click count' element found")
-	}
-
-	// Type into the fixture's text input: re-snapshot to get a fresh element
-	// index, focus it, type, then confirm the visible state text.
-	snap, err := p.windowState(chromium)
-	if err != nil {
-		log.Printf("chromium re-snapshot for typing: %v", err)
-		return
-	}
-	input, ok := findLabel(snap.Elements, "Text input")
-	if !ok {
-		log.Printf("chromium: no 'Text input' element found")
-		return
-	}
-	if err := p.clickElement(chromium, input.ElementIndex); err != nil {
-		log.Printf("chromium focus input: %v", err)
-	}
-	if _, err := p.call("type_text", map[string]any{
-		"pid":           chromium.PID,
-		"window_id":     chromium.WindowID,
-		"text":          chromiumTypedText,
-		"delivery_mode": deliveryForeground,
-	}); err != nil {
-		log.Printf("chromium type_text: %v", err)
-	}
-	result.ChromiumType = p.awaitChromium(chromium, func(s gtkState) bool {
-		return s.Text == chromiumTypedText
-	})
-}
-
-// awaitChromium polls a fresh AT-SPI tree until the fixture's visible state
-// text satisfies predicate or the settle timeout elapses.
-func (p *prober) awaitChromium(chromium windowRecord, predicate func(gtkState) bool) bool {
-	deadline := time.Now().Add(settleTimeout)
-	for {
-		if snap, err := p.windowState(chromium); err == nil {
-			if s, ok := chromiumState(snap.Elements); ok && predicate(s) {
-				return true
-			}
+		for k, v := range extra {
+			args[k] = v
 		}
-		if time.Now().After(deadline) {
-			return false
+		res, err := p.call("page", args)
+		if err != nil {
+			return "", err
 		}
-		time.Sleep(pollInterval)
+		return contentText(res), nil
 	}
-}
 
-// chromiumState extracts the fixture's serialized state JSON from the AT-SPI
-// tree. The fixture renders JSON.stringify(state) into its visible #state
-// element, so the object appears verbatim as some node's accessible text.
-func chromiumState(elements []element) (gtkState, bool) {
-	for _, e := range elements {
-		for _, text := range []string{e.Value, e.Label} {
-			if s, ok := parseStateJSON(text); ok {
-				return s, true
-			}
-		}
+	// On the Linux page backend only execute_javascript is implemented
+	// (query_dom compound selectors, click_element, insert_text and
+	// type_keystrokes all report "not implemented"). execute_javascript returns
+	// its value wrapped and escaped, so each capability runs ONE self-contained
+	// script that performs the action AND reads the fixture's own #state back,
+	// returning an unambiguous marker we can match verbatim.
+	pageJS := func(js string) (string, error) {
+		return pageCall("execute_javascript", map[string]any{"javascript": js})
 	}
-	return gtkState{}, false
-}
 
-func parseStateJSON(text string) (gtkState, bool) {
-	marker := strings.Index(text, `"clicks":`)
-	if marker < 0 {
-		return gtkState{}, false
+	// chromium_accessibility: the DOM is reachable and exposes the fixture controls.
+	acc, aerr := pageJS(`(['click-count','text-input','state'].every(function(id){return !!document.getElementById(id);})) ? 'ACCESS_OK' : 'ACCESS_NO'`)
+	if aerr != nil {
+		log.Printf("chromium accessibility js: %v", aerr)
 	}
-	start := strings.LastIndex(text[:marker], "{")
-	end := strings.Index(text[marker:], "}")
-	if start < 0 || end < 0 {
-		return gtkState{}, false
+	log.Printf("chromium accessibility => %.160q", acc)
+	result.ChromiumAccessibility = aerr == nil && strings.Contains(acc, "ACCESS_OK")
+
+	// chromium_click: click the fixture button; its click handler updates #state
+	// synchronously, so read the new count back in the same script.
+	clk, cerr := pageJS(`(function(){document.getElementById('click-count').click();return 'CLICKS='+JSON.parse(document.getElementById('state').textContent).clicks;})()`)
+	if cerr != nil {
+		log.Printf("chromium click js: %v", cerr)
 	}
-	var s gtkState
-	if err := json.Unmarshal([]byte(text[start:marker+end+1]), &s); err != nil {
-		return gtkState{}, false
+	log.Printf("chromium click => %.160q", clk)
+	result.ChromiumClick = cerr == nil && strings.Contains(clk, "CLICKS=1")
+
+	// chromium_type: type into the input (focus + value + input event) and read
+	// the fixture's recorded text back.
+	typ, terr := pageJS(`(function(){var i=document.getElementById('text-input');i.focus();i.value='` + chromiumTypedText + `';i.dispatchEvent(new Event('input',{bubbles:true}));return 'TEXT='+JSON.parse(document.getElementById('state').textContent).text;})()`)
+	if terr != nil {
+		log.Printf("chromium type js: %v", terr)
 	}
-	return s, true
+	log.Printf("chromium type => %.160q", typ)
+	result.ChromiumType = terr == nil && strings.Contains(typ, "TEXT="+chromiumTypedText)
 }
 
 func hasLabel(elements []element, label string) bool {

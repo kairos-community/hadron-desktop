@@ -470,5 +470,39 @@ if [ "$FRAME_OK" != "1" ]; then
   exit 5
 fi
 
+# ---------------------------------------------------------------------------
+# 11. Record the compatibility descriptor (Task 7). This is a generated artifact
+#     under the git-ignored artifacts dir; it is never committed. Best-effort:
+#     a descriptor hiccup must not fail an otherwise-green gate.
+# ---------------------------------------------------------------------------
+if command -v jq >/dev/null 2>&1; then
+  COMPAT_JSON="$ART/compatibility.json"
+  # Pins mirror Dockerfile.agent / test/agent/Dockerfile.compat build args.
+  cua_revision="3cadb5f82e7d2ed071a2082764276ec872a52135"
+  atspi_version="2.54.0"
+  cua_version="$(jq -r '(.probes[]?|select(.label=="binary")|.message)//""' "$ART/cua-driver-doctor.json" 2>/dev/null)"
+  xlibre_version="$(grep -aoE 'XLibre X Server [0-9][0-9.]*' "$ART/user-journal.log" 2>/dev/null | head -1 | awk '{print $NF}')"
+  chromium_commit="$(cat "$ART/chromium.commit" 2>/dev/null)"
+  image_id="$(docker image inspect --format '{{.Id}}' "$COMPAT_IMAGE" 2>/dev/null)"
+  if jq -n \
+      --arg cua_revision "$cua_revision" \
+      --arg cua_version "$cua_version" \
+      --arg xlibre_version "$xlibre_version" \
+      --arg atspi_version "$atspi_version" \
+      --arg chromium_commit "$chromium_commit" \
+      --arg image_id "$image_id" \
+      --slurpfile frame "$FRAME_JSON" \
+      '{cua_revision:$cua_revision, cua_version:$cua_version, xlibre_version:$xlibre_version,
+        atspi_version:$atspi_version, chromium_flatpak_commit:$chromium_commit, image_id:$image_id,
+        cua_width:($frame[0].cua_width), cua_height:($frame[0].cua_height),
+        qmp_width:($frame[0].qmp_width), qmp_height:($frame[0].qmp_height),
+        frame_abs_error:($frame[0].error)}' \
+      > "$COMPAT_JSON" 2>/dev/null; then
+    log "Wrote compatibility descriptor: $COMPAT_JSON"
+  else
+    err "warning: could not write compatibility.json (gate still PASS)"
+  fi
+fi
+
 log "RESULT: PASS - the pinned cua-driver controls the visible XLibre/i3 desktop."
 exit 0
