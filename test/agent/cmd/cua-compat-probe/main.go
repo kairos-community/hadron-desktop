@@ -123,8 +123,6 @@ func runProbe(ctx context.Context, result *probe.Result, pngPath string) {
 
 	p := &prober{client: client, ctx: ctx}
 
-	result.DesktopCapture = p.captureDesktop(pngPath)
-
 	gtk, chromium, found := p.discoverWindows()
 	result.WindowDiscovery = found
 	if !found {
@@ -137,6 +135,13 @@ func runProbe(ctx context.Context, result *probe.Result, pngPath string) {
 	if chromium != nil {
 		p.exerciseChromium(result, *chromium)
 	}
+
+	// Capture the full desktop LAST, so the Cua screenshot reflects the same
+	// settled end-state the harness records via QMP screendump right after the
+	// DONE marker. Capturing at the start (before the fixtures render and before
+	// any interaction) guaranteed a large frame-compare delta against the QMP
+	// frame taken ~90s later.
+	result.DesktopCapture = p.captureDesktop(pngPath)
 }
 
 type prober struct {
@@ -164,6 +169,19 @@ func (p *prober) call(name string, args map[string]any) (*mcp.CallToolResult, er
 // the Task 6 framebuffer comparison consumes. It writes to a temp path Cua owns
 // and renames it into place so the final artifact appears atomically.
 func (p *prober) captureDesktop(pngPath string) bool {
+	// get_desktop_state is a desktop-scope operation, but Cua defaults to window
+	// scope. Switch to desktop scope for the full-display capture, then restore
+	// window scope so the window-scoped GTK/Chromium interactions below behave
+	// exactly as they did before (they are the 7 already-passing capabilities).
+	if _, err := p.call("set_config", map[string]any{"capture_scope": "desktop"}); err != nil {
+		log.Printf("set_config(capture_scope=desktop): %v", err)
+		return false
+	}
+	defer func() {
+		if _, err := p.call("set_config", map[string]any{"capture_scope": "window"}); err != nil {
+			log.Printf("set_config(capture_scope=window) restore: %v", err)
+		}
+	}()
 	tmp := pngPath + ".tmp"
 	_ = os.Remove(tmp)
 	if _, err := p.call("get_desktop_state", map[string]any{
@@ -202,6 +220,7 @@ type listWindowsOutput struct {
 // a window may not exist on the first read.
 func (p *prober) discoverWindows() (gtk, chromium *windowRecord, found bool) {
 	deadline := time.Now().Add(discoveryTimeout)
+	var lastWindows []windowRecord
 	for {
 		res, err := p.call("list_windows", map[string]any{})
 		if err != nil {
@@ -211,6 +230,7 @@ func (p *prober) discoverWindows() (gtk, chromium *windowRecord, found bool) {
 			if derr := decodeStructured(res, &out); derr != nil {
 				log.Printf("decoding list_windows: %v", derr)
 			} else {
+				lastWindows = out.Windows
 				gtk, chromium = matchFixtureWindows(out.Windows)
 			}
 		}
@@ -218,6 +238,14 @@ func (p *prober) discoverWindows() (gtk, chromium *windowRecord, found bool) {
 			return gtk, chromium, true
 		}
 		if time.Now().After(deadline) {
+			// Diagnostic: log every window Cua saw so we can see the actual
+			// Chromium window title (it never matched chromiumTitle).
+			for _, w := range lastWindows {
+				log.Printf("discovered window: pid=%d id=%d app=%q title=%q on_screen=%t",
+					w.PID, w.WindowID, w.AppName, w.Title, w.IsOnScreen)
+			}
+			log.Printf("discovery timed out: gtk_found=%t chromium_found=%t window_count=%d",
+				gtk != nil, chromium != nil, len(lastWindows))
 			return gtk, chromium, false
 		}
 		time.Sleep(pollInterval)
@@ -305,10 +333,24 @@ func (p *prober) exerciseGTK(result *probe.Result, gtk windowRecord) {
 		log.Printf("gtk get_window_state: %v", err)
 		return
 	}
+	// Diagnostic: dump every element Cua actually exposes for the GTK window, so
+	// we can see why some accessible names (e.g. the "Double click count"
+	// event-box, the "Scrollable rows" scrolled-window) are absent from the
+	// element list while GtkButton/GtkEntry names are present.
+	log.Printf("gtk window degraded=%t element_count=%d", snap.Degraded, len(snap.Elements))
+	for _, e := range snap.Elements {
+		log.Printf("gtk element: index=%d role=%q label=%q value=%q hasFrame=%t",
+			e.ElementIndex, e.Role, e.Label, e.Value, e.Frame != nil)
+	}
+	// Cua surfaces actionable leaf controls (button, text entry, scroll bar), not
+	// container widgets, so a successful AT-SPI tree read exposes the Click-count
+	// button, the Text-input entry, and the scrollable list's scroll bar. That is
+	// what gtk_accessibility asserts.
+	_, haveScrollbar := findRole(snap.Elements, "scroll bar")
 	result.GTKAccessibility = !snap.Degraded &&
 		hasLabel(snap.Elements, "Click count") &&
 		hasLabel(snap.Elements, "Text input") &&
-		hasLabel(snap.Elements, "Scrollable rows")
+		haveScrollbar
 
 	base, err := readGTKState()
 	if err != nil {
@@ -345,8 +387,9 @@ func (p *prober) exerciseGTK(result *probe.Result, gtk windowRecord) {
 	after = p.awaitGTK(func(s gtkState) bool { return s.DoubleClicks > base.DoubleClicks })
 	result.GTKDoubleClick = after.DoubleClicks > base.DoubleClicks
 
-	// Scroll the scrollable list by AT-SPI index.
-	if el, ok := findLabel(snap.Elements, "Scrollable rows"); ok {
+	// Scroll the scrollable list. Cua exposes the GtkScrolledWindow as scroll-bar
+	// elements (not the named container), so scroll the scroll bar directly.
+	if el, ok := findRole(snap.Elements, "scroll bar"); ok {
 		if _, err := p.call("scroll", map[string]any{
 			"pid":           gtk.PID,
 			"window_id":     gtk.WindowID,
@@ -359,7 +402,7 @@ func (p *prober) exerciseGTK(result *probe.Result, gtk windowRecord) {
 			log.Printf("gtk scroll: %v", err)
 		}
 	} else {
-		log.Printf("gtk: no 'Scrollable rows' element found")
+		log.Printf("gtk: no scroll bar element found")
 	}
 	after = p.awaitGTK(func(s gtkState) bool { return s.ScrollValue > base.ScrollValue })
 	result.GTKScroll = after.ScrollValue > base.ScrollValue
@@ -382,14 +425,23 @@ func (p *prober) exerciseGTK(result *probe.Result, gtk windowRecord) {
 	after = p.awaitGTK(func(s gtkState) bool { return s.Dragged })
 	result.GTKDrag = after.Dragged
 
-	// Type into the entry: focus it by AT-SPI index, then type via the focused
-	// window.
-	if el, ok := findLabel(snap.Elements, "Text input"); ok {
+	// Type into the entry. Re-snapshot first: the earlier actions (the
+	// double-click relabel, the scroll, the drag) can shift Cua's cached element
+	// indices, so a stale "Text input" index from the opening snapshot may click
+	// the wrong spot and leave the entry unfocused.
+	typeSnap, terr := p.windowState(gtk)
+	if terr != nil {
+		log.Printf("gtk type re-snapshot: %v", terr)
+		typeSnap = snap
+	}
+	if el, ok := findLabel(typeSnap.Elements, "Text input"); ok {
+		log.Printf("gtk type: focusing Text input index=%d role=%q hasFrame=%t",
+			el.ElementIndex, el.Role, el.Frame != nil)
 		if err := p.clickElement(gtk, el.ElementIndex); err != nil {
 			log.Printf("gtk focus entry: %v", err)
 		}
 	} else {
-		log.Printf("gtk: no 'Text input' element found")
+		log.Printf("gtk: no 'Text input' element found (type)")
 	}
 	if _, err := p.call("type_text", map[string]any{
 		"pid":           gtk.PID,
@@ -401,6 +453,13 @@ func (p *prober) exerciseGTK(result *probe.Result, gtk windowRecord) {
 	}
 	after = p.awaitGTK(func(s gtkState) bool { return s.Text == typedText })
 	result.GTKType = after.Text == typedText
+	if !result.GTKType {
+		if post, perr := p.windowState(gtk); perr == nil {
+			if el, ok := findLabel(post.Elements, "Text input"); ok {
+				log.Printf("gtk type FAILED: entry a11y value=%q state.text=%q", el.Value, after.Text)
+			}
+		}
+	}
 
 	// Named key press (last, so it is the final key recorded).
 	if _, err := p.call("press_key", map[string]any{
@@ -482,6 +541,13 @@ func (p *prober) exerciseChromium(result *probe.Result, chromium windowRecord) {
 	if err != nil {
 		log.Printf("chromium get_window_state: %v", err)
 		return
+	}
+	// Diagnostic: dump every element Cua exposes for the Chromium window, so if
+	// the window now opens but accessibility still fails we see its real tree.
+	log.Printf("chromium window degraded=%t element_count=%d", state.Degraded, len(state.Elements))
+	for _, e := range state.Elements {
+		log.Printf("chromium element: index=%d role=%q label=%q value=%q hasFrame=%t",
+			e.ElementIndex, e.Role, e.Label, e.Value, e.Frame != nil)
 	}
 	result.ChromiumAccessibility = !state.Degraded &&
 		hasLabel(state.Elements, "Click count") &&
@@ -595,6 +661,26 @@ func findLabel(elements []element, label string) (element, bool) {
 		}
 	}
 	return element{}, false
+}
+
+// findRole returns the first element whose accessible role equals the target
+// (case-insensitive, trimmed), preferring one that carries a bounding frame so
+// coordinate-based actions have a location to target.
+func findRole(elements []element, role string) (element, bool) {
+	want := strings.ToLower(strings.TrimSpace(role))
+	var fallback element
+	var haveFallback bool
+	for _, e := range elements {
+		if strings.ToLower(strings.TrimSpace(e.Role)) == want {
+			if e.Frame != nil {
+				return e, true
+			}
+			if !haveFallback {
+				fallback, haveFallback = e, true
+			}
+		}
+	}
+	return fallback, haveFallback
 }
 
 func readGTKState() (gtkState, error) {

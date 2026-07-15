@@ -18,7 +18,7 @@ typedef struct {
     gint scroll_value;
 
     GtkWidget *click_button;
-    GtkWidget *double_click_label;
+    GtkWidget *double_click_button;
     GtkWidget *named_key_label;
     GtkWidget *drag_target_label;
 } Fixture;
@@ -187,7 +187,7 @@ static gboolean on_double_click(GtkWidget *widget,
 
         fixture->double_clicks++;
         label = g_strdup_printf("Double clicks: %u", fixture->double_clicks);
-        gtk_label_set_text(GTK_LABEL(fixture->double_click_label), label);
+        gtk_button_set_label(GTK_BUTTON(fixture->double_click_button), label);
         g_free(label);
         persist_state(fixture);
     }
@@ -305,7 +305,6 @@ int main(int argc, char **argv)
     };
     GtkWidget *window;
     GtkWidget *fixed;
-    GtkWidget *double_click_box;
     GtkWidget *entry;
     GtkWidget *named_key_box;
     GtkWidget *drag_source;
@@ -335,16 +334,19 @@ int main(int argc, char **argv)
     g_signal_connect(fixture.click_button, "clicked", G_CALLBACK(on_click), &fixture);
     gtk_fixed_put(GTK_FIXED(fixed), fixture.click_button, 40, 35);
 
-    double_click_box = new_labeled_event_box("Double clicks: 0",
-                                              &fixture.double_click_label);
-    gtk_widget_set_size_request(double_click_box, 180, 70);
-    gtk_widget_add_events(double_click_box, GDK_BUTTON_PRESS_MASK);
-    set_accessible_name(double_click_box, "Double click count");
-    g_signal_connect(double_click_box,
+    // A real GtkButton (not an event box): Cua's accessibility model surfaces
+    // actionable leaf controls (button/text/scroll bar), so the double-click
+    // target must be a button for its accessible name to appear in the element
+    // list. GtkButton already receives button-press events; on_double_click
+    // counts GDK_2BUTTON_PRESS.
+    fixture.double_click_button = gtk_button_new_with_label("Double clicks: 0");
+    gtk_widget_set_size_request(fixture.double_click_button, 180, 70);
+    set_accessible_name(fixture.double_click_button, "Double click count");
+    g_signal_connect(fixture.double_click_button,
                      "button-press-event",
                      G_CALLBACK(on_double_click),
                      &fixture);
-    gtk_fixed_put(GTK_FIXED(fixed), double_click_box, 40, 120);
+    gtk_fixed_put(GTK_FIXED(fixed), fixture.double_click_button, 40, 120);
 
     entry = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(entry), "Type text");

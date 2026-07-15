@@ -63,21 +63,28 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     exit 1
 fi
 
+# Wait only for the essential probe outputs (result.json + result.status).
+# cua-desktop.png is deliberately NOT required here: when Cua's desktop_capture
+# fails there is no PNG, and blocking on it would (a) time out the whole
+# collector and (b) suppress the very diagnostics (cua-driver doctor, xprop,
+# xrandr) needed to explain that failure. Collect diagnostics regardless; the
+# missing PNG is judged separately by the probe result and the harness.
 remaining=240
 while [ "$remaining" -gt 0 ]; do
     if [ -s "$runtime_dir/result.json" ] && \
-       [ -s "$runtime_dir/result.status" ] && \
-       [ -s "$runtime_dir/cua-desktop.png" ]; then
+       [ -s "$runtime_dir/result.status" ]; then
         break
     fi
     sleep 1
     remaining=$((remaining - 1))
 done
 if [ ! -s "$runtime_dir/result.json" ] || \
-   [ ! -s "$runtime_dir/result.status" ] || \
-   [ ! -s "$runtime_dir/cua-desktop.png" ]; then
-    printf 'timed out waiting for probe artifacts\n'
+   [ ! -s "$runtime_dir/result.status" ]; then
+    printf 'timed out waiting for probe result\n'
     exit 1
+fi
+if [ ! -s "$runtime_dir/cua-desktop.png" ]; then
+    printf 'note: cua-desktop.png absent (desktop_capture failed); collecting diagnostics anyway\n'
 fi
 
 case "$(cat "$runtime_dir/result.status")" in
