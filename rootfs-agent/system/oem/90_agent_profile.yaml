@@ -77,9 +77,13 @@ stages:
             owner="$(uid_owner 1000 || true)"
             if [ -n "$owner" ]; then
               # Take over the base default user: rename login (and, when present,
-              # its per-user primary group) to `agent` and relocate the home.
+              # its per-user primary group) to `agent` and relocate the home. Only
+              # pass -m (move the old home) when there is a real old home to move
+              # AND /home/agent does not already exist -- usermod -m refuses (and,
+              # under set -e, would abort the whole stage) if the target home is
+              # already present. When we skip -m, the mkdir+chown below owns it.
               oldhome="$(home_of "$owner" || true)"
-              if [ -n "$oldhome" ] && [ -d "$oldhome" ] && [ "$oldhome" != /home/agent ]; then
+              if [ -n "$oldhome" ] && [ -d "$oldhome" ] && [ "$oldhome" != /home/agent ] && [ ! -e /home/agent ]; then
                 usermod -l agent -d /home/agent -m -s /bin/bash -c "Hadron agent" "$owner"
               else
                 usermod -l agent -d /home/agent -s /bin/bash -c "Hadron agent" "$owner"
