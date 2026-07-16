@@ -17,4 +17,3 @@
 /test/agent/runtime/*.json
 /test/agent/runtime/*.qcow2
 /test/agent/runtime/*.sock
-/test/agent/artifacts/

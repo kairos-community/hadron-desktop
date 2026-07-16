@@ -16,8 +16,13 @@
 #           world-readable descriptor, a world-readable bearer file, and a
 #           descriptor whose text contains token-shaped content.
 #
-# No new build dependencies: validation uses python3's stdlib json/re only
-# (no jsonschema package), so this test is self-contained in CI.
+# No new build dependencies: the primary validator uses python3's stdlib
+# json/re only. If the optional `jsonschema` package happens to be available
+# (python3 -c 'import jsonschema'), the descriptor-rejection cases are ALSO
+# driven through it against the real fixture.schema.json, so the schema's own
+# additionalProperties/required/pattern rules do the rejecting rather than a
+# hand-rolled reimplementation of them. Either way, this test is
+# self-contained in CI: jsonschema is never a hard requirement.
 set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -47,6 +52,45 @@ if python3 -c "import json; json.load(open('$schema'))" 2>/dev/null; then
   ok "fixture.schema.json is valid JSON"
 else
   err "fixture.schema.json is not valid JSON"
+fi
+
+# Pin the schema's own declared semantics directly off the schema file, so a
+# regression in the schema itself (e.g. additionalProperties flipped to true,
+# or a required field dropped) fails this suite regardless of which
+# descriptor validator path runs below.
+echo "--- fixture.schema.json: pinned semantics ---"
+if python3 -c "
+import json, sys
+schema = json.load(open('$schema'))
+sys.exit(0 if schema.get('additionalProperties') is False else 1)
+" 2>/dev/null; then
+  ok "fixture.schema.json declares additionalProperties: false"
+else
+  err "fixture.schema.json does not declare additionalProperties: false"
+fi
+
+expected_required="mcp_url bearer_token_file ca_certificate_file tls_fingerprint vnc_address novnc_url qmp_socket artifact_directory"
+missing_from_required="$(python3 -c "
+import json
+schema = json.load(open('$schema'))
+required = set(schema.get('required', []))
+expected = set('$expected_required'.split())
+print(' '.join(sorted(expected - required)))
+")"
+if [ -z "$missing_from_required" ]; then
+  ok "fixture.schema.json 'required' contains all 8 field names"
+else
+  err "fixture.schema.json 'required' is missing field(s): $missing_from_required"
+fi
+
+# Optional: only used if the environment happens to have it installed. Never
+# a hard requirement for this test (see header comment above).
+if python3 -c 'import jsonschema' 2>/dev/null; then
+  have_jsonschema=1
+  ok "python3 'jsonschema' package available -- descriptor checks will also run through it"
+else
+  have_jsonschema=0
+  ok "python3 'jsonschema' package not available -- using stdlib-only validator (fallback)"
 fi
 
 workdir="$(mktemp -d)"
@@ -219,6 +263,41 @@ print("VALID")
 sys.exit(0)
 PY
 
+# A second validator, used only when the optional `jsonschema` package is
+# available: it drives rejection through Draft7Validator against the actual
+# fixture.schema.json, so the schema's own additionalProperties/required/
+# pattern rules (not a hand-rolled reimplementation of them) are what accept
+# or reject each descriptor.
+validator_jsonschema_py="$workdir/validate_descriptor_jsonschema.py"
+cat > "$validator_jsonschema_py" <<'PY'
+import json
+import sys
+
+import jsonschema
+
+schema_path, descriptor_path = sys.argv[1], sys.argv[2]
+
+with open(schema_path) as f:
+    schema = json.load(f)
+with open(descriptor_path) as f:
+    raw = f.read()
+
+try:
+    descriptor = json.loads(raw)
+except ValueError as e:
+    print(f"not valid JSON: {e}")
+    sys.exit(1)
+
+validator = jsonschema.Draft7Validator(schema)
+errors = sorted(validator.iter_errors(descriptor), key=str)
+if errors:
+    print("; ".join(e.message for e in errors))
+    sys.exit(1)
+
+print("VALID")
+sys.exit(0)
+PY
+
 # Combined check: descriptor file mode, schema shape, token-leak scan, and
 # (if the referenced bearer file exists on disk) its mode too.
 hdn_check_descriptor() {
@@ -239,9 +318,16 @@ hdn_check_descriptor() {
     return 1
   fi
 
-  if ! schema_out="$(python3 "$validator_py" "$schema" "$desc" 2>&1)"; then
-    echo "schema validation failed: $schema_out"
-    return 1
+  if [ "$have_jsonschema" -eq 1 ]; then
+    if ! schema_out="$(python3 "$validator_jsonschema_py" "$schema" "$desc" 2>&1)"; then
+      echo "schema validation failed (jsonschema): $schema_out"
+      return 1
+    fi
+  else
+    if ! schema_out="$(python3 "$validator_py" "$schema" "$desc" 2>&1)"; then
+      echo "schema validation failed: $schema_out"
+      return 1
+    fi
   fi
 
   bearer_file="$(python3 -c '
@@ -353,9 +439,11 @@ echo "--- descriptor: empty novnc_url is allowed ---"
 write_desc "$workdir/empty_novnc.json" 600 'set:novnc_url='
 assert_accepts "$workdir/empty_novnc.json" "descriptor with empty novnc_url"
 
-echo "--- descriptor: missing required field ---"
-write_desc "$workdir/missing_field.json" 600 'del:qmp_socket'
-assert_rejects "$workdir/missing_field.json" "descriptor missing qmp_socket"
+echo "--- descriptor: missing required field (each of the 8) ---"
+for field in mcp_url bearer_token_file ca_certificate_file tls_fingerprint vnc_address novnc_url qmp_socket artifact_directory; do
+  write_desc "$workdir/missing_${field}.json" 600 "del:${field}"
+  assert_rejects "$workdir/missing_${field}.json" "descriptor missing $field"
+done
 
 echo "--- descriptor: extra/unknown field ---"
 write_desc "$workdir/extra_field.json" 600 'set:unexpected_field=nope'
