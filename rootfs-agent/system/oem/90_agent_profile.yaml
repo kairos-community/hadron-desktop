@@ -6,11 +6,19 @@
 # stage can never touch an ordinary desktop install.
 #
 # Before any agent service starts (this is a cos-setup `boot` stage, which runs
-# well ahead of the agent units that reach for network-online.target) it:
-#   1. creates the locked, UID-1000 human `agent` account if absent, ABORTING
-#      if UID 1000 is already owned by a different account;
+# well ahead of the agent units that reach for network-online.target -- and,
+# being the high-numbered 90_ OEM file, runs AFTER the base Kairos "default
+# user" stage that claims UID 1000 on a live boot) it:
+#   1. establishes the locked, UID-1000 human `agent` account: if UID 1000 is
+#      already owned by the base default user, it TAKES OVER that account
+#      (renames login + per-user group to `agent`, relocates the home); if
+#      UID 1000 is free it creates `agent` fresh; if `agent` already exists it
+#      leaves it be. All detection is getent-free (the base image has no
+#      getent) via awk over /etc/passwd and /etc/group;
 #   2. constrains `agent` to ONLY the approved supplemental groups -- never
-#      admin/sudo/docker -- intersected with the groups that actually exist;
+#      admin/sudo/docker -- intersected with the groups that actually exist
+#      (usermod -G replaces the whole set, stripping any privileged membership
+#      the taken-over base account may have carried);
 #   3. owns /home/agent to the agent account;
 #   4. enables linger so the agent user manager (and its session broker) runs
 #      without an interactive login;
@@ -51,28 +59,57 @@ stages:
         - |
           set -eu
 
-          # Refuse to hijack UID 1000 if it already belongs to someone else.
-          existing="$(getent passwd 1000 | cut -d: -f1 || true)"
-          if [ -n "$existing" ] && [ "$existing" != "agent" ]; then
-            echo "hadron-agent: UID 1000 already used by '$existing'; refusing to create agent" >&2
-            exit 1
+          # getent is ABSENT in the base image, so all name-service lookups here
+          # read the files directly. These are files-backed (no LDAP/NSS) on a
+          # Kairos node, so /etc/passwd and /etc/group are authoritative.
+          user_exists()  { awk -F: -v u="$1" '$1==u{f=1} END{exit !f}' /etc/passwd; }
+          group_exists() { awk -F: -v g="$1" '$1==g{f=1} END{exit !f}' /etc/group; }
+          uid_owner()    { awk -F: -v i="$1" '$3==i{print $1; exit}' /etc/passwd; }
+          home_of()      { awk -F: -v u="$1" '$1==u{print $6; exit}' /etc/passwd; }
+
+          # Establish the UID-1000 `agent` account. Three cases, in priority:
+          #   a) `agent` already exists            -> leave it (idempotent reboot)
+          #   b) UID 1000 owned by another account -> TAKE IT OVER (rename to agent)
+          #   c) UID 1000 free                     -> create agent fresh
+          if user_exists agent; then
+            :
+          else
+            owner="$(uid_owner 1000 || true)"
+            if [ -n "$owner" ]; then
+              # Take over the base default user: rename login (and, when present,
+              # its per-user primary group) to `agent` and relocate the home.
+              oldhome="$(home_of "$owner" || true)"
+              if [ -n "$oldhome" ] && [ -d "$oldhome" ] && [ "$oldhome" != /home/agent ]; then
+                usermod -l agent -d /home/agent -m -s /bin/bash -c "Hadron agent" "$owner"
+              else
+                usermod -l agent -d /home/agent -s /bin/bash -c "Hadron agent" "$owner"
+              fi
+              if group_exists "$owner"; then
+                groupmod -n agent "$owner" || true
+              fi
+            else
+              useradd --uid 1000 --user-group --create-home --home-dir /home/agent \
+                --shell /bin/bash --comment "Hadron agent" agent
+            fi
           fi
 
-          # Create the locked, no-interactive-password agent account if absent.
-          if ! getent passwd agent >/dev/null 2>&1; then
-            useradd --uid 1000 --user-group --create-home --home-dir /home/agent \
-              --shell /bin/bash --comment "Hadron agent" agent
-          fi
+          # Guarantee a resolvable `agent` group. hadron-agent-provision chowns
+          # the session config to root:agent, so this group MUST exist even if the
+          # taken-over account's primary group could not be renamed above.
+          group_exists agent || groupadd agent
+          usermod -g agent agent 2>/dev/null || true
+
           # Lock the password (no password login); the account is driven only by
           # linger + the session's display manager, never by a typed password.
           passwd -l agent >/dev/null 2>&1 || true
 
           # Constrain to ONLY the approved supplemental groups that exist. Never
           # admin/sudo/docker. usermod -G replaces the full supplemental set, so
-          # any stray privileged membership is removed here too.
+          # any stray privileged membership (from a taken-over base account) is
+          # removed here too.
           approved=""
           for g in audio video render input bluetooth seat hadron-agent-control; do
-            if getent group "$g" >/dev/null 2>&1; then
+            if group_exists "$g"; then
               approved="${approved:+$approved,}$g"
             fi
           done

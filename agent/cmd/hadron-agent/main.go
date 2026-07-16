@@ -1004,6 +1004,20 @@ func serveUnix(ctx context.Context, path string, handler rpc.Handler, requireAut
 		return fmt.Errorf("listen unix %s: %w", path, err)
 	}
 
+	// Make the socket connectable by the owning group. The /run/hadron-agent
+	// socket dirs are setgid (see etc/tmpfiles.d/hadron-agent.conf), so the
+	// socket inherits the dir's owning group -- the exact cross-user client
+	// that must reach this broker (the gateway for session/root, the control
+	// group for control). 0660 grants that group connect (write) access while
+	// denying "other"; the serving user cannot chgrp to a group it does not
+	// belong to (the agent-run session broker is not in hadron-agent-gateway),
+	// so setgid inheritance -- not an explicit chown -- is what carries the
+	// group, and this chmod is what realises the documented "0660" socket mode.
+	if err := os.Chmod(path, 0o660); err != nil {
+		_ = l.Close()
+		return fmt.Errorf("chmod socket %s: %w", path, err)
+	}
+
 	srv := rpc.NewServer(handler, rpc.Config{RequireAuth: requireAuth})
 	go func() {
 		<-ctx.Done()
