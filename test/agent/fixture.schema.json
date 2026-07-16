@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mudler/hadron-desktop/test/agent/fixture.schema.json",
+  "title": "Hadron Cua agent VM fixture descriptor",
+  "description": "Frozen contract emitted by test/agent/run.sh fixture (Phase 4, Task 3) and consumed by the Go smoke client (Task 4) and downstream CI gates. Exactly these eight string fields, nothing else.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "mcp_url",
+    "bearer_token_file",
+    "ca_certificate_file",
+    "tls_fingerprint",
+    "vnc_address",
+    "novnc_url",
+    "qmp_socket",
+    "artifact_directory"
+  ],
+  "properties": {
+    "mcp_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^https://.+/mcp$",
+      "description": "HTTPS URL of the gateway MCP endpoint, e.g. https://127.0.0.1:7443/mcp. Must be https and must end in /mcp."
+    },
+    "bearer_token_file": {
+      "type": "string",
+      "pattern": "^/.+",
+      "description": "Absolute path to a mode-0600 file containing the plaintext bearer token (hdn_u_... or hdn_a_...). Never embed the token value itself in the descriptor."
+    },
+    "ca_certificate_file": {
+      "type": "string",
+      "pattern": "^/.+",
+      "description": "Absolute path to the PEM-encoded self-signed leaf certificate captured via TOFU, for pinned TLS verification."
+    },
+    "tls_fingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Lowercase hex SHA-256 digest of the DER-encoded leaf certificate (64 characters)."
+    },
+    "vnc_address": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Loopback VNC listen address in host:port form, e.g. 127.0.0.1:5910."
+    },
+    "novnc_url": {
+      "type": "string",
+      "description": "HTTP URL of the noVNC web console, or the empty string when noVNC is disabled for this fixture."
+    },
+    "qmp_socket": {
+      "type": "string",
+      "pattern": "^/.+",
+      "description": "Absolute path to the QMP control-socket Unix domain socket."
+    },
+    "artifact_directory": {
+      "type": "string",
+      "pattern": "^/.+",
+      "description": "Absolute path to the directory where this fixture instance writes logs, screenshots, and results."
+    }
+  }
+}
