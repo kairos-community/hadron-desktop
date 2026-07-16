@@ -10,9 +10,12 @@
 #
 # It is gated on /var/lib/hadron-agent/root/enabled, which the provisioner
 # writes only when an admin bearer was configured, so a machine with no admin
-# credential never runs the helper at all. The unit is not auto-enabled by a
-# baked wants-symlink; the OEM stage links it into multi-user.target.wants only
-# once that enabled marker exists.
+# credential never runs the helper at all. The unit ships baked-enabled (a
+# multi-user.target.wants symlink in the agent overlay), but that only makes it
+# WANTED: ConditionPathExists=/var/lib/hadron-agent/root/enabled below is the
+# real gate, so on the admin-disabled default the helper is skipped every boot,
+# and on an admin-enabled machine it starts once provision (ordered before it)
+# has written the marker -- on the same boot, not a boot late.
 [Unit]
 Description=Hadron agent privileged root helper (admin MCP broker)
 ConditionPathExists=/etc/hadron-agent/profile

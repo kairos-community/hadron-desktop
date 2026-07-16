@@ -23,9 +23,10 @@
 #   4. enables linger so the agent user manager (and its session broker) runs
 #      without an interactive login;
 #   5. materializes the /run/hadron-agent socket dir tree with the exact
-#      owners/modes now that the `agent` account exists;
-#   6. links the root helper into multi-user.target.wants iff the provisioner
-#      previously marked admin as enabled (the unit is otherwise not started).
+#      owners/modes now that the `agent` account exists.
+# The root helper is NOT linked here: it ships baked-enabled and is gated by its
+# own ConditionPathExists=/var/lib/hadron-agent/root/enabled marker (which only
+# provisioning writes, and only when an admin bearer was configured).
 name: "Hadron agent profile"
 stages:
   boot:
@@ -131,10 +132,12 @@ stages:
           # per-boot tmpfs, so this is the authoritative first-boot creation.
           systemd-tmpfiles --create /etc/tmpfiles.d/hadron-agent.conf || true
 
-          # Link the root helper only if provisioning previously enabled admin.
-          if [ -f /var/lib/hadron-agent/root/enabled ]; then
-            mkdir -p /etc/systemd/system/multi-user.target.wants
-            ln -sf /etc/systemd/system/hadron-agent-root-helper.service \
-              /etc/systemd/system/multi-user.target.wants/hadron-agent-root-helper.service
-            systemctl daemon-reload || true
-          fi
+          # NOTE: the root helper is NOT linked here. It ships with a baked
+          # multi-user.target.wants symlink and is gated purely by its own
+          # ConditionPathExists=/var/lib/hadron-agent/root/enabled (plus
+          # After/Requires=hadron-agent-provision.service). On the admin-disabled
+          # default the marker is never written, so the condition keeps it
+          # stopped; on an admin-enabled machine provision writes the marker
+          # before the helper is reached, so it starts on the SAME boot. This
+          # replaces the old imperative link, which ran before provision (now
+          # ordered After=cos-setup-boot) and so could never see the marker.
