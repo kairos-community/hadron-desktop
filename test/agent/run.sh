@@ -32,11 +32,270 @@ err() { echo -e "\033[1;31m[compat] $*\033[0m" >&2; }
 # --- subcommand dispatch -----------------------------------------------------
 SUBCOMMAND="${1:-}"
 usage() {
-  err "usage: $0 compatibility"
-  err "  (compatibility is currently the only subcommand)"
+  err "usage: $0 <compatibility|fixture [ISO]|stop>"
+  err "  compatibility  build + boot the graphical QEMU compatibility gate"
+  err "  fixture [ISO]  boot a detachable, VNC-visible appliance VM and emit"
+  err "                 a descriptor pointing at its MCP/VNC/QMP endpoints"
+  err "  stop           gracefully power down the running fixture, keep artifacts"
 }
+
+# Progress for the fixture/stop subcommands goes to STDERR only: the `fixture`
+# subcommand's STDOUT must carry NOTHING but the descriptor path.
+finfo() { echo -e "\033[1;34m[fixture]\033[0m $*" >&2; }
+
+# _fixture_paths -- deterministic runtime/artifact locations shared by both
+# `fixture` (writer) and `stop` (reader). Overridable via FIXTURE_RUNTIME /
+# FIXTURE_ART so a caller can run several fixtures side by side.
+_fixture_paths() {
+  FIXTURE_RUNTIME="${FIXTURE_RUNTIME:-$SCRIPT_DIR/runtime/fixture}"
+  FIXTURE_ART="${FIXTURE_ART:-$SCRIPT_DIR/artifacts/fixture}"
+  FIXTURE_QEMU_PID="$FIXTURE_RUNTIME/qemu.pid"     # qemu's own -pidfile
+  FIXTURE_LAUNCH_PID="$FIXTURE_RUNTIME/launch.pid" # backup pid captured at spawn
+  FIXTURE_NOVNC_PID="$FIXTURE_RUNTIME/novnc.pid"
+  FIXTURE_QMP_SOCK="$FIXTURE_RUNTIME/qmp.sock"
+}
+
+# cmd_fixture [ISO] -- boot a long-lived, VNC-visible appliance VM whose MCP
+# gateway is forwarded to a loopback host port, TOFU-capture its self-signed
+# leaf, verify /readyz through the pinned CA, emit the descriptor, print ONLY
+# the descriptor path, and stay running until `stop` powers the guest down.
+cmd_fixture() {
+  shift  # drop "fixture"
+  local iso="${1:-${FIXTURE_ISO:-}}"
+
+  # shellcheck source=lib/common.sh
+  source "$SCRIPT_DIR/lib/common.sh"
+  # shellcheck source=lib/qmp.sh
+  source "$SCRIPT_DIR/lib/qmp.sh"
+  # shellcheck source=lib/fixture.sh
+  source "$SCRIPT_DIR/lib/fixture.sh"
+  _fixture_paths
+
+  for bin in qemu-system-x86_64 openssl curl python3; do
+    command -v "$bin" >/dev/null 2>&1 || { err "required command not found: $bin"; return 1; }
+  done
+
+  [ -n "$iso" ] || iso="$(ls -t "$REPO_ROOT/build/agent-desktop/iso"/*.iso 2>/dev/null | head -1 || true)"
+  [ -n "$iso" ] && [ -f "$iso" ] || {
+    err "no appliance ISO found. Pass one: $0 fixture path/to.iso  (or set FIXTURE_ISO)"
+    return 1
+  }
+
+  mkdir -p "$FIXTURE_RUNTIME" "$FIXTURE_ART"
+  chmod 700 "$FIXTURE_RUNTIME" "$FIXTURE_ART" 2>/dev/null || true
+
+  # --- ports / display (loopback only) --------------------------------------
+  local mcp_port vnc_display vnc_port novnc_port
+  mcp_port="$(hdn_agent_alloc_port)"
+  vnc_display="${FIXTURE_VNC:-25}"
+  vnc_port=$((5900 + vnc_display))
+  novnc_port="${FIXTURE_NOVNC_PORT:-6090}"
+
+  # --- per-run files --------------------------------------------------------
+  local disk="$FIXTURE_RUNTIME/disk.qcow2"
+  local serial_log="$FIXTURE_ART/serial.log"
+  local boot_log="$FIXTURE_ART/qemu-launch.log"
+  local descriptor="$FIXTURE_ART/fixture.json"
+  local CA_CERT="$FIXTURE_ART/ca.pem"
+  local FINGERPRINT_FILE="$FIXTURE_ART/tls-fingerprint.txt"
+  local MCP_PORT="$mcp_port"
+
+  # --- mint per-VM credentials + cidata seed ISO (Task 2) -------------------
+  # make-seed.sh stdout is KEY=VALUE and carries NO bearer plaintext; still
+  # route it through redaction as defense in depth. We consume USER_TOKEN_FILE
+  # and SEED_ISO.
+  local seed_dir="$FIXTURE_RUNTIME/seed" seed_out="$FIXTURE_RUNTIME/make-seed.env"
+  finfo "Minting fixture credentials + cidata seed ISO"
+  if ! "$SCRIPT_DIR/make-seed.sh" "$seed_dir" \
+        --mode install --device /dev/vda --listen 0.0.0.0:7443 \
+        >"$seed_out" 2>"$FIXTURE_ART/make-seed.log"; then
+    err "make-seed.sh failed (see $FIXTURE_ART/make-seed.log)"
+    return 1
+  fi
+  local user_token_file seed_iso
+  user_token_file="$(sed -n 's/^USER_TOKEN_FILE=//p' "$seed_out")"
+  seed_iso="$(sed -n 's/^SEED_ISO=//p' "$seed_out")"
+  [ -n "$user_token_file" ] && [ -f "$user_token_file" ] || { err "make-seed produced no USER_TOKEN_FILE"; return 1; }
+  [ -n "$seed_iso" ] && [ -f "$seed_iso" ] || { err "make-seed produced no SEED_ISO"; return 1; }
+
+  # --- launch QEMU via tools/vm.sh with the detachable-fixture knobs --------
+  # tools/vm.sh execs qemu, so the backgrounded shell's PID becomes qemu's PID.
+  rm -f "$FIXTURE_QEMU_PID" "$FIXTURE_QMP_SOCK"
+  finfo "Booting fixture VM (MCP 127.0.0.1:$mcp_port -> guest :7443, VNC 127.0.0.1:$vnc_port)"
+  HOST_MCP_PORT="$mcp_port" \
+  QMP="$FIXTURE_QMP_SOCK" \
+  SERIAL_LOG="$serial_log" \
+  PID_FILE="$FIXTURE_QEMU_PID" \
+  SEED_ISO="$seed_iso" \
+  DISK="$disk" DISK_SIZE="${FIXTURE_DISK_SIZE:-24G}" FRESH=1 \
+  DESKTOP=i3 \
+  VNC="$vnc_display" BIND=127.0.0.1 \
+  MEM="${MEM:-4096}" CPUS="${CPUS:-4}" \
+    "$REPO_ROOT/tools/vm.sh" install "$iso" >"$boot_log" 2>&1 &
+  local qemu_pid=$!
+  hdn_agent_track_pid "$qemu_pid"
+  printf '%s' "$qemu_pid" > "$FIXTURE_LAUNCH_PID"
+
+  # --- optional noVNC web console (managed here so `stop` can reap it) -------
+  local novnc_url=""
+  if [ "${NOVNC:-0}" = "1" ]; then
+    local ws novnc_root
+    ws="$(command -v websockify || echo "$HOME/.local/bin/websockify")"
+    novnc_root="$(hdn_fixture_novnc_root || true)"
+    if [ -x "$ws" ] && [ -n "$novnc_root" ]; then
+      "$ws" --web "$novnc_root" "127.0.0.1:$novnc_port" "127.0.0.1:$vnc_port" \
+        >"$FIXTURE_ART/novnc.log" 2>&1 &
+      local ws_pid=$!
+      hdn_agent_track_pid "$ws_pid"
+      printf '%s' "$ws_pid" > "$FIXTURE_NOVNC_PID"
+      novnc_url="http://127.0.0.1:$novnc_port/vnc.html?autoconnect=1"
+      finfo "noVNC: $novnc_url"
+    else
+      err "NOVNC=1 but websockify or a noVNC checkout was not found; serving plain VNC only"
+    fi
+  fi
+
+  # --- wait for the forwarded gateway port to come up -----------------------
+  local timeout="${FIXTURE_BOOT_TIMEOUT:-900}"
+  local deadline=$((SECONDS + timeout))
+  finfo "Waiting up to ${timeout}s for the guest gateway on 127.0.0.1:$mcp_port"
+  local up=0
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if ! kill -0 "$qemu_pid" 2>/dev/null; then
+      err "QEMU exited before the gateway came up (see $boot_log / $serial_log)"
+      return 1
+    fi
+    if hdn_fixture_tcp_open 127.0.0.1 "$mcp_port"; then up=1; break; fi
+    sleep 3
+  done
+  [ "$up" = "1" ] || { err "timed out waiting for 127.0.0.1:$mcp_port"; return 1; }
+
+  # --- TOFU: capture the self-signed leaf, pin it, verify /readyz -----------
+  # The appliance leaf has SAN 127.0.0.1 (Phase 3), so --cacert verifies
+  # against 127.0.0.1 with NO -k / insecure skip.
+  finfo "Capturing the self-signed leaf (TOFU) and pinning its fingerprint"
+  local cap=0
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    openssl s_client -connect "127.0.0.1:$MCP_PORT" -showcerts </dev/null \
+      2>/dev/null | openssl x509 -out "$CA_CERT" 2>/dev/null || true
+    if [ -s "$CA_CERT" ]; then cap=1; break; fi
+    sleep 2
+  done
+  [ "$cap" = "1" ] || { err "could not capture a leaf certificate from 127.0.0.1:$MCP_PORT"; return 1; }
+  chmod 600 "$CA_CERT" 2>/dev/null || true
+  openssl x509 -in "$CA_CERT" -outform DER |
+    sha256sum | awk '{print $1}' > "$FINGERPRINT_FILE"
+
+  finfo "Waiting for /readyz to return 200 through the pinned CA"
+  local ready=0
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if curl --fail --silent --show-error --cacert "$CA_CERT" \
+         "https://127.0.0.1:$MCP_PORT/readyz" >/dev/null 2>&1; then
+      ready=1; break
+    fi
+    sleep 3
+  done
+  [ "$ready" = "1" ] || { err "gateway /readyz never returned 200 (see $serial_log)"; return 1; }
+
+  local fingerprint
+  fingerprint="$(tr -d '[:space:]' < "$FINGERPRINT_FILE")"
+
+  # --- emit the descriptor atomically (0600, absolute paths, no token) ------
+  hdn_fixture_emit_descriptor "$descriptor" \
+    "https://127.0.0.1:$MCP_PORT/mcp" \
+    "$user_token_file" \
+    "$CA_CERT" \
+    "$fingerprint" \
+    "127.0.0.1:$vnc_port" \
+    "$novnc_url" \
+    "$FIXTURE_QMP_SOCK" \
+    "$FIXTURE_ART" \
+    || { err "descriptor emission failed"; return 1; }
+
+  finfo "Fixture ready. Descriptor: $descriptor"
+  finfo "  MCP:  https://127.0.0.1:$MCP_PORT/mcp"
+  finfo "  VNC:  127.0.0.1:$vnc_port   QMP: $FIXTURE_QMP_SOCK"
+  finfo "  stop with: $0 stop"
+
+  # STDOUT carries ONLY the descriptor path.
+  printf '%s\n' "$descriptor"
+
+  # Stay running (the VM is long-lived); `stop` powers it down, which makes
+  # this wait return. The EXIT trap from common.sh reaps any tracked PID that
+  # is somehow still alive.
+  wait "$qemu_pid" 2>/dev/null || true
+  return 0
+}
+
+# cmd_stop -- read the runtime PID, request a graceful QMP powerdown, escalate
+# to a kill after 20s, stop noVNC, and KEEP all artifacts.
+cmd_stop() {
+  # shellcheck source=lib/common.sh
+  source "$SCRIPT_DIR/lib/common.sh"
+  # shellcheck source=lib/qmp.sh
+  source "$SCRIPT_DIR/lib/qmp.sh"
+  # shellcheck source=lib/fixture.sh
+  source "$SCRIPT_DIR/lib/fixture.sh"
+  _fixture_paths
+
+  local qpid=""
+  if [ -f "$FIXTURE_QEMU_PID" ]; then
+    qpid="$(tr -dc '0-9' < "$FIXTURE_QEMU_PID")"
+  fi
+  if [ -z "$qpid" ] && [ -f "$FIXTURE_LAUNCH_PID" ]; then
+    qpid="$(tr -dc '0-9' < "$FIXTURE_LAUNCH_PID")"
+  fi
+
+  if [ -z "$qpid" ]; then
+    err "no fixture PID file under $FIXTURE_RUNTIME; nothing to stop"
+  elif ! kill -0 "$qpid" 2>/dev/null; then
+    finfo "fixture PID $qpid is not running; cleaning up"
+    qpid=""
+  fi
+
+  # 1. graceful ACPI powerdown via QMP.
+  if [ -S "$FIXTURE_QMP_SOCK" ]; then
+    finfo "Requesting graceful QMP powerdown"
+    qmp_system_powerdown "$FIXTURE_QMP_SOCK" || err "QMP powerdown request failed; will escalate"
+  else
+    err "QMP socket $FIXTURE_QMP_SOCK missing; cannot request graceful powerdown"
+  fi
+
+  # 2. wait up to 20s, then escalate.
+  if [ -n "$qpid" ]; then
+    local waited=0
+    while [ "$waited" -lt 20 ] && kill -0 "$qpid" 2>/dev/null; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if kill -0 "$qpid" 2>/dev/null; then
+      err "guest still up after 20s; escalating to SIGTERM/SIGKILL on PID $qpid"
+      kill -TERM "$qpid" 2>/dev/null || true
+      sleep 2
+      kill -KILL "$qpid" 2>/dev/null || true
+    else
+      finfo "guest powered down gracefully"
+    fi
+  fi
+
+  # 3. stop noVNC.
+  if [ -f "$FIXTURE_NOVNC_PID" ]; then
+    local wpid
+    wpid="$(tr -dc '0-9' < "$FIXTURE_NOVNC_PID")"
+    [ -n "$wpid" ] && kill "$wpid" 2>/dev/null || true
+    rm -f "$FIXTURE_NOVNC_PID"
+  fi
+
+  # 4. drop runtime control files; KEEP the artifact directory.
+  rm -f "$FIXTURE_QEMU_PID" "$FIXTURE_LAUNCH_PID" "$FIXTURE_QMP_SOCK"
+  finfo "Fixture stopped; artifacts kept in $FIXTURE_ART"
+  return 0
+}
+
 case "$SUBCOMMAND" in
-  compatibility) ;;
+  compatibility) ;;  # falls through to the compatibility gate body below
+  fixture) cmd_fixture "$@"; exit $? ;;
+  stop)    cmd_stop    "$@"; exit $? ;;
   "" ) usage; exit 64 ;;
   * ) err "unknown subcommand: $SUBCOMMAND"; usage; exit 64 ;;
 esac
