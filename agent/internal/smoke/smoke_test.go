@@ -19,9 +19,21 @@ package smoke
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
+	"io"
+	"math/big"
 	"net"
+	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -55,6 +67,7 @@ type fakeProc struct {
 	cgroupLine      string // returned on poll after "cat /proc/self/cgroup"
 	grandchildAlive bool   // if true, the kill -0 probe reports ALIVE
 	dockerReadable  bool   // if true, the docker socket probe reports OPEN
+	dockerAbsent    bool   // if true (and dockerReadable is false), the probe reports ABSENT instead of DENIED
 
 	mu        sync.Mutex
 	lastWrite map[string]string
@@ -77,10 +90,14 @@ func (f *fakeProc) Terminal(_ context.Context, in api.TerminalInput) (api.Termin
 			Stdout: fmt.Sprintf("%d\n%s\n%s\n", f.uid, f.user, strings.Join(f.groups, " ")),
 		}, nil
 	case strings.Contains(in.Command, "docker.sock"):
-		if f.dockerReadable {
+		switch {
+		case f.dockerReadable:
 			return api.TerminalOutput{Stdout: "OPEN\n"}, nil
+		case f.dockerAbsent:
+			return api.TerminalOutput{Stdout: "ABSENT\n"}, nil
+		default:
+			return api.TerminalOutput{Stdout: "DENIED\n"}, nil
 		}
-		return api.TerminalOutput{Stdout: "DENIED\n"}, nil
 	case strings.Contains(in.Command, "kill -0"):
 		if f.grandchildAlive {
 			return api.TerminalOutput{Stdout: "ALIVE\n"}, nil
@@ -119,20 +136,32 @@ func (f *fakeProc) Process(_ context.Context, in api.ProcessInput) (api.ProcessO
 
 func (f *fakeProc) Close() error { return nil }
 
-// fakeFiles is a small in-memory filesystem with a permission model: reads
-// under /root are denied unless allowRootRead is set.
+// fakeFiles is a small in-memory filesystem with a permission model: reads of
+// root-only paths (/root/... and the checkRootReadDenied probe target
+// rootOnlyProbeFile) are FORBIDDEN unless allowRootRead is set, or — to drive
+// the I1 non-vacuity proof — report NOT_FOUND instead when rootReadNotFound
+// is set (simulating a probe target that doesn't exist, which must NOT count
+// as a clean deny).
 type fakeFiles struct {
-	mu            sync.Mutex
-	store         map[string]string
-	allowRootRead bool
+	mu               sync.Mutex
+	store            map[string]string
+	allowRootRead    bool
+	rootReadNotFound bool
 }
 
 func newFakeFiles() *fakeFiles { return &fakeFiles{store: map[string]string{}} }
 
+func isRootOnlyPath(p string) bool {
+	return p == rootOnlyProbeFile || strings.HasPrefix(p, "/root")
+}
+
 func (f *fakeFiles) Read(_ context.Context, in api.ReadFileInput) api.ReadFileOutput {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if strings.HasPrefix(in.Path, "/root") && !f.allowRootRead {
+	if isRootOnlyPath(in.Path) && !f.allowRootRead {
+		if f.rootReadNotFound {
+			return api.ReadFileOutput{ResultMeta: api.ResultMeta{Code: api.CodeNotFound, Message: "not found"}}
+		}
 		return api.ReadFileOutput{ResultMeta: api.ResultMeta{Code: api.CodeForbidden, Message: "permission denied"}}
 	}
 	content := f.store[in.Path]
@@ -451,22 +480,80 @@ func TestAdminIdentityCheckIsNonVacuous(t *testing.T) {
 }
 
 func TestRootReadDenyIsNonVacuous(t *testing.T) {
+	// Regressed case: the boundary broke and the root-only probe file is
+	// readable. The check must fail, not GREEN.
 	h := buildHarness(t, func(h *harness) {
 		h.files.allowRootRead = true
 	})
 	r := run(t, h)
 	if c := checkByName(t, r, "root_read_denied"); c.Passed {
-		t.Fatal("root read check passed even though /root was readable")
+		t.Fatalf("root read check passed even though %s was readable", rootOnlyProbeFile)
+	}
+}
+
+// TestRootReadDenyNotFoundDoesNotPass is the I1 non-vacuity proof: if the
+// boundary regressed (the deny logic is gone) but the probe target happens to
+// be absent, the OLD check (which passed on ANY non-empty rd.Code) would have
+// GREENed while compromised. The new check must fail on NOT_FOUND exactly as
+// it fails on success, because NOT_FOUND doesn't prove the boundary at all.
+func TestRootReadDenyNotFoundDoesNotPass(t *testing.T) {
+	h := buildHarness(t, func(h *harness) {
+		h.files.rootReadNotFound = true
+	})
+	r := run(t, h)
+	c := checkByName(t, r, "root_read_denied")
+	if c.Passed {
+		t.Fatal("root read check passed on NOT_FOUND, which does not prove the deny boundary")
+	}
+	if c.Transport {
+		t.Fatal("root read check should be an assertion failure, not a transport failure, on NOT_FOUND")
 	}
 }
 
 func TestDockerSocketDenyIsNonVacuous(t *testing.T) {
+	// Regressed case: the socket is present AND accessible. The check must
+	// fail, not GREEN.
 	h := buildHarness(t, func(h *harness) {
 		h.sessionProc.dockerReadable = true
 	})
 	r := run(t, h)
 	if c := checkByName(t, r, "docker_socket_denied"); c.Passed {
 		t.Fatal("docker socket check passed even though the socket was accessible")
+	}
+}
+
+// TestDockerSocketAbsentIsFlaggedNotConflatedWithDenied is the I2 non-vacuity
+// proof: an ABSENT socket must not silently pass with the SAME detail as a
+// proven DENIED. The security property does hold (nothing to access), so the
+// run does not fail, but the recorded Detail must make the drift visible and
+// distinguishable from a real, present-and-denied outcome.
+func TestDockerSocketAbsentIsFlaggedNotConflatedWithDenied(t *testing.T) {
+	// Baseline: the expected, strong pass — socket present, access denied.
+	deniedHarness := buildHarness(t, nil)
+	deniedReport := run(t, deniedHarness)
+	deniedCheck := checkByName(t, deniedReport, "docker_socket_denied")
+	if !deniedCheck.Passed {
+		t.Fatalf("baseline docker socket check failed: %s", deniedCheck.Detail)
+	}
+
+	// Drift: the socket is absent.
+	absentHarness := buildHarness(t, func(h *harness) {
+		h.sessionProc.dockerAbsent = true
+	})
+	absentReport := run(t, absentHarness)
+	absentCheck := checkByName(t, absentReport, "docker_socket_denied")
+
+	if !absentCheck.Passed {
+		t.Fatalf("docker socket check failed on ABSENT, but the security property holds and must not fail the run: %s", absentCheck.Detail)
+	}
+	if absentReport.Outcome() != ExitPass {
+		t.Fatalf("Outcome = %d, want %d (pass) when the socket is merely absent", absentReport.Outcome(), ExitPass)
+	}
+	if absentCheck.Detail == deniedCheck.Detail {
+		t.Fatal("ABSENT and DENIED produced the identical Detail; the drift is not distinguishable")
+	}
+	if !strings.Contains(strings.ToUpper(absentCheck.Detail), "ABSENT") {
+		t.Fatalf("ABSENT outcome Detail does not flag the drift: %q", absentCheck.Detail)
 	}
 }
 
@@ -536,10 +623,12 @@ func TestConnectFailureIsTransport(t *testing.T) {
 	}
 }
 
-func TestClientBaseNilPanicsSafely(t *testing.T) {
-	// Guard: a Client with a nil Base must fall back to a usable transport for
-	// the readiness path in Main (covered indirectly); here we only assert the
-	// pure helpers are stable.
+// TestClientHelpersStable exercises the pure, stateless helper functions
+// (mutateBearer, parseID, parseGrandchildPID) directly. It does not exercise
+// a nil Client.Base or any real request; the nil-Base fallback used by the
+// readiness path in Main is covered indirectly by TestConnectFailureIsTransport
+// and the Main descriptor tests.
+func TestClientHelpersStable(t *testing.T) {
 	if got := mutateBearer("hdn_a_abc"); got == "hdn_a_abc" {
 		t.Fatal("mutateBearer returned the input unchanged")
 	}
@@ -548,5 +637,210 @@ func TestClientBaseNilPanicsSafely(t *testing.T) {
 	}
 	if got := parseGrandchildPID("GC=4242\n"); got != "4242" {
 		t.Fatalf("parseGrandchildPID = %q, want 4242", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M1: NewTLSClient is hermetically proven to pin, not merely to "use TLS"
+// ---------------------------------------------------------------------------
+
+// writePEMCert PEM-encodes cert and writes it to a new file under t.TempDir,
+// returning the path.
+func writePEMCert(t *testing.T, name string, cert *x509.Certificate) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	block := &pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path
+}
+
+// generateUnrelatedSelfSignedCert builds a throwaway self-signed certificate
+// that has nothing to do with the httptest server under test. httptest's TLS
+// servers in a given process all present the SAME fixed certificate/key pair
+// (see net/http/httptest's internal testcert), so a second httptest server
+// would NOT exercise rejection — this generates a genuinely different CA.
+func generateUnrelatedSelfSignedCert(t *testing.T) *x509.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "unrelated-ca.invalid"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse certificate: %v", err)
+	}
+	return cert
+}
+
+// TestNewTLSClientPinsToTheGivenCAOnly is the M1 hermetic proof: NewTLSClient
+// never falls back to the system trust store or InsecureSkipVerify. A client
+// pinned to the SERVER's own certificate validates; a client pinned to an
+// unrelated certificate rejects the SAME server outright.
+func TestNewTLSClientPinsToTheGivenCAOnly(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	t.Run("pinned to the correct CA validates", func(t *testing.T) {
+		caFile := writePEMCert(t, "correct-ca.pem", ts.Certificate())
+		client, err := NewTLSClient(ts.URL, caFile)
+		if err != nil {
+			t.Fatalf("NewTLSClient: %v", err)
+		}
+		hc := &http.Client{Transport: client.Base}
+		resp, err := hc.Get(ts.URL)
+		if err != nil {
+			t.Fatalf("GET with the pinned correct CA failed: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+	})
+
+	t.Run("pinned to a different CA rejects", func(t *testing.T) {
+		wrongCert := generateUnrelatedSelfSignedCert(t)
+		caFile := writePEMCert(t, "wrong-ca.pem", wrongCert)
+		client, err := NewTLSClient(ts.URL, caFile)
+		if err != nil {
+			t.Fatalf("NewTLSClient: %v", err)
+		}
+		hc := &http.Client{Transport: client.Base}
+		_, err = hc.Get(ts.URL)
+		if err == nil {
+			t.Fatal("GET with a wrong pinned CA unexpectedly succeeded")
+		}
+		var unknownAuth x509.UnknownAuthorityError
+		var certInvalid x509.CertificateInvalidError
+		if !errors.As(err, &unknownAuth) && !errors.As(err, &certInvalid) {
+			t.Fatalf("expected an x509 trust error, got: %v", err)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// M2: Main's descriptor/argument (exit 2) branches
+// ---------------------------------------------------------------------------
+
+// writeDescriptorFile marshals a Descriptor to a temp file and returns its
+// path.
+func writeDescriptorFile(t *testing.T, d Descriptor) string {
+	t.Helper()
+	data, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("marshal descriptor: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "descriptor.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write descriptor: %v", err)
+	}
+	return path
+}
+
+// TestMainExitDescriptorPaths drives Main over every exit-2 (descriptor /
+// argument error) branch. Exit 3 (transport) is covered by
+// TestConnectFailureIsTransport and exit 0/1 by the contract-suite tests
+// above; this table does not duplicate those.
+func TestMainExitDescriptorPaths(t *testing.T) {
+	dir := t.TempDir()
+
+	artifactDir := filepath.Join(dir, "artifacts")
+	caFile := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE", Bytes: generateUnrelatedSelfSignedCert(t).Raw,
+	}), 0o600); err != nil {
+		t.Fatalf("write ca file: %v", err)
+	}
+	bearerFile := filepath.Join(dir, "user.token")
+	if err := os.WriteFile(bearerFile, []byte("hdn_u_dummy\n"), 0o600); err != nil {
+		t.Fatalf("write bearer file: %v", err)
+	}
+	adminBearerFile := filepath.Join(dir, "admin.token")
+	if err := os.WriteFile(adminBearerFile, []byte("hdn_a_dummy\n"), 0o600); err != nil {
+		t.Fatalf("write admin bearer file: %v", err)
+	}
+
+	validDescriptor := Descriptor{
+		MCPURL:            "https://127.0.0.1:1/mcp",
+		BearerTokenFile:   bearerFile,
+		CACertificateFile: caFile,
+		ArtifactDirectory: artifactDir,
+	}
+	validDescriptorPath := writeDescriptorFile(t, validDescriptor)
+
+	missingCADescriptor := validDescriptor
+	missingCADescriptor.CACertificateFile = filepath.Join(dir, "does-not-exist-ca.pem")
+	missingCADescriptorPath := writeDescriptorFile(t, missingCADescriptor)
+
+	missingBearerDescriptor := validDescriptor
+	missingBearerDescriptor.BearerTokenFile = filepath.Join(dir, "does-not-exist-bearer")
+	missingBearerDescriptorPath := writeDescriptorFile(t, missingBearerDescriptor)
+
+	invalidJSONPath := filepath.Join(dir, "invalid.json")
+	if err := os.WriteFile(invalidJSONPath, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("write invalid descriptor: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "unknown mode",
+			args: []string{"--mode=bogus", "--descriptor=" + validDescriptorPath, "--admin-bearer-file=" + adminBearerFile},
+		},
+		{
+			name: "missing descriptor flag",
+			args: []string{"--admin-bearer-file=" + adminBearerFile},
+		},
+		{
+			name: "missing admin-bearer-file flag",
+			args: []string{"--descriptor=" + validDescriptorPath},
+		},
+		{
+			name: "descriptor file does not exist",
+			args: []string{"--descriptor=" + filepath.Join(dir, "nope.json"), "--admin-bearer-file=" + adminBearerFile},
+		},
+		{
+			name: "descriptor file has invalid JSON",
+			args: []string{"--descriptor=" + invalidJSONPath, "--admin-bearer-file=" + adminBearerFile},
+		},
+		{
+			name: "descriptor's bearer_token_file is missing",
+			args: []string{"--descriptor=" + missingBearerDescriptorPath, "--admin-bearer-file=" + adminBearerFile},
+		},
+		{
+			name: "admin-bearer-file does not exist",
+			args: []string{"--descriptor=" + validDescriptorPath, "--admin-bearer-file=" + filepath.Join(dir, "nope-admin.token")},
+		},
+		{
+			name: "descriptor's ca_certificate_file is missing",
+			args: []string{"--descriptor=" + missingCADescriptorPath, "--admin-bearer-file=" + adminBearerFile},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Main(tc.args, io.Discard, io.Discard)
+			if got != ExitDescriptor {
+				t.Fatalf("Main(%v) = %d, want %d (descriptor/argument error)", tc.args, got, ExitDescriptor)
+			}
+		})
 	}
 }

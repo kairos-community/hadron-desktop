@@ -309,22 +309,44 @@ func (s *Suite) checkComputerUseCapture(ctx context.Context, sess *mcp.ClientSes
 	return pass(name, fmt.Sprintf("captured a %d-byte desktop image", len(out.ImageBase64)))
 }
 
-// checkRootReadDenied proves the ordinary bearer cannot read under /root (brief
-// item 6).
+// rootOnlyProbeFile is the read target for checkRootReadDenied. Unlike
+// /root/.bashrc (which may or may not exist), /etc/shadow is guaranteed to be
+// present on every Linux host and is always root-only (mode 0640/0600), so a
+// FORBIDDEN result on THIS path is a genuine proof of the deny boundary.
+const rootOnlyProbeFile = "/etc/shadow"
+
+// checkRootReadDenied proves the ordinary bearer cannot read a root-only file
+// (brief item 6). The check requires the SPECIFIC api.CodeForbidden outcome:
+// success (readable) fails the assertion, and so does any other code
+// (NOT_FOUND included) — a missing target does not prove the boundary, it
+// just means the probe couldn't test it, so the check must not GREEN on a
+// vacuous "absent" reading. See TestRootReadDenyNotFoundDoesNotPass for the
+// non-vacuity proof.
 func (s *Suite) checkRootReadDenied(ctx context.Context, sess *mcp.ClientSession) CheckResult {
 	const name = "root_read_denied"
 	var rd api.ReadFileOutput
-	if err := s.callInto(ctx, sess, api.ToolReadFile, api.ReadFileInput{Path: "/root/.bashrc"}, &rd); err != nil {
+	if err := s.callInto(ctx, sess, api.ToolReadFile, api.ReadFileInput{Path: rootOnlyProbeFile}, &rd); err != nil {
 		return failTransport(name, "read_file call failed")
 	}
-	if rd.Code == "" {
-		return failAssert(name, "user read of /root unexpectedly succeeded")
+	switch rd.Code {
+	case api.CodeForbidden:
+		return pass(name, "user read of "+rootOnlyProbeFile+" denied (FORBIDDEN)")
+	case "":
+		return failAssert(name, "user read of "+rootOnlyProbeFile+" unexpectedly succeeded")
+	default:
+		return failAssert(name, fmt.Sprintf("user read of %s reported %s (want FORBIDDEN); cannot prove the deny boundary", rootOnlyProbeFile, rd.Code))
 	}
-	return pass(name, "user read of /root denied ("+string(rd.Code)+")")
 }
 
 // checkDockerSocketDenied proves the ordinary bearer cannot access the Docker
-// control socket (brief item 7).
+// control socket (brief item 7). Phase-3 mounts /run/docker.sock into the
+// desktop, so on a correctly configured appliance the socket is PRESENT and
+// access is DENIED — that is the strong, expected pass. ABSENT is treated as
+// a distinct, visible outcome rather than folded into DENIED: the security
+// property still holds (there's nothing to access), so the run does not fail,
+// but a socket that has disappeared is mount-drift the operator must be able
+// to see in the recorded Detail, never a silent, indistinguishable pass. See
+// TestDockerSocketAbsentIsFlaggedNotConflatedWithDenied.
 func (s *Suite) checkDockerSocketDenied(ctx context.Context, sess *mcp.ClientSession) CheckResult {
 	const name = "docker_socket_denied"
 	cmd := "if [ -e /run/docker.sock ]; then if [ -r /run/docker.sock ]; then echo OPEN; else echo DENIED; fi; else echo ABSENT; fi"
@@ -336,13 +358,16 @@ func (s *Suite) checkDockerSocketDenied(ctx context.Context, sess *mcp.ClientSes
 		return failAssert(name, fmt.Sprintf("docker socket probe reported %s", out.Code))
 	}
 	got := strings.TrimSpace(out.Stdout)
-	if strings.Contains(got, "OPEN") {
+	switch {
+	case strings.Contains(got, "OPEN"):
 		return failAssert(name, "the Docker socket is accessible to the agent")
-	}
-	if !strings.Contains(got, "DENIED") && !strings.Contains(got, "ABSENT") {
+	case strings.Contains(got, "DENIED"):
+		return pass(name, "the Docker control socket is present and access is denied to the agent")
+	case strings.Contains(got, "ABSENT"):
+		return pass(name, "FLAGGED: docker.sock is absent (expected present+denied; possible mount drift, not a proven deny)")
+	default:
 		return failAssert(name, "unexpected docker socket probe result")
 	}
-	return pass(name, "the Docker control socket is not accessible to the agent")
 }
 
 // checkAdminIdentityRoot proves an admin OS tool executes as root (brief item
