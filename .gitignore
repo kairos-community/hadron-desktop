@@ -17,3 +17,7 @@
 /test/agent/runtime/*.json
 /test/agent/runtime/*.qcow2
 /test/agent/runtime/*.sock
+# Transient mcp-smoke build staged into the module tree by test/agent/run.sh
+# (its main package lives under test/agent/cmd/mcp-smoke and is copied here to
+# satisfy Go's internal-import rule, then removed on exit).
+/agent/cmd/mcp-smoke/

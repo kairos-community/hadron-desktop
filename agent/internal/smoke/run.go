@@ -46,16 +46,19 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("mcp-smoke", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	descriptorPath := fs.String("descriptor", "", "path to the fixture descriptor JSON (required)")
-	adminBearerFile := fs.String("admin-bearer-file", "", "path to a file holding the admin (hdn_a_) bearer (required for contract mode)")
-	mode := fs.String("mode", "contract", "smoke mode to run (currently only: contract)")
+	adminBearerFile := fs.String("admin-bearer-file", "", "path to a file holding the admin (hdn_a_) bearer (required)")
+	mode := fs.String("mode", "contract", "smoke mode: contract, persist-write, or persist-verify")
+	marker := fs.String("marker", "", "opaque marker value for the persist-write/persist-verify modes")
 	readyTimeout := fs.Duration("ready-timeout", 60*time.Second, "how long to wait for the gateway /readyz")
 	callTimeout := fs.Duration("call-timeout", 30*time.Second, "per tool-call timeout")
 	if err := fs.Parse(args); err != nil {
 		return ExitDescriptor
 	}
 
-	if *mode != "contract" {
-		fmt.Fprintf(stderr, "mcp-smoke: unknown mode %q (want: contract)\n", *mode)
+	switch *mode {
+	case "contract", "persist-write", "persist-verify":
+	default:
+		fmt.Fprintf(stderr, "mcp-smoke: unknown mode %q (want: contract, persist-write, or persist-verify)\n", *mode)
 		return ExitDescriptor
 	}
 	if *descriptorPath == "" {
@@ -63,7 +66,11 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return ExitDescriptor
 	}
 	if *adminBearerFile == "" {
-		fmt.Fprintln(stderr, "mcp-smoke: --admin-bearer-file is required for contract mode")
+		fmt.Fprintln(stderr, "mcp-smoke: --admin-bearer-file is required")
+		return ExitDescriptor
+	}
+	if (*mode == "persist-write" || *mode == "persist-verify") && *marker == "" {
+		fmt.Fprintf(stderr, "mcp-smoke: --marker is required for mode %q\n", *mode)
 		return ExitDescriptor
 	}
 
@@ -116,7 +123,15 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		AdminBearer: adminBearer,
 		CallTimeout: *callTimeout,
 	}
-	report := suite.RunContract(ctx)
+	var report Report
+	switch *mode {
+	case "persist-write":
+		report = suite.RunPersistWrite(ctx, *marker)
+	case "persist-verify":
+		report = suite.RunPersistVerify(ctx, *marker)
+	default:
+		report = suite.RunContract(ctx)
+	}
 	exit := report.Outcome()
 
 	passed, failed := tally(report.Checks)
@@ -157,15 +172,26 @@ func printSummary(w io.Writer, report Report, exit int) {
 	fmt.Fprintf(w, "mcp-smoke %s: %d passed, %d failed, exit %d\n", report.Mode, passed, failed, exit)
 }
 
-// writeArtifact writes the redacted results JSON to dir/mcp-smoke.json. A write
-// failure is reported to stderr but does not change the assertion outcome.
+// writeArtifact writes the redacted results JSON to
+// dir/mcp-<mode>.json (defaulting to mcp-smoke.json when the mode is empty).
+// Naming the file per mode keeps the three install-gate invocations (contract,
+// persist-write, persist-verify) from clobbering one another's results in a
+// shared artifact directory. A write failure is reported to stderr but does not
+// change the assertion outcome.
 func writeArtifact(dir string, rep artifactReport, stderr io.Writer) {
 	data, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
 		fmt.Fprintf(stderr, "mcp-smoke: encode artifact: %v\n", err)
 		return
 	}
-	path := filepath.Join(dir, "mcp-smoke.json")
+	name := "mcp-smoke.json"
+	switch rep.Mode {
+	case "persist-write":
+		name = "mcp-persist-write.json"
+	case "persist-verify":
+		name = "mcp-persist-verify.json"
+	}
+	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
 		fmt.Fprintf(stderr, "mcp-smoke: write artifact: %v\n", err)
 	}

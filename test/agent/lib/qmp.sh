@@ -35,6 +35,11 @@ HDN_AGENT_QMP_SH_SOURCED=1
 # Operations:
 #   capabilities         -- greeting + qmp_capabilities handshake only.
 #   query-status         -- print the guest run state string (e.g. "running").
+#   block-writes <match> -- print the SUMMED wr_operations across every block
+#                           device whose device/qdev/node-name identity contains
+#                           the <match> substring. Exits nonzero if NOTHING
+#                           matched, so a caller can never mistake "no such
+#                           device" for "zero writes".
 #   screendump <file>    -- write a PPM screenshot of the scanout to <file>.
 #   system_reset         -- hard-reset the guest.
 #   system_powerdown     -- request an ACPI graceful shutdown.
@@ -108,6 +113,8 @@ if op == "capabilities":
     cmd = None
 elif op == "query-status":
     cmd = {"execute": "query-status"}
+elif op == "block-writes":
+    cmd = {"execute": "query-blockstats"}
 elif op == "screendump":
     if not arg:
         print("qmp screendump: filename required", file=sys.stderr)
@@ -146,6 +153,31 @@ if op == "query-status":
     else:
         print("qmp query-status: unexpected return %r" % (ret,), file=sys.stderr)
         sys.exit(1)
+elif op == "block-writes":
+    # ret is a list of per-device stats objects. Identify each by the union of
+    # its "device", "qdev", and "node-name" fields and sum wr_operations for the
+    # devices whose identity contains the match substring. A match that finds no
+    # device is an error so a naming mismatch never reads as "zero writes".
+    match = arg or ""
+    total = 0
+    found = False
+    devices = ret if isinstance(ret, list) else []
+    for dev in devices:
+        if not isinstance(dev, dict):
+            continue
+        ident = " ".join(str(dev.get(k, "")) for k in ("device", "qdev", "node-name"))
+        if match and match not in ident:
+            continue
+        found = True
+        st = dev.get("stats", {}) or {}
+        try:
+            total += int(st.get("wr_operations", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+    if match and not found:
+        print("qmp block-writes: no block device identity matched %r" % match, file=sys.stderr)
+        sys.exit(1)
+    print(total)
 elif op == "sendkey":
     # human-monitor-command returns a (usually empty) string.
     if isinstance(ret, str) and ret.strip():
@@ -162,6 +194,9 @@ PY
 # Named wrappers matching the brief's helper list. Each takes the socket path.
 qmp_capabilities()     { hdn_qmp "$1" capabilities; }
 qmp_query_status()     { hdn_qmp "$1" query-status; }
+# qmp_block_writes <sock> <match> -- print summed wr_operations for block
+# devices whose identity contains <match>; nonzero exit if none matched.
+qmp_block_writes()     { hdn_qmp "$1" block-writes "$2"; }
 qmp_screendump()       { hdn_qmp "$1" screendump "$2"; }
 qmp_system_reset()     { hdn_qmp "$1" system_reset; }
 qmp_system_powerdown() { hdn_qmp "$1" system_powerdown; }

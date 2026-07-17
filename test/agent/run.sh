@@ -32,11 +32,16 @@ err() { echo -e "\033[1;31m[compat] $*\033[0m" >&2; }
 # --- subcommand dispatch -----------------------------------------------------
 SUBCOMMAND="${1:-}"
 usage() {
-  err "usage: $0 <compatibility|fixture [ISO]|stop>"
-  err "  compatibility  build + boot the graphical QEMU compatibility gate"
-  err "  fixture [ISO]  boot a detachable, VNC-visible appliance VM and emit"
-  err "                 a descriptor pointing at its MCP/VNC/QMP endpoints"
-  err "  stop           gracefully power down the running fixture, keep artifacts"
+  err "usage: $0 <compatibility|contract [IMAGE]|install [IMAGE]|generic [ISO]|fixture [IMAGE]|stop>"
+  err "  compatibility    build + boot the graphical QEMU compatibility gate"
+  err "  contract [IMAGE] NON-DESTRUCTIVE live gate: boot the agent live against a"
+  err "                   blank disk (proven unwritten) and run the mcp-smoke contract"
+  err "  install [IMAGE]  zero-touch install gate: build a provisioning ISO, auto-install,"
+  err "                   run the contract suite, and prove a reboot-persistent marker"
+  err "  generic [ISO]    boot a plain desktop ISO live and prove it is non-destructive"
+  err "  fixture [IMAGE]  boot a detachable, VNC-visible appliance VM and emit"
+  err "                   a descriptor pointing at its MCP/VNC/QMP endpoints"
+  err "  stop             gracefully power down the running fixture, keep artifacts"
 }
 
 # Progress for the fixture/stop subcommands goes to STDERR only: the `fixture`
@@ -55,13 +60,578 @@ _fixture_paths() {
   FIXTURE_QMP_SOCK="$FIXTURE_RUNTIME/qmp.sock"
 }
 
-# cmd_fixture [ISO] -- boot a long-lived, VNC-visible appliance VM whose MCP
+# ===========================================================================
+# Shared helpers for the gate subcommands (contract / install / generic /
+# fixture). They assume lib/common.sh + lib/qmp.sh + lib/fixture.sh are already
+# sourced by the caller. Arrays cannot be returned from a function, so the
+# helpers that build QEMU argument arrays set shell globals (AGENT_ACCEL,
+# AGENT_OVMF_ARGS) the caller then splices into its qemu command line.
+# ===========================================================================
+
+# The AuroraBoot image is the single tool that builds the provisioning ISO and
+# extracts the live kernel/initrd. Overridable via AURORA_IMAGE.
+AGENT_AURORA_IMAGE="${AURORA_IMAGE:-quay.io/kairos/auroraboot:v0.21.0-alpha.4}"
+
+# _agent_require_bins BIN... -- fail if any listed command is missing.
+_agent_require_bins() {
+  local bin ok=0
+  for bin in "$@"; do
+    command -v "$bin" >/dev/null 2>&1 || { err "required command not found: $bin"; ok=1; }
+  done
+  return "$ok"
+}
+
+# _agent_find_first PATH... -- print the first path that exists, or fail.
+_agent_find_first() {
+  local f
+  for f in "$@"; do [ -f "$f" ] && { printf '%s' "$f"; return 0; }; done
+  return 1
+}
+
+# _agent_sha256 <file> -- print the file's lowercase-hex SHA-256.
+_agent_sha256() { sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
+
+# _agent_set_accel -- KVM when available, else multi-threaded TCG.
+_agent_set_accel() {
+  if [ -e /dev/kvm ]; then
+    AGENT_ACCEL=(-enable-kvm -cpu host)
+  else
+    # tcg,thread=multi is one argument; the comma is QEMU syntax.
+    # shellcheck disable=SC2054
+    AGENT_ACCEL=(-accel tcg,thread=multi)
+  fi
+}
+
+# _agent_find_ovmf <vars_out> -- locate OVMF firmware, copy a fresh writable
+# VARS image to <vars_out>, and populate AGENT_OVMF_ARGS. UEFI/OVMF is
+# mandatory: this never falls back to BIOS.
+_agent_find_ovmf() {
+  local vars_out="$1" code vars combined
+  code="$(_agent_find_first \
+    /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd \
+    /usr/share/edk2-ovmf/x64/OVMF_CODE.fd /usr/share/edk2/x64/OVMF_CODE.fd \
+    /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/qemu/edk2-x86_64-code.fd || true)"
+  vars="$(_agent_find_first \
+    /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd \
+    /usr/share/edk2-ovmf/x64/OVMF_VARS.fd /usr/share/edk2/x64/OVMF_VARS.fd \
+    /usr/share/edk2/x64/OVMF_VARS.4m.fd /usr/share/qemu/edk2-i386-vars.fd || true)"
+  if [ -n "$code" ] && [ -n "$vars" ]; then
+    cp -f "$vars" "$vars_out" || { err "failed to copy OVMF vars template"; return 1; }
+    AGENT_OVMF_ARGS=(
+      -drive "if=pflash,format=raw,unit=0,readonly=on,file=$code"
+      -drive "if=pflash,format=raw,unit=1,file=$vars_out"
+    )
+    return 0
+  fi
+  combined="$(_agent_find_first /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF.fd \
+    /usr/share/qemu/OVMF.fd /usr/share/edk2/ovmf/OVMF.fd || true)"
+  [ -n "$combined" ] || { err "OVMF firmware not found; install 'ovmf'/'edk2-ovmf' (this gate needs UEFI, no BIOS fallback)"; return 1; }
+  cp -f "$combined" "$vars_out" || { err "failed to copy combined OVMF image"; return 1; }
+  AGENT_OVMF_ARGS=(-drive "if=pflash,format=raw,unit=0,file=$vars_out")
+}
+
+# _agent_build_prov_iso <cloud_config> <iso_out_dir> <image> -- build a
+# provisioning ISO from the local container <image> with <cloud_config> embedded
+# via AuroraBoot's --cloud-config. AuroraBoot writes the config to the ISO root
+# as /config.yaml, mounted at /run/initramfs/live/config.yaml at runtime -- the
+# delivery the agent config loader + inspect-seed actually read (a cidata seed,
+# by contrast, lands at /oem/95_userdata with no .yaml suffix and is NOT read).
+# Prints ONLY the built ISO path on stdout.
+_agent_build_prov_iso() {
+  local cfg="$1" out_dir="$2" image="$3" iso
+  mkdir -p "$out_dir"
+  rm -f "$out_dir"/*.iso
+  docker run --rm --privileged \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -v "$out_dir":/output \
+    -v "$cfg":/config.yaml:ro \
+    "$AGENT_AURORA_IMAGE" build-iso --output /output/ \
+    --cloud-config /config.yaml "docker:$image" >&2 \
+    || { err "auroraboot ISO build failed"; return 1; }
+  iso="$(ls -t "$out_dir"/*.iso 2>/dev/null | head -1 || true)"
+  [ -n "$iso" ] || { err "auroraboot produced no ISO"; return 1; }
+  printf '%s' "$iso"
+}
+
+# _agent_extract_kernel_initrd <iso> <kdir> -- extract /boot/kernel +
+# /boot/initrd from <iso> into <kdir> via xorriso inside the AuroraBoot image
+# (the host has no xorriso). Needed for the direct-kernel live boot, whose
+# harness-controlled cmdline selects kairos.boot_live_mode.
+_agent_extract_kernel_initrd() {
+  local iso="$1" kdir="$2"
+  rm -rf "$kdir"; mkdir -p "$kdir"
+  docker run --rm --entrypoint xorriso \
+    -v "$iso":/iso.iso:ro -v "$kdir":/out "$AGENT_AURORA_IMAGE" \
+    -osirrox on -indev /iso.iso \
+    -extract /boot/kernel /out/kernel -extract /boot/initrd /out/initrd >/dev/null 2>&1 \
+    || { err "kernel/initrd extraction failed"; return 1; }
+  [ -s "$kdir/kernel" ] && [ -s "$kdir/initrd" ] \
+    || { err "extraction produced no kernel/initrd"; return 1; }
+}
+
+# _agent_build_mcp_smoke <out_bin> -- build the mcp-smoke client. Its main
+# package lives under test/agent/cmd/mcp-smoke but imports the agent module's
+# internal/smoke package, so it must be COPIED into the module tree
+# (agent/cmd/mcp-smoke) before `go build`. The copy is removed on process exit.
+# Honors a prebuilt MCP_SMOKE_BIN. Prints ONLY the binary path.
+_agent_build_mcp_smoke() {
+  local out="$1" moddir
+  if [ -n "${MCP_SMOKE_BIN:-}" ] && [ -x "$MCP_SMOKE_BIN" ]; then
+    printf '%s' "$MCP_SMOKE_BIN"; return 0
+  fi
+  command -v go >/dev/null 2>&1 || { err "go toolchain required to build mcp-smoke (or set MCP_SMOKE_BIN)"; return 1; }
+  moddir="$REPO_ROOT/agent/cmd/mcp-smoke"
+  mkdir -p "$moddir"
+  cp -f "$SCRIPT_DIR/cmd/mcp-smoke/main.go" "$moddir/main.go" \
+    || { err "could not stage mcp-smoke into the module"; return 1; }
+  hdn_agent_on_exit "rm -rf '$moddir'"
+  ( cd "$REPO_ROOT/agent" && CGO_ENABLED=0 go build -trimpath -o "$out" ./cmd/mcp-smoke ) >&2 \
+    || { err "mcp-smoke build failed"; return 1; }
+  printf '%s' "$out"
+}
+
+# _agent_screenshot <sock> <ppm_out> -- best-effort QMP screendump to <ppm_out>
+# plus a sibling .png if PIL is present. Never fails the caller.
+_agent_screenshot() {
+  local sock="$1" ppm="$2"
+  [ -S "$sock" ] || return 0
+  qmp_screendump "$sock" "$ppm" 2>/dev/null || { err "screendump failed (continuing)"; return 0; }
+  python3 -c "from PIL import Image; Image.open('$ppm').save('${ppm%.ppm}.png')" 2>/dev/null || true
+}
+
+# _agent_tofu <host> <port> <ca_out> <fp_out> <deadline_epoch> -- capture the
+# self-signed leaf (TOFU) into <ca_out> (PEM, 0600) and its DER SHA-256 into
+# <fp_out>, retrying until SECONDS reaches <deadline_epoch>. Fail on timeout.
+_agent_tofu() {
+  local host="$1" port="$2" ca="$3" fp="$4" deadline="$5"
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    openssl s_client -connect "$host:$port" -showcerts </dev/null 2>/dev/null \
+      | openssl x509 -out "$ca" 2>/dev/null || true
+    if [ -s "$ca" ]; then
+      chmod 600 "$ca" 2>/dev/null || true
+      openssl x509 -in "$ca" -outform DER | sha256sum | awk '{print $1}' > "$fp"
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+# _agent_wait_ready <host> <port> <ca> <deadline_epoch> [pid] -- poll /readyz
+# through the pinned CA until HTTP 200 or the deadline; if <pid> is given, fail
+# fast when that process dies.
+_agent_wait_ready() {
+  local host="$1" port="$2" ca="$3" deadline="$4" pid="${5:-}"
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+      err "QEMU exited before /readyz became ready"; return 1
+    fi
+    if curl --fail --silent --show-error --cacert "$ca" \
+         "https://$host:$port/readyz" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 3
+  done
+  return 1
+}
+
+# _agent_wait_down <host> <port> <ca> <deadline_epoch> -- return 0 as soon as
+# /readyz stops answering 200 (the guest is going down for a reboot). Best
+# effort: return 1 if the deadline passes while it is still ready.
+_agent_wait_down() {
+  local host="$1" port="$2" ca="$3" deadline="$4"
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if ! curl --fail --silent --cacert "$ca" \
+         "https://$host:$port/readyz" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+# cmd_contract [IMAGE] -- NON-DESTRUCTIVE live gate. Build a LIVE provisioning
+# ISO (hadron_agent digests embedded, NO install block) from IMAGE, boot it via
+# direct-kernel in kairos.boot_live_mode against a BLANK qcow2, prove the blank
+# disk is never written (sha256 before/after AND QMP write-op count == 0), then
+# TOFU the leaf, emit the descriptor, and run the mcp-smoke contract suite with
+# the known user + admin bearers.
+cmd_contract() {
+  shift  # drop "contract"
+  local image="${1:-${AGENT_IMAGE:-agent-desktop:dev}}"
+
+  # shellcheck source=lib/common.sh
+  source "$SCRIPT_DIR/lib/common.sh"
+  # shellcheck source=lib/qmp.sh
+  source "$SCRIPT_DIR/lib/qmp.sh"
+  # shellcheck source=lib/fixture.sh
+  source "$SCRIPT_DIR/lib/fixture.sh"
+
+  _agent_require_bins qemu-system-x86_64 qemu-img openssl curl python3 docker sha256sum || return 1
+
+  local runtime="${CONTRACT_RUNTIME:-$SCRIPT_DIR/runtime/contract}"
+  local art="${CONTRACT_ART:-$SCRIPT_DIR/artifacts/contract}"
+  mkdir -p "$runtime" "$art"; chmod 700 "$runtime" "$art" 2>/dev/null || true
+
+  # 1. mint creds + a LIVE cloud-config (no install block): the digests
+  #    authorize the live agent, and nothing authorizes a disk wipe.
+  local seed_dir="$runtime/seed" seed_out="$runtime/make-seed.env"
+  finfo "Minting contract credentials + live cloud-config"
+  "$SCRIPT_DIR/make-seed.sh" "$seed_dir" --mode live --listen 0.0.0.0:7443 \
+      >"$seed_out" 2>"$art/make-seed.log" \
+    || { err "make-seed.sh failed (see $art/make-seed.log)"; return 1; }
+  local user_token admin_token user_data
+  user_token="$(sed -n 's/^USER_TOKEN_FILE=//p' "$seed_out")"
+  admin_token="$(sed -n 's/^ADMIN_TOKEN_FILE=//p' "$seed_out")"
+  user_data="$(sed -n 's/^USER_DATA=//p' "$seed_out")"
+  [ -f "$user_token" ] && [ -f "$admin_token" ] && [ -f "$user_data" ] \
+    || { err "make-seed did not produce the expected token/user-data files"; return 1; }
+
+  # 2. build the LIVE provisioning ISO and extract kernel/initrd.
+  finfo "Building live provisioning ISO from $image"
+  local iso; iso="$(_agent_build_prov_iso "$user_data" "$runtime/iso" "$image")" || return 1
+  finfo "Live ISO: $iso"
+  local kdir="$runtime/kboot"
+  _agent_extract_kernel_initrd "$iso" "$kdir" || return 1
+
+  # 3. blank disk; hash BEFORE.
+  local blank="$runtime/blank.qcow2"
+  qemu-img create -f qcow2 "$blank" "${CONTRACT_DISK_SIZE:-8G}" >/dev/null \
+    || { err "blank disk create failed"; return 1; }
+  local hash_before; hash_before="$(_agent_sha256 "$blank")"
+
+  # 4. firmware / accel / loopback wiring.
+  local mcp_port vnc_display vnc_port
+  mcp_port="$(hdn_agent_alloc_port)"
+  vnc_display="${CONTRACT_VNC:-27}"; vnc_port=$((5900 + vnc_display))
+  local ovmf_vars="$runtime/OVMF_VARS.fd" qmp="$runtime/qmp.sock"
+  local serial="$art/serial.log" qemu_log="$art/qemu.log"
+  _agent_set_accel
+  _agent_find_ovmf "$ovmf_vars" || return 1
+  rm -f "$qmp" "$serial"; touch "$serial"
+
+  # Direct-kernel live boot: the ISO is attached as a READ-ONLY virtio-blk disk
+  # (the initrd finds root by CDLABEL=COS_LIVE), the blank disk is the only
+  # writable device, and kairos.boot_live_mode boots the appliance
+  # NON-DESTRUCTIVELY. NO bootindex here: it conflicts with the direct-kernel
+  # path (UEFI-CD install uses bootindex; direct-kernel live must not).
+  local cmdline="cdroot root=live:CDLABEL=COS_LIVE rd.live.dir=/ rd.live.squashimg=rootfs.squashfs rd.live.overlay.overlayfs net.ifnames=1 console=tty1 console=ttyS0 kairos.boot_live_mode selinux=0 systemd.mask=serial-getty@ttyS0.service"
+
+  finfo "Booting live agent (MCP 127.0.0.1:$mcp_port -> :7443, VNC 127.0.0.1:$vnc_port)"
+  qemu-system-x86_64 "${AGENT_ACCEL[@]}" -m "${MEM:-4096}" -smp "${CPUS:-4}" \
+    "${AGENT_OVMF_ARGS[@]}" \
+    -device virtio-vga -vnc "127.0.0.1:$vnc_display" \
+    -serial "file:$serial" -qmp "unix:$qmp,server,nowait" -rtc base=utc,clock=rt \
+    -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${mcp_port}-:7443" \
+    -device virtio-net-pci,netdev=net0 \
+    -drive "if=none,id=blankdisk,format=qcow2,file=$blank" \
+    -device "virtio-blk-pci,drive=blankdisk,id=blankdev,serial=contractblank" \
+    -drive "if=none,id=livecd,format=raw,readonly=on,file=$iso" \
+    -device "virtio-blk-pci,drive=livecd,serial=coslive" \
+    -kernel "$kdir/kernel" -initrd "$kdir/initrd" -append "$cmdline" \
+    >"$qemu_log" 2>&1 &
+  local qemu_pid=$!
+  hdn_agent_track_pid "$qemu_pid"
+
+  # 5. TOFU + wait for /readyz.
+  local timeout="${CONTRACT_BOOT_TIMEOUT:-600}"
+  local deadline=$((SECONDS + timeout))
+  local ca="$art/ca.pem" fp="$art/tls-fingerprint.txt"
+  finfo "Capturing the self-signed leaf (TOFU)"
+  _agent_tofu 127.0.0.1 "$mcp_port" "$ca" "$fp" "$deadline" \
+    || { err "could not capture a leaf certificate"; _agent_screenshot "$qmp" "$art/fail.ppm"; return 1; }
+  finfo "Waiting for /readyz 200 through the pinned CA"
+  _agent_wait_ready 127.0.0.1 "$mcp_port" "$ca" "$deadline" "$qemu_pid" \
+    || { err "gateway /readyz never returned 200"; _agent_screenshot "$qmp" "$art/fail.ppm"; return 1; }
+  _agent_screenshot "$qmp" "$art/live-ready.ppm"
+
+  # 6. non-destructive gate: the blank disk must be byte-identical AND show no
+  #    guest write ops. The hash is the authoritative proof; the QMP write-op
+  #    count is a corroborating signal (skipped, with a warning, only if the
+  #    device cannot be matched in query-blockstats).
+  local hash_after; hash_after="$(_agent_sha256 "$blank")"
+  if [ "$hash_before" != "$hash_after" ]; then
+    err "RESULT: FAIL - the blank disk hash changed; the live boot wrote to it"
+    _agent_screenshot "$qmp" "$art/fail.ppm"; return 1
+  fi
+  local writes
+  if writes="$(qmp_block_writes "$qmp" blankdev 2>/dev/null)"; then
+    if [ "${writes:-1}" != "0" ]; then
+      err "RESULT: FAIL - $writes guest write op(s) recorded against the blank disk"
+      _agent_screenshot "$qmp" "$art/fail.ppm"; return 1
+    fi
+    finfo "Blank disk unchanged (hash stable, 0 QMP write ops) -- boot is non-destructive"
+  else
+    err "WARNING: could not match the blank disk in query-blockstats; relying on the hash gate"
+    finfo "Blank disk unchanged (hash stable) -- boot is non-destructive"
+  fi
+
+  # 7. descriptor + mcp-smoke contract suite (known user + admin bearers).
+  local descriptor="$art/contract.json" fingerprint
+  fingerprint="$(tr -d '[:space:]' < "$fp")"
+  hdn_fixture_emit_descriptor "$descriptor" \
+    "https://127.0.0.1:$mcp_port/mcp" "$user_token" "$ca" "$fingerprint" \
+    "127.0.0.1:$vnc_port" "" "$qmp" "$art" \
+    || { err "descriptor emission failed"; return 1; }
+
+  local smoke; smoke="$(_agent_build_mcp_smoke "$runtime/mcp-smoke")" || return 1
+  finfo "Running mcp-smoke contract suite"
+  local rc=0
+  "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" || rc=$?
+  _agent_screenshot "$qmp" "$art/contract-done.ppm"
+
+  # 8. graceful powerdown, then a belt-and-suspenders final hash check.
+  [ -S "$qmp" ] && qmp_system_powerdown "$qmp" 2>/dev/null || true
+  local hash_final; hash_final="$(_agent_sha256 "$blank")"
+  [ "$hash_before" = "$hash_final" ] \
+    || { err "RESULT: FAIL - the blank disk changed by the end of the run"; return 1; }
+
+  if [ "$rc" -eq 0 ]; then
+    finfo "RESULT: PASS - non-destructive live boot + mcp-smoke contract all green"
+  else
+    err "RESULT: FAIL - mcp-smoke contract exited $rc"
+  fi
+  return "$rc"
+}
+
+# cmd_install [IMAGE] -- ZERO-TOUCH install gate. Build an INSTALL provisioning
+# ISO from IMAGE (install.auto + device + reboot + digests embedded), boot its
+# DEFAULT entry via UEFI CD against a blank disk (disk bootindex=0, CD
+# bootindex=1), wait through the auto-install + automatic reboot until the
+# INSTALLED gateway answers /readyz, run the mcp-smoke contract suite, then do a
+# persistence round-trip: write a marker + reboot with the admin bearer, wait
+# for the port to drop and return, and read the marker back on the second boot.
+cmd_install() {
+  shift  # drop "install"
+  local image="${1:-${AGENT_IMAGE:-agent-desktop:dev}}"
+
+  # shellcheck source=lib/common.sh
+  source "$SCRIPT_DIR/lib/common.sh"
+  # shellcheck source=lib/qmp.sh
+  source "$SCRIPT_DIR/lib/qmp.sh"
+  # shellcheck source=lib/fixture.sh
+  source "$SCRIPT_DIR/lib/fixture.sh"
+
+  _agent_require_bins qemu-system-x86_64 qemu-img openssl curl python3 docker sha256sum || return 1
+
+  local runtime="${INSTALL_RUNTIME:-$SCRIPT_DIR/runtime/install}"
+  local art="${INSTALL_ART:-$SCRIPT_DIR/artifacts/install}"
+  mkdir -p "$runtime" "$art"; chmod 700 "$runtime" "$art" 2>/dev/null || true
+
+  # 1. mint creds + an INSTALL cloud-config. Only install.{auto,device,reboot}
+  #    and the hadron_agent digests are needed: hadron-agent-install injects the
+  #    required install.nousers:true into its own generated /oem config.
+  local seed_dir="$runtime/seed" seed_out="$runtime/make-seed.env"
+  finfo "Minting install credentials + install cloud-config"
+  "$SCRIPT_DIR/make-seed.sh" "$seed_dir" --mode install --device /dev/vda --listen 0.0.0.0:7443 \
+      >"$seed_out" 2>"$art/make-seed.log" \
+    || { err "make-seed.sh failed (see $art/make-seed.log)"; return 1; }
+  local user_token admin_token user_data
+  user_token="$(sed -n 's/^USER_TOKEN_FILE=//p' "$seed_out")"
+  admin_token="$(sed -n 's/^ADMIN_TOKEN_FILE=//p' "$seed_out")"
+  user_data="$(sed -n 's/^USER_DATA=//p' "$seed_out")"
+  [ -f "$user_token" ] && [ -f "$admin_token" ] && [ -f "$user_data" ] \
+    || { err "make-seed did not produce the expected token/user-data files"; return 1; }
+
+  # 2. build the INSTALL provisioning ISO.
+  finfo "Building install provisioning ISO from $image"
+  local iso; iso="$(_agent_build_prov_iso "$user_data" "$runtime/iso" "$image")" || return 1
+  finfo "Install ISO: $iso"
+
+  # 3. blank target disk (large enough for a full install).
+  local target="$runtime/disk.qcow2"
+  qemu-img create -f qcow2 "$target" "${INSTALL_DISK_SIZE:-24G}" >/dev/null \
+    || { err "target disk create failed"; return 1; }
+
+  # 4. firmware / accel / loopback wiring.
+  local mcp_port vnc_display vnc_port
+  mcp_port="$(hdn_agent_alloc_port)"
+  vnc_display="${INSTALL_VNC:-28}"; vnc_port=$((5900 + vnc_display))
+  local ovmf_vars="$runtime/OVMF_VARS.fd" qmp="$runtime/qmp.sock"
+  local serial="$art/serial.log" qemu_log="$art/qemu.log"
+  _agent_set_accel
+  _agent_find_ovmf "$ovmf_vars" || return 1
+  rm -f "$qmp" "$serial"; touch "$serial"
+
+  # UEFI-CD boot of the DEFAULT entry. UEFI honours bootindex: the empty disk
+  # (0) is skipped so the CD (1) boots and installs; once the disk is bootable
+  # it wins, so the post-install reboot lands in the INSTALLED appliance. The
+  # config authorizes hadron-agent-install's zero-touch path to /dev/vda.
+  finfo "Booting install ISO default entry (MCP 127.0.0.1:$mcp_port -> :7443, VNC 127.0.0.1:$vnc_port)"
+  qemu-system-x86_64 "${AGENT_ACCEL[@]}" -m "${MEM:-4096}" -smp "${CPUS:-4}" \
+    "${AGENT_OVMF_ARGS[@]}" \
+    -device virtio-vga -vnc "127.0.0.1:$vnc_display" \
+    -serial "file:$serial" -qmp "unix:$qmp,server,nowait" -rtc base=utc,clock=rt \
+    -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${mcp_port}-:7443" \
+    -device virtio-net-pci,netdev=net0 \
+    -drive "if=none,id=disk,format=qcow2,file=$target" \
+    -device "virtio-blk-pci,drive=disk,serial=target,bootindex=0" \
+    -drive "if=none,id=cd0,media=cdrom,readonly=on,file=$iso" \
+    -device "ide-cd,drive=cd0,bootindex=1" \
+    >"$qemu_log" 2>&1 &
+  local qemu_pid=$!
+  hdn_agent_track_pid "$qemu_pid"
+  sleep 3; _agent_screenshot "$qmp" "$art/before-install.ppm"
+
+  # 5. wait through install -> auto reboot -> installed gateway ready. TOFU can
+  #    only succeed once the INSTALLED gateway is up, so capture then wait.
+  local timeout="${INSTALL_BOOT_TIMEOUT:-1200}"
+  local deadline=$((SECONDS + timeout))
+  local ca="$art/ca.pem" fp="$art/tls-fingerprint.txt"
+  finfo "Waiting for the install + automatic reboot to bring up the installed gateway"
+  _agent_tofu 127.0.0.1 "$mcp_port" "$ca" "$fp" "$deadline" \
+    || { err "installed gateway leaf never appeared (install may have failed)"; _agent_screenshot "$qmp" "$art/fail.ppm"; return 1; }
+  _agent_wait_ready 127.0.0.1 "$mcp_port" "$ca" "$deadline" "$qemu_pid" \
+    || { err "installed gateway /readyz never returned 200"; _agent_screenshot "$qmp" "$art/fail.ppm"; return 1; }
+  local qstatus; qstatus="$(qmp_query_status "$qmp" 2>/dev/null || echo unknown)"
+  finfo "Installed gateway ready (guest status: $qstatus)"
+  _agent_screenshot "$qmp" "$art/installed-ready.ppm"
+
+  # 6. descriptor + mcp-smoke contract suite (all seven tools + admin path).
+  local descriptor="$art/install.json" fingerprint
+  fingerprint="$(tr -d '[:space:]' < "$fp")"
+  hdn_fixture_emit_descriptor "$descriptor" \
+    "https://127.0.0.1:$mcp_port/mcp" "$user_token" "$ca" "$fingerprint" \
+    "127.0.0.1:$vnc_port" "" "$qmp" "$art" \
+    || { err "descriptor emission failed"; return 1; }
+
+  local smoke; smoke="$(_agent_build_mcp_smoke "$runtime/mcp-smoke")" || return 1
+  finfo "Running mcp-smoke contract suite on the installed appliance"
+  local rc=0
+  "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    err "RESULT: FAIL - mcp-smoke contract exited $rc on the installed appliance"
+    _agent_screenshot "$qmp" "$art/fail.ppm"; return "$rc"
+  fi
+
+  # 7. persistence round-trip. persist-write writes /home/agent/e2e/
+  #    persistence-marker and reboots via the admin bearer; we then watch the
+  #    forwarded port drop and return, and persist-verify reads the marker back
+  #    and reconfirms admin-root + the locked agent account after the reboot.
+  local marker
+  marker="persist-${RANDOM}-$(date +%s)"
+  finfo "Persistence: writing the marker and requesting systemctl reboot (admin bearer)"
+  "$smoke" --mode persist-write --descriptor "$descriptor" \
+    --admin-bearer-file "$admin_token" --marker "$marker" || {
+      err "RESULT: FAIL - persist-write (marker + reboot request) failed"; return 1; }
+
+  local reboot_deadline=$((SECONDS + 180))
+  _agent_wait_down 127.0.0.1 "$mcp_port" "$ca" "$reboot_deadline" \
+    && finfo "Observed the gateway going down for reboot" \
+    || err "WARNING: never observed the gateway drop (reboot may have been very fast)"
+  local deadline2=$((SECONDS + ${INSTALL_REBOOT_TIMEOUT:-600}))
+  finfo "Waiting for the second boot to return /readyz"
+  _agent_wait_ready 127.0.0.1 "$mcp_port" "$ca" "$deadline2" "$qemu_pid" \
+    || { err "RESULT: FAIL - installed gateway did not come back after reboot"; _agent_screenshot "$qmp" "$art/fail.ppm"; return 1; }
+  _agent_screenshot "$qmp" "$art/after-reboot.ppm"
+
+  finfo "Persistence: verifying the marker + identity survived the reboot"
+  "$smoke" --mode persist-verify --descriptor "$descriptor" \
+    --admin-bearer-file "$admin_token" --marker "$marker" || {
+      err "RESULT: FAIL - persist-verify (marker/identity persistence) failed"; return 1; }
+
+  # 8. graceful powerdown.
+  [ -S "$qmp" ] && qmp_system_powerdown "$qmp" 2>/dev/null || true
+  finfo "RESULT: PASS - zero-touch install, contract suite, and persistence all green"
+  return 0
+}
+
+# cmd_generic [ISO] -- lightweight NON-DESTRUCTIVE check of a PLAIN desktop ISO
+# (no seed, no cloud-config). Boot it live against a blank disk and require: no
+# write to the blank disk (hash + QMP write ops) and NO zero-touch install
+# marker in the serial log. There is no agent gateway on a plain desktop image,
+# so readiness is not asserted; a screendump is captured for the operator to
+# confirm the interactive live desktop.
+cmd_generic() {
+  shift  # drop "generic"
+  local iso="${1:-${GENERIC_ISO:-}}"
+
+  # shellcheck source=lib/common.sh
+  source "$SCRIPT_DIR/lib/common.sh"
+  # shellcheck source=lib/qmp.sh
+  source "$SCRIPT_DIR/lib/qmp.sh"
+
+  _agent_require_bins qemu-system-x86_64 qemu-img python3 docker sha256sum || return 1
+
+  if [ -z "$iso" ]; then
+    iso="$(ls -t "$REPO_ROOT"/build/i3-desktop/iso/*.iso "$REPO_ROOT"/build/sway-desktop/iso/*.iso 2>/dev/null | head -1 || true)"
+  fi
+  [ -n "$iso" ] && [ -f "$iso" ] \
+    || { err "no generic desktop ISO found; pass one: $0 generic path/to.iso (or build with 'make iso')"; return 1; }
+
+  local runtime="${GENERIC_RUNTIME:-$SCRIPT_DIR/runtime/generic}"
+  local art="${GENERIC_ART:-$SCRIPT_DIR/artifacts/generic}"
+  mkdir -p "$runtime" "$art"; chmod 700 "$runtime" "$art" 2>/dev/null || true
+
+  local kdir="$runtime/kboot"
+  _agent_extract_kernel_initrd "$iso" "$kdir" || return 1
+
+  local blank="$runtime/blank.qcow2"
+  qemu-img create -f qcow2 "$blank" "${GENERIC_DISK_SIZE:-8G}" >/dev/null \
+    || { err "blank disk create failed"; return 1; }
+  local hash_before; hash_before="$(_agent_sha256 "$blank")"
+
+  local vnc_display vnc_port ovmf_vars qmp serial qemu_log
+  vnc_display="${GENERIC_VNC:-29}"; vnc_port=$((5900 + vnc_display))
+  ovmf_vars="$runtime/OVMF_VARS.fd"; qmp="$runtime/qmp.sock"
+  serial="$art/serial.log"; qemu_log="$art/qemu.log"
+  _agent_set_accel
+  _agent_find_ovmf "$ovmf_vars" || return 1
+  rm -f "$qmp" "$serial"; touch "$serial"
+
+  local cmdline="cdroot root=live:CDLABEL=COS_LIVE rd.live.dir=/ rd.live.squashimg=rootfs.squashfs rd.live.overlay.overlayfs net.ifnames=1 console=tty1 console=ttyS0 kairos.boot_live_mode selinux=0 systemd.mask=serial-getty@ttyS0.service"
+
+  finfo "Booting plain desktop ISO live (VNC 127.0.0.1:$vnc_port)"
+  qemu-system-x86_64 "${AGENT_ACCEL[@]}" -m "${MEM:-4096}" -smp "${CPUS:-4}" \
+    "${AGENT_OVMF_ARGS[@]}" \
+    -device virtio-vga -vnc "127.0.0.1:$vnc_display" \
+    -serial "file:$serial" -qmp "unix:$qmp,server,nowait" -rtc base=utc,clock=rt \
+    -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+    -drive "if=none,id=blankdisk,format=qcow2,file=$blank" \
+    -device "virtio-blk-pci,drive=blankdisk,id=blankdev,serial=genericblank" \
+    -drive "if=none,id=livecd,format=raw,readonly=on,file=$iso" \
+    -device "virtio-blk-pci,drive=livecd,serial=coslive" \
+    -kernel "$kdir/kernel" -initrd "$kdir/initrd" -append "$cmdline" \
+    >"$qemu_log" 2>&1 &
+  local qemu_pid=$!
+  hdn_agent_track_pid "$qemu_pid"
+
+  # Observe for a bounded window: the plain image must never start a zero-touch
+  # install, and the blank disk must stay pristine.
+  local observe="${GENERIC_OBSERVE:-180}"
+  local deadline=$((SECONDS + observe))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    kill -0 "$qemu_pid" 2>/dev/null || { err "QEMU exited during the generic live observation window"; break; }
+    if grep -qaiE 'Installing Kairos|kairos-agent install|Zero-touch|authorizes zero-touch|Deploying' "$serial" 2>/dev/null; then
+      err "RESULT: FAIL - the plain desktop ISO started a disk install in live mode"
+      _agent_screenshot "$qmp" "$art/fail.ppm"; return 1
+    fi
+    sleep 5
+  done
+  _agent_screenshot "$qmp" "$art/generic-live.ppm"
+
+  local hash_after; hash_after="$(_agent_sha256 "$blank")"
+  if [ "$hash_before" != "$hash_after" ]; then
+    err "RESULT: FAIL - the blank disk changed under the plain live desktop"
+    return 1
+  fi
+  local writes
+  if writes="$(qmp_block_writes "$qmp" blankdev 2>/dev/null)" && [ "${writes:-1}" != "0" ]; then
+    err "RESULT: FAIL - $writes guest write op(s) to the blank disk under the plain live desktop"
+    return 1
+  fi
+  [ -S "$qmp" ] && qmp_system_powerdown "$qmp" 2>/dev/null || true
+  finfo "RESULT: PASS - plain desktop booted live, non-destructive, no install started"
+  return 0
+}
+
+# cmd_fixture [IMAGE] -- boot a long-lived, VNC-visible appliance VM whose MCP
 # gateway is forwarded to a loopback host port, TOFU-capture its self-signed
 # leaf, verify /readyz through the pinned CA, emit the descriptor, print ONLY
 # the descriptor path, and stay running until `stop` powers the guest down.
 cmd_fixture() {
   shift  # drop "fixture"
-  local iso="${1:-${FIXTURE_ISO:-}}"
+  local image="${1:-${AGENT_IMAGE:-agent-desktop:dev}}"
 
   # shellcheck source=lib/common.sh
   source "$SCRIPT_DIR/lib/common.sh"
@@ -71,15 +641,12 @@ cmd_fixture() {
   source "$SCRIPT_DIR/lib/fixture.sh"
   _fixture_paths
 
-  for bin in qemu-system-x86_64 openssl curl python3; do
-    command -v "$bin" >/dev/null 2>&1 || { err "required command not found: $bin"; return 1; }
-  done
-
-  [ -n "$iso" ] || iso="$(ls -t "$REPO_ROOT/build/agent-desktop/iso"/*.iso 2>/dev/null | head -1 || true)"
-  [ -n "$iso" ] && [ -f "$iso" ] || {
-    err "no appliance ISO found. Pass one: $0 fixture path/to.iso  (or set FIXTURE_ISO)"
-    return 1
-  }
+  # The per-VM credentials MUST be embedded via AuroraBoot --cloud-config
+  # (which lands at /run/initramfs/live/config.yaml), so the fixture builds a
+  # fresh provisioning ISO from the agent IMAGE each boot rather than reusing a
+  # static appliance ISO -- a cidata seed lands at /oem/95_userdata and is NOT
+  # read, so it never auto-installs. docker + qemu-img are needed for the build.
+  _agent_require_bins qemu-system-x86_64 qemu-img openssl curl python3 docker || return 1
 
   mkdir -p "$FIXTURE_RUNTIME" "$FIXTURE_ART"
   chmod 700 "$FIXTURE_RUNTIME" "$FIXTURE_ART" 2>/dev/null || true
@@ -100,33 +667,47 @@ cmd_fixture() {
   local FINGERPRINT_FILE="$FIXTURE_ART/tls-fingerprint.txt"
   local MCP_PORT="$mcp_port"
 
-  # --- mint per-VM credentials + cidata seed ISO (Task 2) -------------------
+  # --- mint per-VM credentials + build the provisioning ISO (Task 2/5) ------
   # make-seed.sh stdout is KEY=VALUE and carries NO bearer plaintext; still
   # route it through redaction as defense in depth. We consume USER_TOKEN_FILE
-  # and SEED_ISO.
+  # and USER_DATA (the cloud-config we embed via --cloud-config).
   local seed_dir="$FIXTURE_RUNTIME/seed" seed_out="$FIXTURE_RUNTIME/make-seed.env"
-  finfo "Minting fixture credentials + cidata seed ISO"
+  finfo "Minting fixture credentials + install cloud-config"
   if ! "$SCRIPT_DIR/make-seed.sh" "$seed_dir" \
         --mode install --device /dev/vda --listen 0.0.0.0:7443 \
         >"$seed_out" 2>"$FIXTURE_ART/make-seed.log"; then
     err "make-seed.sh failed (see $FIXTURE_ART/make-seed.log)"
     return 1
   fi
-  local user_token_file seed_iso
+  local user_token_file user_data
   user_token_file="$(sed -n 's/^USER_TOKEN_FILE=//p' "$seed_out")"
-  seed_iso="$(sed -n 's/^SEED_ISO=//p' "$seed_out")"
+  user_data="$(sed -n 's/^USER_DATA=//p' "$seed_out")"
   [ -n "$user_token_file" ] && [ -f "$user_token_file" ] || { err "make-seed produced no USER_TOKEN_FILE"; return 1; }
-  [ -n "$seed_iso" ] && [ -f "$seed_iso" ] || { err "make-seed produced no SEED_ISO"; return 1; }
+  [ -n "$user_data" ] && [ -f "$user_data" ] || { err "make-seed produced no USER_DATA"; return 1; }
+
+  # Build a fresh provisioning ISO from the agent image with the per-VM config
+  # embedded, or reuse a prebuilt one via FIXTURE_PROV_ISO.
+  local iso="${FIXTURE_PROV_ISO:-}"
+  if [ -n "$iso" ]; then
+    [ -f "$iso" ] || { err "FIXTURE_PROV_ISO set but not a file: $iso"; return 1; }
+    finfo "Using prebuilt provisioning ISO: $iso"
+  else
+    finfo "Building provisioning ISO from $image"
+    iso="$(_agent_build_prov_iso "$user_data" "$FIXTURE_RUNTIME/iso" "$image")" || return 1
+    finfo "Provisioning ISO: $iso"
+  fi
 
   # --- launch QEMU via tools/vm.sh with the detachable-fixture knobs --------
   # tools/vm.sh execs qemu, so the backgrounded shell's PID becomes qemu's PID.
+  # NO SEED_ISO: the install config is embedded in the ISO via --cloud-config,
+  # and tools/vm.sh install boots the DEFAULT entry (disk bootindex=0 skipped
+  # while blank, CD bootindex=1 installs, then the disk wins on reboot).
   rm -f "$FIXTURE_QEMU_PID" "$FIXTURE_QMP_SOCK"
   finfo "Booting fixture VM (MCP 127.0.0.1:$mcp_port -> guest :7443, VNC 127.0.0.1:$vnc_port)"
   HOST_MCP_PORT="$mcp_port" \
   QMP="$FIXTURE_QMP_SOCK" \
   SERIAL_LOG="$serial_log" \
   PID_FILE="$FIXTURE_QEMU_PID" \
-  SEED_ISO="$seed_iso" \
   DISK="$disk" DISK_SIZE="${FIXTURE_DISK_SIZE:-24G}" FRESH=1 \
   DESKTOP=i3 \
   VNC="$vnc_display" BIND=127.0.0.1 \
@@ -294,8 +875,11 @@ cmd_stop() {
 
 case "$SUBCOMMAND" in
   compatibility) ;;  # falls through to the compatibility gate body below
-  fixture) cmd_fixture "$@"; exit $? ;;
-  stop)    cmd_stop    "$@"; exit $? ;;
+  contract) cmd_contract "$@"; exit $? ;;
+  install)  cmd_install  "$@"; exit $? ;;
+  generic)  cmd_generic  "$@"; exit $? ;;
+  fixture)  cmd_fixture  "$@"; exit $? ;;
+  stop)     cmd_stop     "$@"; exit $? ;;
   "" ) usage; exit 64 ;;
   * ) err "unknown subcommand: $SUBCOMMAND"; usage; exit 64 ;;
 esac
