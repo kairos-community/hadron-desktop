@@ -105,6 +105,12 @@ install:
   device: "$_dev"
   auto: true
   reboot: true
+  # The agent appliance ships NO admin/sudo user by design -- the locked, non-
+  # admin 'agent' account is (re)created by the 90_agent_profile OEM stage on the
+  # installed system. Kairos 3.3.x refuses to install without an admin-group user
+  # unless nousers is set, so opt in explicitly: the appliance is intentionally
+  # user-locked and never grants interactive sudo.
+  nousers: true
 hostname: "$_host"
 users:
   - name: "agent"
@@ -147,6 +153,47 @@ if [ "$NONINTERACTIVE" = "1" ]; then
     say "${GREEN}==>${R} Zero-touch install authorized; installing agent to ${B}$DEVICE${R} ..."
     exec $INSTALL_CMD
 fi
+
+# ---------------------------------------------------------------------------
+# AUTO (provisioning ISO): the agent appliance is provisioned by building the
+# ISO with `auroraboot --cloud-config <cfg>`. AuroraBoot writes that config to
+# the ISO root as /config.yaml, which on a livecd/install boot is mounted at
+# /run/initramfs/live/config.yaml -- one of the dirs `kairos-agent install`
+# itself scans (kairos GetUserConfigDirs: /run/initramfs/live, /etc/kairos,
+# /usr/local/cloud-config, /oem). When the merged config authorizes a zero-touch
+# install (install.auto=true + install.device + hadron_agent.enabled), install
+# unattended -- this is the agent ISO's expected purpose. A plain agent ISO with
+# no such config falls through to the interactive installer below (the manual
+# fallback, shipped as a separate ISO built without --cloud-config).
+#
+# inspect-seed parses a single directory of *.yaml; assemble one from the same
+# dirs kairos scans (writable last so a datasource/oem config can override) so
+# the embedded --cloud-config is included and the same authoritative parser
+# decides authorization.
+# ---------------------------------------------------------------------------
+_scan=$(mktemp -d)
+_seq=0
+for _d in ${HADRON_CONFIG_DIRS:-/run/initramfs/live /etc/kairos /usr/local/cloud-config "$OEM_DIR"}; do
+    for _f in "$_d"/*.yaml "$_d"/*.yml; do
+        [ -e "$_f" ] || continue
+        _seq=$((_seq + 1))
+        cp -f "$_f" "$_scan/$(printf '%03d' "$_seq")_$(basename "$_f")" 2>/dev/null || true
+    done
+done
+if DEVICE=$("$AGENT_BIN" provision inspect-seed --require-auto-install --oem-dir "$_scan" 2>/dev/null); then
+    DEVICE=$(printf '%s' "$DEVICE" | tr -d '[:space:]')
+    case "$DEVICE" in
+        /dev/?*)
+            rm -rf "$_scan"
+            HOSTNAME_VAL="${HADRON_HOSTNAME:-hadron-agent}"
+            write_config "$DEVICE" "$HOSTNAME_VAL"
+            say ""
+            say "${GREEN}==>${R} Provisioning config authorizes zero-touch install to ${B}$DEVICE${R}; installing ..."
+            exec $INSTALL_CMD
+            ;;
+    esac
+fi
+rm -rf "$_scan"
 
 # ---------------------------------------------------------------------------
 # INTERACTIVE: ask hostname + disk, confirm with a typed `yes`.
