@@ -392,3 +392,61 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+// TestBrowserIgnoresBrowserNamesInTitles is a regression guard for a
+// false-positive that would have fired in our own end-to-end demo: the shell
+// there runs `flatpak install org.chromium.Chromium`, putting "Chromium" in the
+// xterm's title. Treating that as a second browser makes auto-resolution report
+// an ambiguity that does not exist.
+func TestBrowserIgnoresBrowserNamesInTitles(t *testing.T) {
+	caller := &fakeCaller{handler: func(_ context.Context, name string, args map[string]any) (*mcp.CallToolResult, error) {
+		switch name {
+		case toolListWindows:
+			return &mcp.CallToolResult{StructuredContent: map[string]any{"windows": []any{
+				map[string]any{"window_id": 10, "pid": 1, "app_name": "xterm-256color",
+					"title": "flatpak install -y --user flathub org.chromium.Chromium"},
+				map[string]any{"window_id": 20, "pid": 2, "app_name": "Chromium", "title": "Kairos"},
+			}}}, nil
+		case toolPage:
+			return &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.TextContent{Text: `{"url":"https://kairos.io/","title":"Kairos"}`},
+			}}, nil
+		}
+		return nil, nil
+	}}
+
+	out, _ := NewAdapter(caller).Browser(context.Background(), api.BrowserInput{Action: api.BrowserSnapshot})
+	if out.Code != "" {
+		t.Fatalf("code = %q (%s), want success: the terminal is not a browser", out.Code, out.Message)
+	}
+	if out.WindowID != 20 {
+		t.Fatalf("window_id = %d, want the real Chromium window 20", out.WindowID)
+	}
+}
+
+// TestBrowserUsesTitleWhenAppNameIsEmpty keeps the fallback honest: some
+// windows report no app_name at all, and there the title is the only identity
+// available.
+func TestBrowserUsesTitleWhenAppNameIsEmpty(t *testing.T) {
+	caller := &fakeCaller{handler: func(_ context.Context, name string, _ map[string]any) (*mcp.CallToolResult, error) {
+		switch name {
+		case toolListWindows:
+			return &mcp.CallToolResult{StructuredContent: map[string]any{"windows": []any{
+				map[string]any{"window_id": 30, "pid": 3, "app_name": "", "title": "Firefox - Kairos"},
+			}}}, nil
+		case toolPage:
+			return &mcp.CallToolResult{Content: []mcp.Content{
+				&mcp.TextContent{Text: `{"url":"https://kairos.io/","title":"Kairos"}`},
+			}}, nil
+		}
+		return nil, nil
+	}}
+
+	out, _ := NewAdapter(caller).Browser(context.Background(), api.BrowserInput{Action: api.BrowserSnapshot})
+	if out.Code != "" {
+		t.Fatalf("code = %q (%s), want the title fallback to find it", out.Code, out.Message)
+	}
+	if out.WindowID != 30 {
+		t.Fatalf("window_id = %d, want 30", out.WindowID)
+	}
+}

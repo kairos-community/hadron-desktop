@@ -179,8 +179,19 @@ func (a *Adapter) resolveBrowserWindow(ctx context.Context, in api.BrowserInput)
 	}
 }
 
+// isBrowserWindow reports whether w looks like a browser window.
+//
+// It matches on app_name, NOT on the title. A title match looks more generous
+// but is actively wrong: a terminal running `flatpak install
+// org.chromium.Chromium` has "Chromium" in its title, and misreading that shell
+// as a second browser turns auto-resolution into a spurious "pass window_id"
+// error. The title is consulted only when app_name is empty, which is the one
+// case where it carries the window's identity rather than its contents.
 func isBrowserWindow(w cuaWindow) bool {
-	haystack := strings.ToLower(w.AppName + " " + w.Title)
+	haystack := strings.ToLower(w.AppName)
+	if strings.TrimSpace(haystack) == "" {
+		haystack = strings.ToLower(w.Title)
+	}
 	for _, name := range browserAppNames {
 		if strings.Contains(haystack, name) {
 			return true
