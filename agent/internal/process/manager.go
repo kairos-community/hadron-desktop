@@ -267,7 +267,25 @@ func failMeta(code api.ErrorCode, msg string, retryable bool) api.ResultMeta {
 // buildCommand constructs the "/bin/sh -lc <command>" invocation shared by
 // terminal and process. Extra args become the shell's positional parameters.
 func buildCommand(ctx context.Context, command string, args, env []string, cwd string) *exec.Cmd {
-	shArgs := append([]string{"-lc", command}, args...)
+	// Everything runs through a login shell so the process inherits the same
+	// environment an interactive session would (PATH, XDG_DATA_DIRS -- flatpak
+	// in particular is unusable without them).
+	//
+	// How args are handed over matters. `sh -lc <command> a b c` binds a/b/c to
+	// $0/$1/$2 -- positional parameters that <command> never references -- so
+	// arguments were accepted by the API and then silently dropped: `process`
+	// with command="flatpak", args=["install", ...] ran a bare `flatpak` and
+	// failed with "No command specified". Pass them through explicitly instead,
+	// so ProcessInput.Args reaches the executable as documented.
+	//
+	// With no args the command stays a plain shell command line, which is what
+	// callers passing a whole pipeline in `command` rely on.
+	var shArgs []string
+	if len(args) == 0 {
+		shArgs = []string{"-lc", command}
+	} else {
+		shArgs = append([]string{"-lc", `exec "$0" "$@"`, command}, args...)
+	}
 	cmd := exec.CommandContext(ctx, "/bin/sh", shArgs...)
 	cmd.Cancel = func() error { return nil } // teardown is handled explicitly
 	if cwd != "" {

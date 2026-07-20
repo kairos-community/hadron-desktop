@@ -550,3 +550,87 @@ func pollUntil(t *testing.T, m *Manager, id string, pred func(string) bool) stri
 	}
 	return sb.String()
 }
+
+// ---------------------------------------------------------------------------
+// ProcessInput.Args reaches the executable
+// ---------------------------------------------------------------------------
+
+// collectUntilExit polls id until the process exits, returning the joined
+// stdout. It fails the test if the process never exits.
+func collectUntilExit(t *testing.T, m *Manager, id string) string {
+	t.Helper()
+	var stdout strings.Builder
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		p, err := m.Process(context.Background(), api.ProcessInput{
+			Action: api.ProcessPoll, ProcessID: id, TimeoutMs: ptr(200),
+		})
+		if err != nil {
+			t.Fatalf("poll error: %v", err)
+		}
+		stdout.WriteString(p.Stdout)
+		if !p.Running {
+			return stdout.String()
+		}
+	}
+	t.Fatalf("process %s never exited; stdout so far %q", id, stdout.String())
+	return ""
+}
+
+// Args must actually be applied to the executable. They used to be handed to
+// `sh -lc <command>` as trailing words, which binds them to $0/$1/$2 --
+// positional parameters the command line never references -- so every argument
+// was accepted by the API and then silently dropped (a `process` start with
+// command="flatpak", args=["install", ...] ran a bare `flatpak` and failed with
+// "No command specified").
+func TestProcessStartPassesArgsToTheExecutable(t *testing.T) {
+	m := newTestManager(t)
+	start, err := m.Process(context.Background(), api.ProcessInput{
+		Action:  api.ProcessStart,
+		Command: "/bin/echo",
+		Args:    []string{"alpha", "beta"},
+	})
+	if err != nil {
+		t.Fatalf("start error: %v", err)
+	}
+	if start.Code != "" {
+		t.Fatalf("start failed: %q %s", start.Code, start.Message)
+	}
+	if got := strings.TrimSpace(collectUntilExit(t, m, start.ProcessID)); got != "alpha beta" {
+		t.Fatalf("stdout = %q, want %q (args were not applied to the executable)", got, "alpha beta")
+	}
+}
+
+// Args must survive verbatim: no shell re-splitting of an argument that
+// contains spaces or globbing characters.
+func TestProcessStartArgsAreNotReSplitByTheShell(t *testing.T) {
+	m := newTestManager(t)
+	start, err := m.Process(context.Background(), api.ProcessInput{
+		Action:  api.ProcessStart,
+		Command: "/bin/echo",
+		Args:    []string{"one two", "*"},
+	})
+	if err != nil {
+		t.Fatalf("start error: %v", err)
+	}
+	if got := strings.TrimSpace(collectUntilExit(t, m, start.ProcessID)); got != "one two *" {
+		t.Fatalf("stdout = %q, want %q (arguments must not be word-split or globbed)", got, "one two *")
+	}
+}
+
+// With no args the command stays a plain shell command line, which callers that
+// pass a whole pipeline in `command` depend on.
+func TestProcessStartWithoutArgsRemainsAShellCommandLine(t *testing.T) {
+	m := newTestManager(t)
+	start, err := m.Process(context.Background(), api.ProcessInput{
+		Action:  api.ProcessStart,
+		Command: "echo one; echo two",
+	})
+	if err != nil {
+		t.Fatalf("start error: %v", err)
+	}
+	got := strings.Fields(collectUntilExit(t, m, start.ProcessID))
+	if len(got) != 2 || got[0] != "one" || got[1] != "two" {
+		t.Fatalf("stdout fields = %#v, want [one two]", got)
+	}
+}
