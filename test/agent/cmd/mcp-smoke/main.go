@@ -1,6 +1,6 @@
 // Command mcp-smoke is the public MCP smoke/privilege client for the Hadron Cua
 // agent appliance. It drives the appliance's public HTTPS MCP gateway using
-// ONLY the seven public MCP tools and asserts both the public contract and the
+// ONLY the eight public MCP tools and asserts both the public contract and the
 // privilege boundaries that separate the unprivileged `agent` user from
 // admin/root.
 //
