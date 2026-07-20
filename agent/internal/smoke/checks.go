@@ -248,19 +248,24 @@ func (s *Suite) checkProcessPTYCgroup(ctx context.Context, sess *mcp.ClientSessi
 	if err := s.write(ctx, sess, pid, "cat /proc/self/cgroup\n"); err != nil {
 		return failTransport(name, "process write (cgroup) failed")
 	}
-	cgroup, err := s.poll(ctx, sess, pid)
+	cgroup, err := s.pollUntil(ctx, sess, pid,
+		func(seen string) bool { return strings.Contains(seen, cgroupLeafMarker) },
+		s.callTimeout())
 	if err != nil {
 		return failTransport(name, "process poll (cgroup) failed")
 	}
 	if !strings.Contains(cgroup, cgroupLeafMarker) {
-		return failAssert(name, "process cgroup is not its dedicated MCP leaf")
+		return failAssert(name, fmt.Sprintf(
+			"process cgroup is not its dedicated MCP leaf (saw %q)", lastLine(cgroup)))
 	}
 
 	// Spawn a detached grandchild and capture its PID.
 	if err := s.write(ctx, sess, pid, "setsid sh -c 'sleep 300' </dev/null >/dev/null 2>&1 & echo GC=$!\n"); err != nil {
 		return failTransport(name, "process write (grandchild) failed")
 	}
-	gcOut, err := s.poll(ctx, sess, pid)
+	gcOut, err := s.pollUntil(ctx, sess, pid,
+		func(seen string) bool { return parseGrandchildPID(seen) != "" },
+		s.callTimeout())
 	if err != nil {
 		return failTransport(name, "process poll (grandchild) failed")
 	}
@@ -531,6 +536,46 @@ func (s *Suite) write(ctx context.Context, sess *mcp.ClientSession, pid, input s
 	return nil
 }
 
+// pollUntil polls a tracked process, accumulating its output, until match is
+// satisfied or the budget expires. It returns everything read either way, so a
+// failing caller can report what it actually saw.
+//
+// A single immediate poll is a race, and a subtle one. Writing a command to a
+// PTY does not mean the shell has run it: the terminal echoes the line back
+// first, so an instant poll routinely returns the echo alone. A check asserting
+// on that output then depends on whether the guest happened to be quick --
+// passing on a fast machine and failing on a slower live boot, which looks like
+// a product defect and is not one.
+//
+// Each poll drains the buffer, so the accumulation here is what makes the
+// output comparable to what a human would see on the terminal.
+func (s *Suite) pollUntil(ctx context.Context, sess *mcp.ClientSession, pid string,
+	match func(string) bool, budget time.Duration) (string, error) {
+	if budget <= 0 {
+		budget = 15 * time.Second
+	}
+	deadline := time.Now().Add(budget)
+	var seen strings.Builder
+	for {
+		chunk, err := s.poll(ctx, sess, pid)
+		if err != nil {
+			return seen.String(), err
+		}
+		seen.WriteString(chunk)
+		if match(seen.String()) {
+			return seen.String(), nil
+		}
+		if time.Now().After(deadline) {
+			return seen.String(), nil
+		}
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return seen.String(), ctx.Err()
+		}
+	}
+}
+
 func (s *Suite) poll(ctx context.Context, sess *mcp.ClientSession, pid string) (string, error) {
 	var out api.ProcessOutput
 	if err := s.callInto(ctx, sess, api.ToolProcess, api.ProcessInput{
@@ -673,4 +718,16 @@ func codeOrNone(c api.ErrorCode) string {
 		return "none"
 	}
 	return string(c)
+}
+
+// lastLine returns the final non-empty line of s, for error details that would
+// otherwise quote a whole terminal transcript.
+func lastLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if trimmed := strings.TrimSpace(lines[i]); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
