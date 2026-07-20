@@ -50,6 +50,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	mode := fs.String("mode", "contract", "smoke mode: contract, persist-write, persist-verify, or exec")
 	marker := fs.String("marker", "", "opaque marker value for the persist-write/persist-verify modes")
 	command := fs.String("command", "", "shell command to run through the public terminal tool (exec mode)")
+	localFile := fs.String("local-file", "", "local file to upload through write_file (upload mode)")
+	remoteFile := fs.String("remote-file", "", "destination path inside the guest (upload mode)")
+	uploadSHA := fs.String("sha256", "", "expected SHA-256 of the uploaded file, verified in the guest (upload mode)")
 	execAdmin := fs.Bool("exec-admin", false, "run the exec-mode command with the admin bearer instead of the user bearer")
 	readyTimeout := fs.Duration("ready-timeout", 60*time.Second, "how long to wait for the gateway /readyz")
 	callTimeout := fs.Duration("call-timeout", 30*time.Second, "per tool-call timeout")
@@ -58,9 +61,13 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch *mode {
-	case "contract", "persist-write", "persist-verify", "exec":
+	case "contract", "persist-write", "persist-verify", "exec", "upload", "ui":
 	default:
-		fmt.Fprintf(stderr, "mcp-smoke: unknown mode %q (want: contract, persist-write, persist-verify, or exec)\n", *mode)
+		fmt.Fprintf(stderr, "mcp-smoke: unknown mode %q (want: contract, persist-write, persist-verify, exec, upload, or ui)\n", *mode)
+		return ExitDescriptor
+	}
+	if *mode == "upload" && (*localFile == "" || *remoteFile == "") {
+		fmt.Fprintln(stderr, "mcp-smoke: --local-file and --remote-file are required for mode \"upload\"")
 		return ExitDescriptor
 	}
 	if *mode == "exec" && *command == "" {
@@ -156,6 +163,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 			ExitCode: res.ExitCode, Passed: 1, Checks: report.Checks,
 		}, stderr)
 		return res.ExitCode
+	case "upload":
+		report = suite.RunUpload(ctx, *localFile, *remoteFile, *uploadSHA)
 	case "persist-write":
 		report = suite.RunPersistWrite(ctx, *marker)
 	case "persist-verify":
@@ -219,6 +228,10 @@ func writeArtifact(dir string, rep artifactReport, stderr io.Writer) {
 	switch rep.Mode {
 	case "exec":
 		name = "mcp-exec.json"
+	case "upload":
+		name = "mcp-upload.json"
+	case "ui":
+		name = "mcp-ui.json"
 	case "persist-write":
 		name = "mcp-persist-write.json"
 	case "persist-verify":

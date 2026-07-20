@@ -209,10 +209,18 @@ func (f *fakeFiles) Patch(_ context.Context, in api.PatchInput) api.PatchOutput 
 	return api.PatchOutput{FilesChanged: changed, ReplacementsApplied: applied}
 }
 
-// fakeComputer returns a configurable capture image.
-type fakeComputer struct{ image string }
+// fakeComputer returns a configurable capture image. When uiHook is set it
+// answers every computer_use call instead, which is how the ui-mode tests below
+// stand in for a running desktop; contract-mode tests leave it nil.
+type fakeComputer struct {
+	image  string
+	uiHook func(api.ComputerUseInput) api.ComputerUseOutput
+}
 
-func (c *fakeComputer) ComputerUse(context.Context, api.ComputerUseInput) (api.ComputerUseOutput, error) {
+func (c *fakeComputer) ComputerUse(_ context.Context, in api.ComputerUseInput) (api.ComputerUseOutput, error) {
+	if c.uiHook != nil {
+		return c.uiHook(in), nil
+	}
 	return api.ComputerUseOutput{ImageBase64: c.image}, nil
 }
 func (c *fakeComputer) Browser(context.Context, api.BrowserInput) (api.BrowserOutput, error) {

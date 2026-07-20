@@ -169,6 +169,34 @@ _agent_extract_kernel_initrd() {
     || { err "extraction produced no kernel/initrd"; return 1; }
 }
 
+# _agent_inject_cloud_config <iso> <config> <out_iso> -- remaster <iso> so that
+# <config> lands at the ISO root as /config.yaml, which is where a live/install
+# boot mounts it (/run/initramfs/live/config.yaml) and where kairos-agent looks.
+#
+# This exists because a RELEASED ISO carries no cloud-config: `make agent-iso`
+# builds the appliance without one, so a guest booted from it finds no
+# provisioned bearer digests and mints a throwaway first-run token instead. The
+# symptom is nasty precisely because it looks fine -- /readyz goes green while
+# the caller's own bearer gets 401. Downstream consumers are handed an ISO URL
+# and their credentials separately, so the two have to be married here.
+#
+# `-boot_image any replay` is not optional: it replays the El Torito and EFI
+# boot records from the input image. Without it the remastered ISO is a valid
+# filesystem that no firmware will boot.
+_agent_inject_cloud_config() {
+  local iso="$1" cfg="$2" out="$3"
+  rm -f "$out"
+  mkdir -p "$(dirname "$out")"
+  docker run --rm --entrypoint xorriso \
+    -v "$iso":/in.iso:ro -v "$cfg":/config.yaml:ro \
+    -v "$(dirname "$out")":/out "$AGENT_AURORA_IMAGE" \
+    -indev /in.iso -outdev "/out/$(basename "$out")" \
+    -boot_image any replay \
+    -map /config.yaml /config.yaml >/dev/null 2>&1 \
+    || { err "cloud-config injection failed"; return 1; }
+  [ -s "$out" ] || { err "cloud-config injection produced no ISO"; return 1; }
+}
+
 # _agent_build_mcp_smoke <out_bin> -- build the mcp-smoke client. Its main
 # package lives under test/agent/cmd/mcp-smoke but imports the agent module's
 # internal/smoke package, so it must be COPIED into the module tree
@@ -690,7 +718,16 @@ cmd_fixture() {
   local iso="${FIXTURE_PROV_ISO:-}"
   if [ -n "$iso" ]; then
     [ -f "$iso" ] || { err "FIXTURE_PROV_ISO set but not a file: $iso"; return 1; }
-    finfo "Using prebuilt provisioning ISO: $iso"
+    # A prebuilt (released) ISO carries no cloud-config, so this VM's freshly
+    # minted bearer digests would never reach the guest: it would boot, report
+    # ready, and then reject the descriptor's own token. Remaster a per-run copy
+    # with this run's config instead of handing back an ISO that cannot be
+    # authenticated against.
+    finfo "Injecting this run's cloud-config into the prebuilt ISO"
+    local injected="$FIXTURE_RUNTIME/iso/provisioning.iso"
+    _agent_inject_cloud_config "$iso" "$user_data" "$injected" || return 1
+    iso="$injected"
+    finfo "Using prebuilt provisioning ISO (with credentials injected): $iso"
   else
     finfo "Building provisioning ISO from $image"
     iso="$(_agent_build_prov_iso "$user_data" "$FIXTURE_RUNTIME/iso" "$image")" || return 1
@@ -1143,6 +1180,203 @@ cmd_recovery() {
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# UI gate (Phase 4 Task 7)
+# ---------------------------------------------------------------------------
+#
+# Drives a real GTK application and a real Chromium in the appliance's visible
+# session using ONLY the public tools, and asserts against each application's
+# own state rather than against the harness's expectations.
+#
+# The Chromium half deliberately does NOT use the `browser` tool. browser is
+# CDP-backed, and a gate that asserted through CDP would be asking Chromium to
+# grade its own homework: the point here is that the DESKTOP path -- pixels and
+# accessibility -- controls a real browser window.
+
+# _ui_exec <smoke> <descriptor> <admin_token> <user|admin> <command>
+_ui_exec() {
+  local smoke="$1" descriptor="$2" admin_token="$3" as="$4" cmd="$5"
+  local extra=()
+  [ "$as" = "admin" ] && extra+=(--exec-admin)
+  "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
+    --mode exec --command "$cmd" "${extra[@]}" 2>/dev/null
+}
+
+# cmd_ui [IMAGE] -- UI gate on an installed appliance.
+cmd_ui() {
+  shift  # drop "ui"
+  local image="${1:-${AGENT_IMAGE:-agent-desktop:dev}}"
+
+  # shellcheck source=lib/common.sh
+  source "$SCRIPT_DIR/lib/common.sh"
+  # shellcheck source=lib/qmp.sh
+  source "$SCRIPT_DIR/lib/qmp.sh"
+  # shellcheck source=lib/fixture.sh
+  source "$SCRIPT_DIR/lib/fixture.sh"
+
+  _agent_require_bins qemu-system-x86_64 qemu-img openssl curl python3 docker sha256sum tar || return 1
+
+  local runtime="${UI_RUNTIME:-$SCRIPT_DIR/runtime/ui}"
+  local art="${UI_ART:-$SCRIPT_DIR/artifacts/ui}"
+  rm -rf "$art"; mkdir -p "$runtime" "$art"; chmod 700 "$runtime" "$art" 2>/dev/null || true
+
+  # 1. Fixtures, built against the runtime under test.
+  local fixture_tar="${UI_FIXTURE_TAR:-$SCRIPT_DIR/runtime/fixtures/ui-fixtures.tar}"
+  if [ ! -f "$fixture_tar" ]; then
+    finfo "Building UI fixtures"
+    AGENT_IMAGE="$image" "$SCRIPT_DIR/build-fixtures.sh" \
+      || { err "fixture build failed"; return 1; }
+  fi
+  [ -f "$fixture_tar" ] && [ -f "$fixture_tar.sha256" ] \
+    || { err "missing fixture tar or checksum: $fixture_tar"; return 1; }
+  local fixture_sha; fixture_sha="$(cat "$fixture_tar.sha256")"
+
+  # 2. An installed appliance, exactly as the recovery gate obtains one.
+  local install_runtime="${INSTALL_RUNTIME:-$SCRIPT_DIR/runtime/install}"
+  local src_disk="${UI_DISK:-$install_runtime/disk.qcow2}"
+  if [ ! -f "$src_disk" ]; then
+    finfo "No installed disk at $src_disk; running the install gate first"
+    "$SCRIPT_DIR/run.sh" install "$image" || { err "install gate failed"; return 1; }
+    src_disk="$install_runtime/disk.qcow2"
+  fi
+  local seed_out="$install_runtime/make-seed.env"
+  [ -f "$seed_out" ] || { err "missing $seed_out; re-run '$0 install'"; return 1; }
+  local user_token admin_token
+  user_token="$(sed -n 's/^USER_TOKEN_FILE=//p' "$seed_out")"
+  admin_token="$(sed -n 's/^ADMIN_TOKEN_FILE=//p' "$seed_out")"
+
+  local disk="$runtime/disk.qcow2"
+  cp --reflink=auto "$src_disk" "$disk" || { err "disk clone failed"; return 1; }
+
+  local mcp_port vnc_display vnc_port
+  mcp_port="$(hdn_agent_alloc_port)"
+  vnc_display="${UI_VNC:-26}"; vnc_port=$((5900 + vnc_display))
+  local ovmf_vars="$runtime/OVMF_VARS.fd" qmp="$runtime/qmp.sock"
+  local serial="$art/serial.log" qemu_log="$art/qemu.log"
+  _agent_set_accel
+  _agent_find_ovmf "$ovmf_vars" || return 1
+  rm -f "$qmp" "$serial"; touch "$serial"
+
+  finfo "Booting the installed appliance (MCP 127.0.0.1:$mcp_port, VNC 127.0.0.1:$vnc_port)"
+  qemu-system-x86_64 "${AGENT_ACCEL[@]}" -m "${MEM:-6144}" -smp "${CPUS:-4}" \
+    "${AGENT_OVMF_ARGS[@]}" \
+    -device virtio-vga -vnc "127.0.0.1:$vnc_display" \
+    -serial "file:$serial" -qmp "unix:$qmp,server,nowait" -rtc base=utc,clock=rt \
+    -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${mcp_port}-:7443" \
+    -device virtio-net-pci,netdev=net0 \
+    -drive "if=none,id=disk,format=qcow2,file=$disk" \
+    -device "virtio-blk-pci,drive=disk,serial=target,bootindex=0" \
+    >"$qemu_log" 2>&1 &
+  local qpid=$!
+  # shellcheck disable=SC2064
+  trap "kill $qpid 2>/dev/null || true" RETURN
+
+  local ca="$runtime/ca.pem" fp="$runtime/fingerprint.txt"
+  local deadline=$((SECONDS + ${UI_BOOT_TIMEOUT:-420}))
+  _agent_tofu 127.0.0.1 "$mcp_port" "$ca" "$fp" "$deadline" \
+    || { err "never captured the TLS leaf"; return 1; }
+  _agent_wait_ready 127.0.0.1 "$mcp_port" "$ca" "$deadline" "$qpid" \
+    || { err "appliance never became ready"; return 1; }
+
+  local descriptor="$runtime/fixture.json"
+  hdn_fixture_emit_descriptor "$descriptor" \
+    "https://127.0.0.1:$mcp_port/mcp" "$user_token" "$ca" "$(cat "$fp")" \
+    "127.0.0.1:$vnc_port" "" "$qmp" "$art" \
+    || { err "descriptor emission failed"; return 1; }
+  local smoke; smoke="$(_agent_build_mcp_smoke "$runtime/mcp-smoke")" || return 1
+
+  # 3. Upload and unpack the fixtures through the public tools.
+  finfo "Uploading fixtures via write_file"
+  "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
+    --mode upload --local-file "$fixture_tar" \
+    --remote-file /home/agent/e2e/ui-fixtures.tar --sha256 "$fixture_sha" \
+    || { err "fixture upload failed"; _agent_screenshot "$qmp" "$art/fail-upload.ppm"; return 1; }
+
+  _ui_exec "$smoke" "$descriptor" "$admin_token" user \
+    'set -e; cd /home/agent/e2e; tar -xf ui-fixtures.tar; chmod 0755 bin/hadron-cua-gtk; ls -l bin web' \
+    > "$art/fixture-install.log" 2>&1 \
+    || { err "unpacking the fixtures failed (see $art/fixture-install.log)"; return 1; }
+
+  # 4. Launch the GTK fixture on the REAL seat. DISPLAY/XAUTHORITY come from
+  #    the session the broker already lives in, so this lands on the visible
+  #    desktop rather than on a hidden server.
+  finfo "Launching the GTK fixture"
+  _ui_exec "$smoke" "$descriptor" "$admin_token" user \
+    'nohup /home/agent/e2e/bin/hadron-cua-gtk >/home/agent/e2e/gtk.log 2>&1 & sleep 3; echo started' \
+    >/dev/null 2>&1 || true
+
+  # 5. Chromium at the pinned commit. The commit is asserted, not assumed: a
+  #    Flathub update between runs would otherwise silently change what the
+  #    gate tests.
+  local want_commit; want_commit="$(cat "$SCRIPT_DIR/fixtures/chromium.commit")"
+  finfo "Installing Chromium at the pinned commit ${want_commit:0:12}"
+  _ui_exec "$smoke" "$descriptor" "$admin_token" user \
+    "flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1;
+     flatpak install -y --user --noninteractive flathub org.chromium.Chromium >/dev/null 2>&1;
+     flatpak update -y --user --commit=$want_commit org.chromium.Chromium >/dev/null 2>&1 || true;
+     flatpak info --user --show-commit org.chromium.Chromium" \
+    > "$art/chromium-commit.txt" 2>&1 || true
+
+  local got_commit; got_commit="$(tr -d '[:space:]' < "$art/chromium-commit.txt" 2>/dev/null || true)"
+  if [ "$got_commit" != "$want_commit" ]; then
+    err "Chromium commit mismatch: guest has '${got_commit:0:12}', fixtures pin '${want_commit:0:12}'"
+    err "  a drifting browser silently changes what this gate proves"
+    _agent_screenshot "$qmp" "$art/fail-chromium-commit.ppm"
+    return 1
+  fi
+  finfo "Chromium commit verified: ${got_commit:0:12}"
+
+  finfo "Launching Chromium on the fixture page"
+  _ui_exec "$smoke" "$descriptor" "$admin_token" user \
+    'nohup flatpak run --socket=x11 --socket=session-bus \
+       --env=DISPLAY="$DISPLAY" --env=XAUTHORITY="$XAUTHORITY" --filesystem="$XAUTHORITY" \
+       --filesystem=/home/agent/e2e \
+       org.chromium.Chromium --ozone-platform=x11 --no-sandbox --disable-gpu \
+       --disable-dev-shm-usage --no-first-run --force-renderer-accessibility \
+       file:///home/agent/e2e/web/index.html >/home/agent/e2e/chromium.log 2>&1 &
+     sleep 20; echo launched' >/dev/null 2>&1 || true
+
+  _agent_screenshot "$qmp" "$art/10-fixtures-up.ppm"
+
+  # 6. Drive and assert, entirely through the public tools.
+  finfo "Running the UI suite"
+  local rc=0
+  "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" --mode ui || rc=$?
+
+  # 7. Framebuffer cross-check: what the agent SEES must be what the machine is
+  #    really scanning out. A capture that agreed with itself but not with QEMU
+  #    would mean the agent is driving something the console never shows.
+  local cua_png="$art/cua-desktop.png" qmp_ppm="$art/qmp-desktop.ppm"
+  _agent_screenshot "$qmp" "$qmp_ppm"
+  if [ -f "$cua_png" ] && [ -f "$qmp_ppm" ]; then
+    if python3 "$SCRIPT_DIR/frame_compare.py" "$cua_png" "$qmp_ppm" "$art/frame-compare.json"; then
+      finfo "Framebuffer comparison passed"
+    else
+      err "framebuffer comparison failed (see $art/frame-compare.json)"
+      rc=1
+    fi
+  else
+    err "missing capture(s) for the framebuffer comparison; skipping it"
+  fi
+
+  # 8. Diagnostics either way; a VNC-visible shot on failure.
+  _ui_exec "$smoke" "$descriptor" "$admin_token" user \
+    'cat /home/agent/e2e/gtk.log 2>/dev/null; echo ---; cat /home/agent/e2e/chromium.log 2>/dev/null | tail -50' \
+    > "$art/fixture-logs.txt" 2>&1 || true
+  if [ "$rc" -ne 0 ]; then
+    _agent_screenshot "$qmp" "$art/fail.ppm"
+  fi
+
+  [ -S "$qmp" ] && qmp_system_powerdown "$qmp" 2>/dev/null || true
+
+  if [ "$rc" -eq 0 ]; then
+    finfo "RESULT: PASS - GTK and Chromium driven through the public tools"
+    return 0
+  fi
+  err "RESULT: FAIL - the UI gate exited $rc (see $art)"
+  return "$rc"
+}
+
 cmd_stop() {
   # shellcheck source=lib/common.sh
   source "$SCRIPT_DIR/lib/common.sh"
@@ -1212,6 +1446,7 @@ case "$SUBCOMMAND" in
   install)  cmd_install  "$@"; exit $? ;;
   generic)  cmd_generic  "$@"; exit $? ;;
   recovery) cmd_recovery "$@"; exit $? ;;
+  ui)       cmd_ui       "$@"; exit $? ;;
   fixture)  cmd_fixture  "$@"; exit $? ;;
   stop)     cmd_stop     "$@"; exit $? ;;
   "" ) usage; exit 64 ;;
