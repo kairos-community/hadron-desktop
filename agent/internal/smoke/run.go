@@ -165,6 +165,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return res.ExitCode
 	case "upload":
 		report = suite.RunUpload(ctx, *localFile, *remoteFile, *uploadSHA)
+	case "ui":
+		report = suite.RunUI(ctx)
 	case "persist-write":
 		report = suite.RunPersistWrite(ctx, *marker)
 	case "persist-verify":
