@@ -60,6 +60,11 @@ type Suite struct {
 	UserBearer  string
 	AdminBearer string
 	CallTimeout time.Duration
+
+	// WarmupTimeout bounds how long a retryable SESSION_UNAVAILABLE is
+	// tolerated while the lazily-started computer-use backend comes up. Zero
+	// means the default.
+	WarmupTimeout time.Duration
 }
 
 func (s *Suite) callTimeout() time.Duration {
@@ -161,6 +166,45 @@ func (s *Suite) checkEightTools(ctx context.Context, userSess, adminSess *mcp.Cl
 		return failAssert(name, fmt.Sprintf("admin tool set is not the eight public tools (got %d)", len(adminNames)))
 	}
 	return pass(name, "both classes list exactly the eight public tools")
+}
+
+// retryWhileUnavailable runs attempt until it reports something other than a
+// retryable SESSION_UNAVAILABLE, or the budget runs out.
+//
+// The Cua backend starts LAZILY: the first computer_use or browser call is what
+// brings it up, so a suite that fires immediately after /readyz turns 200 can
+// legitimately race its startup. The contract already says what to do about
+// that -- SESSION_UNAVAILABLE is returned with Retryable set -- and a gate that
+// ignored its own advertised retry semantics would be asserting a stricter
+// contract than the one the appliance publishes.
+//
+// This is deliberately NOT a blanket retry: anything else, including a
+// non-retryable SESSION_UNAVAILABLE, is returned on the first try so a genuinely
+// dead session still fails fast.
+func (s *Suite) retryWhileUnavailable(ctx context.Context, attempt func() api.ResultMeta) api.ResultMeta {
+	deadline := time.Now().Add(s.warmupBudget())
+	for {
+		meta := attempt()
+		if meta.Code != api.CodeSessionUnavailable || !meta.Retryable {
+			return meta
+		}
+		if time.Now().After(deadline) {
+			return meta
+		}
+		select {
+		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
+			return meta
+		}
+	}
+}
+
+// warmupBudget bounds how long the lazily-started backend is given.
+func (s *Suite) warmupBudget() time.Duration {
+	if s.WarmupTimeout > 0 {
+		return s.WarmupTimeout
+	}
+	return 60 * time.Second
 }
 
 // checkUserUnprivileged proves the user's terminal runs as a non-root account
@@ -299,11 +343,20 @@ func (s *Suite) checkFilesRoundTrip(ctx context.Context, sess *mcp.ClientSession
 func (s *Suite) checkComputerUseCapture(ctx context.Context, sess *mcp.ClientSession) CheckResult {
 	const name = "computer_use_capture"
 	var out api.ComputerUseOutput
-	if err := s.callInto(ctx, sess, api.ToolComputerUse, api.ComputerUseInput{Action: api.ActionCapture}, &out); err != nil {
+	var callErr error
+	meta := s.retryWhileUnavailable(ctx, func() api.ResultMeta {
+		out = api.ComputerUseOutput{}
+		callErr = s.callInto(ctx, sess, api.ToolComputerUse, api.ComputerUseInput{Action: api.ActionCapture}, &out)
+		if callErr != nil {
+			return api.ResultMeta{}
+		}
+		return out.ResultMeta
+	})
+	if callErr != nil {
 		return failTransport(name, "computer_use call failed")
 	}
-	if out.Code != "" {
-		return failAssert(name, fmt.Sprintf("capture reported %s", out.Code))
+	if meta.Code != "" {
+		return failAssert(name, fmt.Sprintf("capture reported %s", meta.Code))
 	}
 	if out.ImageBase64 == "" {
 		return failAssert(name, "capture returned no image")
@@ -323,9 +376,19 @@ func (s *Suite) checkComputerUseCapture(ctx context.Context, sess *mcp.ClientSes
 func (s *Suite) checkBrowserReachable(ctx context.Context, sess *mcp.ClientSession) CheckResult {
 	const name = "browser_reachable"
 	var out api.BrowserOutput
-	if err := s.callInto(ctx, sess, api.ToolBrowser, api.BrowserInput{Action: api.BrowserSnapshot}, &out); err != nil {
+	var callErr error
+	meta := s.retryWhileUnavailable(ctx, func() api.ResultMeta {
+		out = api.BrowserOutput{}
+		callErr = s.callInto(ctx, sess, api.ToolBrowser, api.BrowserInput{Action: api.BrowserSnapshot}, &out)
+		if callErr != nil {
+			return api.ResultMeta{}
+		}
+		return out.ResultMeta
+	})
+	if callErr != nil {
 		return failTransport(name, "browser call failed")
 	}
+	out.ResultMeta = meta
 	switch out.Code {
 	case "":
 		return pass(name, fmt.Sprintf("snapshot returned %d elements from %s", len(out.Elements), out.URL))
