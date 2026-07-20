@@ -72,7 +72,7 @@ func newFixture(t *testing.T, opts ...func(*Config, *fixture)) *fixture {
 // Tool contract
 // ---------------------------------------------------------------------------
 
-func TestExactSevenToolsRegistered(t *testing.T) {
+func TestExactEightToolsRegistered(t *testing.T) {
 	f := newFixture(t)
 	session := connectMCP(t, f.g, f.creds.userBearer)
 
@@ -228,7 +228,7 @@ func TestUserRoutesAllToSession(t *testing.T) {
 	}
 }
 
-func TestAdminRoutesComputerUseToSessionAndSixToRoot(t *testing.T) {
+func TestAdminRoutesSeatToolsToSessionAndSixToRoot(t *testing.T) {
 	f := newFixture(t)
 	session := connectMCP(t, f.g, f.creds.adminBearer)
 
@@ -236,9 +236,19 @@ func TestAdminRoutesComputerUseToSessionAndSixToRoot(t *testing.T) {
 		callTool(t, session, tool, validArgs(tool))
 	}
 
+	// computer_use and browser both drive the agent's own desktop seat, so an
+	// admin bearer must NOT get them root-owned: they stay on the session
+	// broker for every class. The other six OS tools go to the root helper.
+	seatTools := map[string]bool{api.ToolComputerUse: true, api.ToolBrowser: true}
+
 	sessionCalls := f.session.recorded()
-	if len(sessionCalls) != 1 || sessionCalls[0].tool != api.ToolComputerUse {
-		t.Fatalf("session calls = %+v, want only computer_use", sessionCalls)
+	if len(sessionCalls) != len(seatTools) {
+		t.Fatalf("session calls = %+v, want exactly %v", sessionCalls, seatTools)
+	}
+	for _, c := range sessionCalls {
+		if !seatTools[c.tool] {
+			t.Fatalf("unexpected session call %q, want only %v", c.tool, seatTools)
+		}
 	}
 
 	rootCalls := f.root.recorded()
@@ -248,8 +258,8 @@ func TestAdminRoutesComputerUseToSessionAndSixToRoot(t *testing.T) {
 	// Every root call must carry the forwarded admin bearer verbatim.
 	wantHeader := "Bearer " + f.creds.adminBearer
 	for _, c := range rootCalls {
-		if c.tool == api.ToolComputerUse {
-			t.Fatalf("computer_use must not reach root")
+		if seatTools[c.tool] {
+			t.Fatalf("%s must not reach root: the browser and desktop always run as the unprivileged agent", c.tool)
 		}
 		if c.authHeader != wantHeader {
 			t.Fatalf("root call %s authHeader = %q, want forwarded admin bearer", c.tool, c.authHeader)
@@ -557,6 +567,8 @@ func validArgs(tool string) any {
 		return api.SearchFilesInput{Path: "/tmp", Query: "x"}
 	case api.ToolWriteFile:
 		return api.WriteFileInput{Path: "/tmp/x", Content: "y"}
+	case api.ToolBrowser:
+		return api.BrowserInput{Action: api.BrowserSnapshot}
 	case api.ToolPatch:
 		return api.PatchInput{Files: []api.PatchFile{{Path: "/tmp/x", Replacements: []api.PatchReplacement{{Old: "a", New: "b"}}}}}
 	default:

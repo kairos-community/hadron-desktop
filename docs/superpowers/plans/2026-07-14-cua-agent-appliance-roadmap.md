@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship a separate XLibre/i3-based Hadron agent ISO that boots a visible desktop, exposes exactly seven authenticated MCP tools, installs safely in interactive or CI mode, and supplies a reusable visible-VM UI test gate.
+**Goal:** Ship a separate XLibre/i3-based Hadron agent ISO that boots a visible desktop, exposes exactly eight authenticated MCP tools, installs safely in interactive or CI mode, and supplies a reusable visible-VM UI test gate.
 
 **Architecture:** Implement the feature in four release-blocking checkpoints. First prove native Cua/XLibre compatibility in a real graphical QEMU VM. Then build one static Go service binary with gateway, session-broker, root-helper, provisioning, and local-control subcommands. Add those components as a separate overlay on the existing i3 image. Finally turn the graphical VM into a stable downstream fixture and make all compatibility, privilege, install, recovery, and UI checks gate the third release ISO.
 
@@ -44,7 +44,7 @@ The phase plans are sequential. Each phase is a usable checkpoint and must be gr
 
 - [ ] Execute every checkbox in the Phase 2 plan after Phase 1 is green.
 - [ ] Confirm `go test -race ./...` passes from `agent/`.
-- [ ] Confirm a built binary has no dynamic dependencies and its MCP client lists exactly the seven approved names.
+- [ ] Confirm a built binary has no dynamic dependencies and its MCP client lists exactly the eight approved names.
 
 ## Task 3: Complete Phase 3
 

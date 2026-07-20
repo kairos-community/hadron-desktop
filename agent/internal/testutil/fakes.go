@@ -127,6 +127,17 @@ func (c *FakeComputer) ComputerUse(context.Context, api.ComputerUseInput) (api.C
 	return api.ComputerUseOutput{}, nil
 }
 
+func (c *FakeComputer) Browser(context.Context, api.BrowserInput) (api.BrowserOutput, error) {
+	if c.Unavailable {
+		return api.BrowserOutput{ResultMeta: api.ResultMeta{
+			Code:      api.CodeSessionUnavailable,
+			Message:   "desktop session unavailable",
+			Retryable: true,
+		}}, nil
+	}
+	return api.BrowserOutput{}, nil
+}
+
 func (c *FakeComputer) Ready() bool  { return !c.Unavailable }
 func (c *FakeComputer) Stop()        {}
 func (c *FakeComputer) Close() error { return nil }

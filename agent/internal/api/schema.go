@@ -1,5 +1,5 @@
 // Package api freezes the public MCP contract exposed by the hadron-agent
-// service binary: the seven authenticated tool names, their typed
+// service binary: the eight authenticated tool names, their typed
 // input/output schemas (inferred by the MCP SDK from the Go types below),
 // and the stable error codes every tool result may carry.
 //
@@ -18,7 +18,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Tool names. The sorted set of these seven values is the entire public
+// Tool names. The sorted set of these eight values is the entire public
 // surface of hadron-agent; no eighth tool may be added without a deliberate,
 // reviewed contract change.
 const (
@@ -29,9 +29,10 @@ const (
 	ToolSearchFiles = "search_files"
 	ToolWriteFile   = "write_file"
 	ToolPatch       = "patch"
+	ToolBrowser     = "browser"
 )
 
-// ToolNames returns the sorted list of the seven public tool names.
+// ToolNames returns the sorted list of the eight public tool names.
 func ToolNames() []string {
 	names := []string{
 		ToolComputerUse,
@@ -41,6 +42,7 @@ func ToolNames() []string {
 		ToolSearchFiles,
 		ToolWriteFile,
 		ToolPatch,
+		ToolBrowser,
 	}
 	sort.Strings(names)
 	return names
@@ -66,6 +68,10 @@ const (
 	// CodeSessionUnavailable means the desktop/session backing computer_use
 	// (or the process/file session) is not currently reachable.
 	CodeSessionUnavailable ErrorCode = "SESSION_UNAVAILABLE"
+	// CodeBrowserUnavailable means no browser with a reachable CDP endpoint
+	// is running. It is deliberately distinct from CodeSessionUnavailable:
+	// the desktop session can be perfectly healthy while no browser is up.
+	CodeBrowserUnavailable ErrorCode = "BROWSER_UNAVAILABLE"
 	// CodeNotFound means the referenced resource (file, process, window,
 	// element) does not exist.
 	CodeNotFound ErrorCode = "NOT_FOUND"
@@ -822,14 +828,14 @@ type PatchOutput struct {
 // Registration
 // ---------------------------------------------------------------------------
 
-// RegisterAll registers all seven public tools on s. Each tool's input schema
+// RegisterAll registers all eight public tools on s. Each tool's input schema
 // comes from ToolFor, which infers it from the Go types above and then
 // publishes their closed value sets as JSON Schema enums; output schemas are
 // still inferred by the SDK. Every
 // handler here is a stub: it validates its input where this package defines
 // a Validate method, and otherwise reports CodeInternal "not implemented".
 // Later Phase-2 tasks replace these stubs with real behavior; this function
-// exists so the seven-tool contract is registrable and testable today.
+// exists so the eight-tool contract is registrable and testable today.
 func RegisterAll(s *mcp.Server) {
 	mcp.AddTool(s, ToolFor[ComputerUseInput](ToolComputerUse, "Drive the desktop: capture, accessibility, click, double_click, drag, scroll, type, key, wait, list_applications, focus_application."), stubComputerUse)
 
@@ -844,6 +850,8 @@ func RegisterAll(s *mcp.Server) {
 	mcp.AddTool(s, ToolFor[WriteFileInput](ToolWriteFile, "Write (or overwrite) a file."), stubWriteFile)
 
 	mcp.AddTool(s, ToolFor[PatchInput](ToolPatch, "Apply exact-match text replacements to one or more files."), stubPatch)
+
+	mcp.AddTool(s, ToolFor[BrowserInput](ToolBrowser, BrowserToolDescription), stubBrowser)
 }
 
 func stubComputerUse(_ context.Context, _ *mcp.CallToolRequest, in ComputerUseInput) (*mcp.CallToolResult, ComputerUseOutput, error) {
@@ -893,4 +901,11 @@ func stubPatch(_ context.Context, _ *mcp.CallToolRequest, in PatchInput) (*mcp.C
 		return nil, PatchOutput{ResultMeta: errorMeta(CodeInvalidArgument, err.Error(), false)}, nil
 	}
 	return nil, PatchOutput{ResultMeta: notImplementedMeta(ToolPatch)}, nil
+}
+
+func stubBrowser(_ context.Context, _ *mcp.CallToolRequest, in BrowserInput) (*mcp.CallToolResult, BrowserOutput, error) {
+	if err := in.Validate(); err != nil {
+		return nil, BrowserOutput{ResultMeta: errorMeta(CodeInvalidArgument, err.Error(), false)}, nil
+	}
+	return nil, BrowserOutput{ResultMeta: notImplementedMeta(ToolBrowser)}, nil
 }

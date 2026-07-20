@@ -158,6 +158,17 @@ func (c *fakeComputer) ComputerUse(_ context.Context, _ api.ComputerUseInput) (a
 	return api.ComputerUseOutput{ImageBase64: "img"}, nil
 }
 
+func (c *fakeComputer) Browser(_ context.Context, _ api.BrowserInput) (api.BrowserOutput, error) {
+	c.mu.Lock()
+	c.uses++
+	ready := c.ready
+	c.mu.Unlock()
+	if !ready {
+		return api.BrowserOutput{ResultMeta: api.ResultMeta{Code: api.CodeSessionUnavailable, Message: "cua down", Retryable: true}}, nil
+	}
+	return api.BrowserOutput{URL: "https://example.test/", Title: "fake page"}, nil
+}
+
 func (c *fakeComputer) Ready() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -200,6 +211,9 @@ type seatComputer struct{ a *cua.Adapter }
 
 func (s seatComputer) ComputerUse(ctx context.Context, in api.ComputerUseInput) (api.ComputerUseOutput, error) {
 	return s.a.ComputerUse(ctx, in)
+}
+func (s seatComputer) Browser(ctx context.Context, in api.BrowserInput) (api.BrowserOutput, error) {
+	return s.a.Browser(ctx, in)
 }
 func (s seatComputer) Ready() bool  { return true }
 func (s seatComputer) Stop()        {}

@@ -1,7 +1,7 @@
 // Package smoke implements the public MCP smoke/privilege client for the
 // Hadron Cua agent appliance. It drives the appliance's public HTTPS MCP
-// gateway using ONLY the seven public MCP tools and asserts both the public
-// contract (exactly seven tools, every tool callable) and the privilege
+// gateway using ONLY the eight public MCP tools and asserts both the public
+// contract (exactly eight tools, every tool callable) and the privilege
 // boundaries that separate the unprivileged `agent` user from admin/root.
 //
 // The package is deliberately split so its assertion logic can be exercised

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build one static Hadron agent binary that exposes exactly seven authenticated MCP tools while preserving the unprivileged desktop boundary and independently validating optional administrator access.
+**Goal:** Build one static Hadron agent binary that exposes exactly eight authenticated MCP tools while preserving the unprivileged desktop boundary and independently validating optional administrator access.
 
 **Architecture:** One binary has `gateway`, `session`, `root-helper`, `control`, `status`, and later `provision` subcommands. The HTTPS gateway is the only listener. It validates bearer credentials and proxies fixed-schema calls over permissioned Unix HTTP sockets. The agent-owned session broker implements shell, PTY process, file, and serialized Cua operations. The optional root helper implements only OS tools and revalidates the raw admin bearer. Streamable HTTP is stateless so emergency pause can cancel all active work without hidden SDK session state.
 
@@ -27,7 +27,7 @@
 **Created under `agent/`:**
 
 - `cmd/hadron-agent/main.go`, `main_test.go` — subcommand dispatch and exit behavior.
-- `internal/api/schema.go`, `schema_test.go` — seven stable public input/output types and error codes.
+- `internal/api/schema.go`, `schema_test.go` — eight stable public input/output types and error codes.
 - `internal/auth/token.go`, `token_test.go` — token generation, digest verification, rotation, credential context.
 - `internal/files/service.go`, `service_test.go` — bounded read/search/write/patch.
 - `internal/process/manager.go`, `cgroup.go`, and tests — shell, PTY processes, delegated cgroups, ring buffers, cleanup.
@@ -151,7 +151,7 @@ The RPC package accepts already-created listeners; systemd/file permissions are 
 
 ## Task 7: Build the unprivileged session broker
 
-- [ ] Compose file, process, Cua adapter, and control state through constructor injection. Register all seven tools internally, but return `SESSION_UNAVAILABLE` only for `computer_use` when Cua is down; shell/files remain live.
+- [ ] Compose file, process, Cua adapter, and control state through constructor injection. Register all eight tools internally, but return `SESSION_UNAVAILABLE` only for `computer_use` when Cua is down; shell/files remain live.
 
 - [ ] On pause, atomically reject new calls, cancel active calls, close/restart the Cua child only after resume, and terminate every MCP-owned process group. Concurrent shell/file calls use a semaphore of eight; computer calls use one seat lock.
 

@@ -8,11 +8,12 @@
 //
 //   - verifies the presented bearer (via package auth) and admits both the
 //     user and admin classes to /mcp;
-//   - routes by class and tool -- an ordinary user bearer sends ALL seven OS
+//   - routes by class and tool -- an ordinary user bearer sends ALL eight
 //     tools to the unprivileged session broker; an admin bearer sends
-//     computer_use to the session broker too, but the other six OS tools to
-//     the privileged root helper, forwarding the raw Authorization header so
-//     the root helper re-verifies it independently;
+//     computer_use and browser to the session broker too (the desktop and the
+//     browser always run as the unprivileged agent), but the other six OS
+//     tools to the privileged root helper, forwarding the raw Authorization
+//     header so the root helper re-verifies it independently;
 //   - enforces the emergency pause and per-generation cancellation owned by
 //     package control;
 //   - bounds request bodies, serialized responses, concurrent calls, and open
@@ -335,7 +336,7 @@ func (g *Gateway) handleReadyz(w http.ResponseWriter, r *http.Request) {
 // Tool registration and routing
 // ---------------------------------------------------------------------------
 
-// registerTools installs the seven public tools on server, each backed by a
+// registerTools installs the eight public tools on server, each backed by a
 // routing handler. The input/output types are package api's, so the JSON
 // schema the SDK infers is byte-for-byte the frozen contract.
 func (g *Gateway) registerTools(server *mcp.Server) {
@@ -360,6 +361,9 @@ func (g *Gateway) registerTools(server *mcp.Server) {
 	addRoute[api.PatchInput, api.PatchOutput](server, g, api.ToolPatch,
 		"Apply exact-match text replacements to one or more files.",
 		func(o *api.PatchOutput) *api.ResultMeta { return &o.ResultMeta })
+	addRoute[api.BrowserInput, api.BrowserOutput](server, g, api.ToolBrowser,
+		api.BrowserToolDescription,
+		func(o *api.BrowserOutput) *api.ResultMeta { return &o.ResultMeta })
 }
 
 // addRoute registers one tool whose handler routes to the appropriate broker.
@@ -452,10 +456,14 @@ func route[Out any](ctx context.Context, g *Gateway, req *mcp.CallToolRequest, t
 // pick selects the broker for (class, tool) and returns the raw Authorization
 // header to forward. An admin bearer routes the six privileged OS tools to the
 // root helper, forwarding the header verbatim so the helper re-verifies it;
-// computer_use and every user-class call go to the session broker with no
-// forwarded header.
+// computer_use, browser, and every user-class call go to the session broker
+// with no forwarded header.
+//
+// browser is deliberately on the session side for BOTH classes: an
+// administrator bearer must not get a root-owned browser. The browser always
+// runs as the unprivileged agent, in the agent's own session.
 func (g *Gateway) pick(class appauth.Class, tool string, req *mcp.CallToolRequest) (brokerCaller, string, error) {
-	if class == appauth.ClassAdmin && tool != api.ToolComputerUse {
+	if class == appauth.ClassAdmin && tool != api.ToolComputerUse && tool != api.ToolBrowser {
 		if g.root == nil {
 			return nil, "", errors.New("gateway: no root broker configured")
 		}

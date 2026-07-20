@@ -78,6 +78,13 @@ func TestPublishedSchemaAdvertisesEveryClosedSet(t *testing.T) {
 
 	assertEnum(t, propertyEnum[api.SearchFilesInput](t, "mode"),
 		[]string{"name", "content"}, "search_files.mode")
+
+	assertEnum(t, propertyEnum[api.BrowserInput](t, "action"), []string{
+		"navigate", "snapshot", "click", "type", "press", "scroll", "back", "text",
+	}, "browser.action")
+
+	assertEnum(t, propertyEnum[api.BrowserInput](t, "direction"),
+		[]string{"up", "down", "left", "right"}, "browser.direction")
 }
 
 // TestEveryAdvertisedActionIsAccepted ties the published schema back to the
@@ -96,6 +103,12 @@ func TestEveryAdvertisedActionIsAccepted(t *testing.T) {
 		in := api.ProcessInput{Action: action}
 		if err := in.Validate(); err != nil && strings.Contains(err.Error(), "invalid action") {
 			t.Errorf("advertised process action %q is rejected as unknown: %v", action, err)
+		}
+	}
+	for _, action := range api.BrowserActions {
+		in := api.BrowserInput{Action: action}
+		if err := in.Validate(); err != nil && strings.Contains(err.Error(), "unknown action") {
+			t.Errorf("advertised browser action %q is rejected as unknown: %v", action, err)
 		}
 	}
 }

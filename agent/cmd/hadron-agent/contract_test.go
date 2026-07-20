@@ -14,7 +14,7 @@ package main
 //
 // Only the four leaf executors (files, process, Cua, identity) are fakes, so the
 // test is hermetic: no cua-driver, no process spawning, no root. It asserts the
-// public contract: exactly seven tools; every tool callable; both credential
+// public contract: exactly eight tools; every tool callable; both credential
 // classes; genuine root re-verification of the forwarded admin bearer; a pause
 // cancels an active call as PAUSED; and health is fully redacted.
 
@@ -274,10 +274,10 @@ func buildStack(t *testing.T, tweak func(*stackConfig)) *stack {
 }
 
 // ---------------------------------------------------------------------------
-// Exactly seven tools
+// Exactly eight tools
 // ---------------------------------------------------------------------------
 
-func TestContractExactlySevenTools(t *testing.T) {
+func TestContractExactlyEightTools(t *testing.T) {
 	s := buildStack(t, nil)
 	session := connectMCP(t, s.g, s.creds.userBearer)
 
@@ -325,8 +325,9 @@ func TestContractCallEachToolAdminClass(t *testing.T) {
 			t.Fatalf("admin %s returned code %q, want success", tool, meta.Code)
 		}
 		// The six OS tools execute in the root helper under the root identity;
-		// computer_use executes in the unprivileged session broker.
-		if tool == api.ToolComputerUse {
+		// computer_use and browser execute in the unprivileged session broker,
+		// so an admin bearer never gets a root-owned desktop or browser.
+		if tool == api.ToolComputerUse || tool == api.ToolBrowser {
 			continue
 		}
 		if meta.Identity == nil || meta.Identity.User != "root" || meta.Identity.UID != 0 {

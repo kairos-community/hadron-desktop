@@ -122,11 +122,12 @@ func (s *Suite) RunContract(ctx context.Context) Report {
 	defer adminSess.Close()
 
 	r.Checks = append(r.Checks,
-		s.checkSevenTools(ctx, userSess, adminSess),
+		s.checkEightTools(ctx, userSess, adminSess),
 		s.checkUserUnprivileged(ctx, userSess),
 		s.checkProcessPTYCgroup(ctx, userSess),
 		s.checkFilesRoundTrip(ctx, userSess),
 		s.checkComputerUseCapture(ctx, userSess),
+		s.checkBrowserReachable(ctx, userSess),
 		s.checkRootReadDenied(ctx, userSess),
 		s.checkDockerSocketDenied(ctx, userSess),
 		s.checkAdminIdentityRoot(ctx, adminSess),
@@ -139,10 +140,11 @@ func (s *Suite) RunContract(ctx context.Context) Report {
 // Checks
 // ---------------------------------------------------------------------------
 
-// checkSevenTools proves both credential classes list exactly the seven public
-// tool names and that the two lists are identical (brief items 1 and 10).
-func (s *Suite) checkSevenTools(ctx context.Context, userSess, adminSess *mcp.ClientSession) CheckResult {
-	const name = "seven_tools_both_classes"
+// checkEightTools proves both credential classes list exactly the eight public
+// tool names and that the two lists are identical (brief items 1 and 10). The
+// eighth, browser, was added by the 2026-07-20 amendment.
+func (s *Suite) checkEightTools(ctx context.Context, userSess, adminSess *mcp.ClientSession) CheckResult {
+	const name = "eight_tools_both_classes"
 	userNames, err := listToolNames(ctx, userSess, s.callTimeout())
 	if err != nil {
 		return failTransport(name, "listing user tools failed")
@@ -153,12 +155,12 @@ func (s *Suite) checkSevenTools(ctx context.Context, userSess, adminSess *mcp.Cl
 	}
 	want := api.ToolNames()
 	if !equalStrings(userNames, want) {
-		return failAssert(name, fmt.Sprintf("user tool set is not the seven public tools (got %d)", len(userNames)))
+		return failAssert(name, fmt.Sprintf("user tool set is not the eight public tools (got %d)", len(userNames)))
 	}
 	if !equalStrings(adminNames, want) {
-		return failAssert(name, fmt.Sprintf("admin tool set is not the seven public tools (got %d)", len(adminNames)))
+		return failAssert(name, fmt.Sprintf("admin tool set is not the eight public tools (got %d)", len(adminNames)))
 	}
-	return pass(name, "both classes list exactly the seven public tools")
+	return pass(name, "both classes list exactly the eight public tools")
 }
 
 // checkUserUnprivileged proves the user's terminal runs as a non-root account
@@ -307,6 +309,31 @@ func (s *Suite) checkComputerUseCapture(ctx context.Context, sess *mcp.ClientSes
 		return failAssert(name, "capture returned no image")
 	}
 	return pass(name, fmt.Sprintf("captured a %d-byte desktop image", len(out.ImageBase64)))
+}
+
+// checkBrowserReachable proves the browser tool is wired end to end: the call
+// reaches the session broker, resolves a window (or reports that there is no
+// browser), and comes back with a structured result.
+//
+// BROWSER_UNAVAILABLE is a PASS here on purpose. The appliance does not ship a
+// running browser, so demanding a live page would make this check assert the
+// fixture's contents rather than the tool's plumbing -- and it is exactly the
+// code that proves the resolve path ran. A transport failure, an unknown tool,
+// or any other code is still a failure.
+func (s *Suite) checkBrowserReachable(ctx context.Context, sess *mcp.ClientSession) CheckResult {
+	const name = "browser_reachable"
+	var out api.BrowserOutput
+	if err := s.callInto(ctx, sess, api.ToolBrowser, api.BrowserInput{Action: api.BrowserSnapshot}, &out); err != nil {
+		return failTransport(name, "browser call failed")
+	}
+	switch out.Code {
+	case "":
+		return pass(name, fmt.Sprintf("snapshot returned %d elements from %s", len(out.Elements), out.URL))
+	case api.CodeBrowserUnavailable:
+		return pass(name, "browser tool is reachable and reports no browser window is open")
+	default:
+		return failAssert(name, fmt.Sprintf("browser snapshot reported %s", out.Code))
+	}
 }
 
 // rootOnlyProbeFile is the read target for checkRootReadDenied. Unlike

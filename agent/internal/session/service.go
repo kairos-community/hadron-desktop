@@ -1,6 +1,6 @@
 // Package session implements the UNPRIVILEGED session broker: the component
 // that composes the four Phase-2 executors (files, process, the Cua adapter,
-// and a control/pause state) into one object that serves the seven public MCP
+// and a control/pause state) into one object that serves the eight public MCP
 // tools defined by package api, under the identity of the process it runs in.
 //
 // It owns four cross-cutting behaviors the individual executors do not:
@@ -85,6 +85,11 @@ type Computer interface {
 	// backend as needed. It returns api.CodeSessionUnavailable in the result
 	// (never a Go error) when the desktop session is not reachable.
 	ComputerUse(ctx context.Context, in api.ComputerUseInput) (api.ComputerUseOutput, error)
+	// Browser executes a browser action against the page in a browser window,
+	// starting or reusing the backend the same way ComputerUse does. It shares
+	// the backend's single seat, so a snapshot cannot be interleaved with a
+	// click on a page that has since moved on.
+	Browser(ctx context.Context, in api.BrowserInput) (api.BrowserOutput, error)
 	// Ready reports whether a computer_use call could currently reach a live
 	// desktop session.
 	Ready() bool
@@ -416,6 +421,18 @@ func (b *Broker) ComputerUse(ctx context.Context, in api.ComputerUseInput) (api.
 		}), nil
 }
 
+// Browser serves the browser tool. Like ComputerUse it is NOT gated by the
+// shell/file semaphore: the Cua adapter behind Computer funnels both through
+// the same single seat, so the broker does not double-serialize them.
+func (b *Broker) Browser(ctx context.Context, in api.BrowserInput) (api.BrowserOutput, error) {
+	return guard(b, ctx, false,
+		func(o *api.BrowserOutput) *api.ResultMeta { return &o.ResultMeta },
+		func(mctx context.Context) api.BrowserOutput {
+			out, _ := b.computer.Browser(mctx, in)
+			return out
+		}), nil
+}
+
 // Terminal serves the terminal tool.
 func (b *Broker) Terminal(ctx context.Context, in api.TerminalInput) (api.TerminalOutput, error) {
 	return guard(b, ctx, true,
@@ -553,6 +570,11 @@ func (b *Broker) Call(ctx context.Context, tool string, args json.RawMessage) (*
 			out, _ := b.Patch(ctx, in)
 			return out
 		})
+	case api.ToolBrowser:
+		return dispatchCall(args, func(in api.BrowserInput) any {
+			out, _ := b.Browser(ctx, in)
+			return out
+		})
 	default:
 		return toResult(api.ResultMeta{
 			Code:    api.CodeInvalidArgument,
@@ -667,6 +689,15 @@ func (c *CuaComputer) ComputerUse(ctx context.Context, in api.ComputerUseInput) 
 	// The adapter itself returns SESSION_UNAVAILABLE if the child died after we
 	// handed back a reference (e.g. a reconnect is still in flight).
 	return adapter.ComputerUse(ctx, in)
+}
+
+// Browser ensures a live backend and forwards the call to the adapter.
+func (c *CuaComputer) Browser(ctx context.Context, in api.BrowserInput) (api.BrowserOutput, error) {
+	adapter, meta := c.ensure(ctx)
+	if meta.Code != "" {
+		return api.BrowserOutput{ResultMeta: meta}, nil
+	}
+	return adapter.Browser(ctx, in)
 }
 
 // ensure returns a ready adapter, starting the child on first use. It returns a

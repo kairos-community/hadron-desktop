@@ -377,9 +377,16 @@ func (a *Adapter) wait(ctx context.Context, in api.ComputerUseInput) (api.Comput
 // pass readOnly=false, which narrows Retryable to only the case classifyErr
 // can prove the call never reached the transport.
 func (a *Adapter) invoke(ctx context.Context, name string, args map[string]any, readOnly bool) (*mcp.CallToolResult, api.ResultMeta) {
+	return a.invokeAs(ctx, name, args, readOnly, "computer_use")
+}
+
+// invokeAs is invoke with an explicit tool label for the error message, so a
+// failure raised while serving the browser tool does not report itself as a
+// computer_use failure.
+func (a *Adapter) invokeAs(ctx context.Context, name string, args map[string]any, readOnly bool, label string) (*mcp.CallToolResult, api.ResultMeta) {
 	result, err := a.caller.Call(ctx, name, args)
 	if err != nil {
-		return nil, classifyErr(err, readOnly)
+		return nil, classifyErr(err, readOnly, label)
 	}
 	if result != nil && result.IsError {
 		return result, metaFor(api.CodeInternal, fmt.Sprintf("%s: %s", name, contentText(result)), false)
@@ -405,12 +412,12 @@ func (a *Adapter) invoke(ctx context.Context, name string, args map[string]any, 
 // have no such hazard: replaying a capture/accessibility/list/focus read
 // cannot double-execute a user-visible effect, so they stay Retryable
 // regardless of err.
-func classifyErr(err error, readOnly bool) api.ResultMeta {
+func classifyErr(err error, readOnly bool, label string) api.ResultMeta {
 	retryable := readOnly || errors.Is(err, ErrDisconnected)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return metaFor(api.CodeDeadlineExceeded, "computer_use: deadline exceeded: "+err.Error(), retryable)
+		return metaFor(api.CodeDeadlineExceeded, label+": deadline exceeded: "+err.Error(), retryable)
 	}
-	return metaFor(api.CodeSessionUnavailable, "computer_use: Cua session unavailable: "+err.Error(), retryable)
+	return metaFor(api.CodeSessionUnavailable, label+": Cua session unavailable: "+err.Error(), retryable)
 }
 
 func metaFor(code api.ErrorCode, message string, retryable bool) api.ResultMeta {

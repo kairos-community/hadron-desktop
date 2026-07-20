@@ -76,6 +76,7 @@ var enumRegistry = map[reflect.Type][]any{
 	reflect.TypeFor[ProcessAction]():     toAny(ProcessActions),
 	reflect.TypeFor[FileEncoding]():      toAny(FileEncodings),
 	reflect.TypeFor[SearchMode]():        toAny(SearchModes),
+	reflect.TypeFor[BrowserAction]():     toAny(BrowserActions),
 }
 
 // toAny widens a slice of enum constants to the []any that JSON Schema's enum

@@ -215,6 +215,9 @@ type fakeComputer struct{ image string }
 func (c *fakeComputer) ComputerUse(context.Context, api.ComputerUseInput) (api.ComputerUseOutput, error) {
 	return api.ComputerUseOutput{ImageBase64: c.image}, nil
 }
+func (c *fakeComputer) Browser(context.Context, api.BrowserInput) (api.BrowserOutput, error) {
+	return api.BrowserOutput{URL: "https://example.test/", Title: "fake page"}, nil
+}
 func (c *fakeComputer) Ready() bool  { return true }
 func (c *fakeComputer) Stop()        {}
 func (c *fakeComputer) Close() error { return nil }
@@ -420,9 +423,10 @@ func TestContractSuitePasses(t *testing.T) {
 	if got := r.Outcome(); got != ExitPass {
 		t.Fatalf("Outcome = %d, want %d (pass)", got, ExitPass)
 	}
-	// The suite must have exercised all ten brief items across nine checks.
-	if len(r.Checks) != 9 {
-		t.Fatalf("ran %d checks, want 9", len(r.Checks))
+	// The suite must have exercised all ten brief items across ten checks
+	// (the tenth, browser_reachable, came with the 2026-07-20 amendment).
+	if len(r.Checks) != 10 {
+		t.Fatalf("ran %d checks, want 10", len(r.Checks))
 	}
 }
 

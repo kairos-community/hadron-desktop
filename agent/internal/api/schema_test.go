@@ -11,9 +11,11 @@ import (
 )
 
 // TestToolNamesSortedSet is the contract test the brief calls out explicitly:
-// hadron-agent exposes exactly these seven tools, no more, no fewer.
+// hadron-agent exposes exactly these eight tools, no more, no fewer. The
+// eighth, browser, was added by the 2026-07-20 amendment.
 func TestToolNamesSortedSet(t *testing.T) {
 	want := []string{
+		"browser",
 		"computer_use",
 		"patch",
 		"process",
@@ -33,10 +35,10 @@ func TestToolNamesSortedSet(t *testing.T) {
 	}
 }
 
-// TestRegisterAllExposesExactlySevenTools proves the names above are not
+// TestRegisterAllExposesExactlyEightTools proves the names above are not
 // just constants sitting in this package: registering them on a real
 // *mcp.Server and listing tools over the wire yields the same sorted set.
-func TestRegisterAllExposesExactlySevenTools(t *testing.T) {
+func TestRegisterAllExposesExactlyEightTools(t *testing.T) {
 	ctx := context.Background()
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "hadron-agent-test", Version: "v0.0.0"}, nil)
