@@ -29,66 +29,95 @@ alone.
 
 ### BT-1: api contract
 
-- [ ] Add `ToolBrowser`, the `BrowserAction` closed set, `BrowserInput`,
+- [x] Add `ToolBrowser`, the `BrowserAction` closed set, `BrowserInput`,
       `BrowserOutput`, and `BrowserElement` to `internal/api`.
-- [ ] `Validate` enforces per-action fields: `url` for navigate, `ref` for
+- [x] `Validate` enforces per-action fields: `url` for navigate, `ref` for
       click/type, `text` for type, `key` for press, and rejects fields
       irrelevant to the action (the convention `ComputerUseInput` already uses).
-- [ ] Register `BrowserAction` in the enum registry so the action set is
+- [x] Register `BrowserAction` in the enum registry so the action set is
       published as a JSON Schema enum, not merely enforced.
-- [ ] Add `CodeBrowserUnavailable` = `BROWSER_UNAVAILABLE`, distinct from
+- [x] Add `CodeBrowserUnavailable` = `BROWSER_UNAVAILABLE`, distinct from
       `SESSION_UNAVAILABLE` (the desktop session is up; no browser with a
       reachable CDP endpoint is).
-- [ ] `ToolNames` returns eight; `RegisterAll` registers the tool.
-- [ ] Tests pin the published enum, the validation matrix, and the new code.
+- [x] `ToolNames` returns eight; `RegisterAll` registers the tool.
+- [x] Tests pin the published enum, the validation matrix, and the new code.
 
 ### BT-2: Cua adapter
 
-- [ ] `Adapter.Browser` in `internal/cua/browser.go`, composing every action as
+- [x] `Adapter.Browser` in `internal/cua/browser.go`, composing every action as
       a single self-contained JavaScript program over `page`
       `execute_javascript` -- the only page action implemented on the Linux
       backend.
-- [ ] Resolve the target window automatically via `list_windows` so callers
+- [x] Resolve the target window automatically via `list_windows` so callers
       never pass a pid; optional `window_id` disambiguates when more than one
       browser is open, and an ambiguous auto-resolve is an explicit
       `INVALID_ARGUMENT`, not a silent pick.
-- [ ] `snapshot` records nodes in `window.__hadronRefs` (not `data-*`
+- [x] `snapshot` records nodes in `window.__hadronRefs` (not `data-*`
       attributes, which the page's own selectors and CSS can observe) and
       returns ref/role/name/bounds.
-- [ ] Ref actions re-check the ref against the live array and return
+- [x] Ref actions re-check the ref against the live array and return
       `INVALID_ARGUMENT` naming the ref when it is stale or absent.
-- [ ] Tolerant unwrapping of `execute_javascript`'s wrapped/escaped return
+- [x] Tolerant unwrapping of `execute_javascript`'s wrapped/escaped return
       value, since the exact wrapping is a driver detail.
-- [ ] Table tests with a fake `Caller` covering every action, the ambiguity
+- [x] Table tests with a fake `Caller` covering every action, the ambiguity
       error, and the stale-ref error.
 
 ### BT-3: session broker
 
-- [ ] `Broker.Browser` guarded like `ComputerUse` (not behind the shell/file
+- [x] `Broker.Browser` guarded like `ComputerUse` (not behind the shell/file
       semaphore; the adapter's single seat already serializes).
-- [ ] Dispatch `api.ToolBrowser` in `Broker.Call`.
+- [x] Dispatch `api.ToolBrowser` in `Broker.Call`.
 
 ### BT-4: gateway
 
-- [ ] `registerTools` registers `browser`.
-- [ ] `Gateway.pick` sends `browser` to the session broker for both classes.
-- [ ] Contract tests: eight tools advertised; the enum reaches `tools/list`;
+- [x] `registerTools` registers `browser`.
+- [x] `Gateway.pick` sends `browser` to the session broker for both classes.
+- [x] Contract tests: eight tools advertised; the enum reaches `tools/list`;
       an admin bearer's `browser` call lands on the session broker, not root.
 
 ### BT-5: smoke suite
 
-- [ ] `checkSevenTools` becomes `checkEightTools`; exercise `browser` in the
+- [x] `checkSevenTools` becomes `checkEightTools`; exercise `browser` in the
       public-contract suite.
 
 ### BT-6: documentation sweep
 
-- [ ] Update every "seven" that is now wrong: design doc goals #4, the contract
+- [x] Update every "seven" that is now wrong: design doc goals #4, the contract
       table, gate 2, gate 3, acceptance #4; the roadmap; the phase-2 plan; and
       the package/tool comments in `session/service.go`, `smoke/descriptor.go`,
       `cmd/mcp-smoke/main.go`.
 
 ### BT-7: end-to-end proof
 
-- [ ] Replace the recording demo's coordinate click on "Docs" with `snapshot` +
+- [x] Replace the recording demo's coordinate click on "Docs" with `snapshot` +
       `click(ref)`, and re-record. This is the gate that proves the tool solves
       the problem that motivated it.
+
+## Outcome (2026-07-20)
+
+All tasks complete. The live run against the real Cua page backend:
+
+```
+browser:snapshot  -> 73 interactive elements from https://kairos.io/
+found 'Docs' ref=e6 role=a          <- located by NAME, not by pixel
+browser:click(e6) -> https://kairos.io/docs/v4.1.2/ "Documentation | Kairos"
+browser:text      -> "...Kairos\nQuick StartDocsBlogCommunity\n..."
+```
+
+Recording: `build/recording/agent-e2e-browser-tool.mp4` (65s).
+
+Three bugs the process caught, in the order they were found:
+
+1. A malformed ref reported `INTERNAL`, because parsing ran after window
+   resolution. Found by a unit test; fixed by parsing before any dispatch.
+2. `isBrowserWindow` matched the window title, so the shell running
+   `flatpak install org.chromium.Chromium` looked like a second browser and
+   made auto-resolution ambiguous. Found by reading the code against what the
+   demo actually does; fixed by matching `app_name`.
+3. The page backend prefixes its reply with a CDP path label
+   (`cdp.runtime.evaluate.user_gesture: "{...}"`), which `unwrapJSON` could not
+   peel. Found only by the LIVE run -- no fake could have predicted it -- and
+   the test now pins the exact captured string.
+
+Item 3 is the argument for keeping this gate: the unit tests were green and the
+tool was still completely non-functional against the real backend.
