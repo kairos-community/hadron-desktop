@@ -788,3 +788,110 @@ func TestComputerUseRejectsInvalidInputWithoutCallingCua(t *testing.T) {
 		t.Fatalf("invalid input issued %d Cua calls, want 0", n)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// pointer actions: pid resolved from window_id
+// ---------------------------------------------------------------------------
+
+// A window_id straight from list_applications must be enough to click with.
+// The Cua driver's pointer tools reject a call that omits pid even when
+// window_id already names the window, so the adapter resolves the owning pid
+// from list_windows instead of leaking that pairing requirement into the tool
+// contract (api.Validate accepts "pid or window_id").
+func TestPointerActionsResolvePIDFromWindowID(t *testing.T) {
+	const wantWindow, wantPID = int64(12582917), 2121
+
+	windowsHandler := func(_ context.Context, name string, _ map[string]any) (*mcp.CallToolResult, error) {
+		if name == toolListWindows {
+			return &mcp.CallToolResult{StructuredContent: map[string]any{
+				"windows": []any{
+					map[string]any{"window_id": int64(4242), "pid": 111, "app_name": "other"},
+					map[string]any{"window_id": wantWindow, "pid": wantPID, "app_name": "xterm-256color"},
+				},
+			}}, nil
+		}
+		return okResult()
+	}
+
+	for _, tt := range []struct {
+		name  string
+		input api.ComputerUseInput
+		tool  string
+	}{
+		{"click", api.ComputerUseInput{Action: api.ActionClick, WindowID: int64Ptr(wantWindow), X: intPtr(10), Y: intPtr(20)}, toolClick},
+		{"double_click", api.ComputerUseInput{Action: api.ActionDoubleClick, WindowID: int64Ptr(wantWindow), X: intPtr(10), Y: intPtr(20)}, toolDoubleClick},
+		{"drag", api.ComputerUseInput{Action: api.ActionDrag, WindowID: int64Ptr(wantWindow), FromX: intPtr(1), FromY: intPtr(2), ToX: intPtr(3), ToY: intPtr(4)}, toolDrag},
+		{"scroll", api.ComputerUseInput{Action: api.ActionScroll, WindowID: int64Ptr(wantWindow), Direction: api.DirectionDown, Amount: intPtr(2)}, toolScroll},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &fakeCaller{handler: windowsHandler}
+			if _, err := NewAdapter(fake).ComputerUse(t.Context(), tt.input); err != nil {
+				t.Fatalf("ComputerUse returned an error: %v", err)
+			}
+			var mutation *recordedCall
+			sawList := false
+			for i, c := range fake.Calls() {
+				if c.name == toolListWindows {
+					sawList = true
+				}
+				if c.name == tt.tool {
+					mutation = &fake.Calls()[i]
+				}
+			}
+			if !sawList {
+				t.Fatalf("expected a %s lookup to resolve pid; calls=%#v", toolListWindows, fake.Calls())
+			}
+			if mutation == nil {
+				t.Fatalf("%s was never called; calls=%#v", tt.tool, fake.Calls())
+			}
+			if got := mutation.args["pid"]; got != wantPID {
+				t.Fatalf("%s pid = %#v, want %d (resolved from window_id)", tt.tool, got, wantPID)
+			}
+			if got := mutation.args["window_id"]; got != wantWindow {
+				t.Fatalf("%s window_id = %#v, want %d", tt.tool, got, wantWindow)
+			}
+		})
+	}
+}
+
+// When the caller already supplied pid there is nothing to resolve, so the
+// adapter must not spend an extra round trip on list_windows.
+func TestPointerActionsWithPIDSkipTheLookup(t *testing.T) {
+	fake := &fakeCaller{}
+	in := api.ComputerUseInput{Action: api.ActionClick, PID: intPtr(7), WindowID: int64Ptr(99), X: intPtr(1), Y: intPtr(2)}
+	if _, err := NewAdapter(fake).ComputerUse(t.Context(), in); err != nil {
+		t.Fatalf("ComputerUse returned an error: %v", err)
+	}
+	for _, c := range fake.Calls() {
+		if c.name == toolListWindows {
+			t.Fatalf("unexpected %s lookup when pid was supplied; calls=%#v", toolListWindows, fake.Calls())
+		}
+	}
+}
+
+// A window_id the driver does not know about must not synthesise an error of
+// our own: the call goes out unresolved so the driver's own message surfaces.
+func TestPointerActionUnknownWindowIDStillDispatches(t *testing.T) {
+	fake := &fakeCaller{handler: func(_ context.Context, name string, _ map[string]any) (*mcp.CallToolResult, error) {
+		if name == toolListWindows {
+			return &mcp.CallToolResult{StructuredContent: map[string]any{"windows": []any{}}}, nil
+		}
+		return okResult()
+	}}
+	in := api.ComputerUseInput{Action: api.ActionClick, WindowID: int64Ptr(1234), X: intPtr(1), Y: intPtr(2)}
+	if _, err := NewAdapter(fake).ComputerUse(t.Context(), in); err != nil {
+		t.Fatalf("ComputerUse returned an error: %v", err)
+	}
+	var clicked *recordedCall
+	for i, c := range fake.Calls() {
+		if c.name == toolClick {
+			clicked = &fake.Calls()[i]
+		}
+	}
+	if clicked == nil {
+		t.Fatalf("click was never dispatched; calls=%#v", fake.Calls())
+	}
+	if _, ok := clicked.args["pid"]; ok {
+		t.Fatalf("pid must stay unset when the window is unknown; args=%#v", clicked.args)
+	}
+}

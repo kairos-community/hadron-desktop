@@ -216,7 +216,7 @@ func (a *Adapter) accessibility(ctx context.Context, in api.ComputerUseInput) (a
 // ---------------------------------------------------------------------------
 
 func (a *Adapter) pointAction(ctx context.Context, tool string, in api.ComputerUseInput) (api.ComputerUseOutput, error) {
-	args := windowArgs(in)
+	args := a.windowArgsFor(ctx, in)
 	args["delivery_mode"] = deliveryForeground
 	if in.ElementIndex != nil {
 		args["element_index"] = *in.ElementIndex
@@ -235,7 +235,7 @@ func (a *Adapter) pointAction(ctx context.Context, tool string, in api.ComputerU
 }
 
 func (a *Adapter) drag(ctx context.Context, in api.ComputerUseInput) (api.ComputerUseOutput, error) {
-	args := windowArgs(in)
+	args := a.windowArgsFor(ctx, in)
 	args["delivery_mode"] = deliveryForeground
 	if in.FromX != nil {
 		args["from_x"] = *in.FromX
@@ -257,7 +257,7 @@ func (a *Adapter) drag(ctx context.Context, in api.ComputerUseInput) (api.Comput
 }
 
 func (a *Adapter) scroll(ctx context.Context, in api.ComputerUseInput) (api.ComputerUseOutput, error) {
-	args := windowArgs(in)
+	args := a.windowArgsFor(ctx, in)
 	args["delivery_mode"] = deliveryForeground
 	if in.X != nil {
 		args["x"] = *in.X
@@ -426,6 +426,41 @@ func windowArgs(in api.ComputerUseInput) map[string]any {
 	}
 	if in.WindowID != nil {
 		args["window_id"] = *in.WindowID
+	}
+	return args
+}
+
+// windowArgsFor is windowArgs plus pid resolution: when the caller identified
+// the target by window_id alone, look the owning pid up from list_windows and
+// send both.
+//
+// The public MCP surface promises "pid or window_id" for every window-targeted
+// action (see api.Validate), but the Cua driver's pointer tools reject a call
+// that omits pid ("Missing required integer field: pid") even when window_id
+// already names the window -- while its keyboard tools accept window_id alone.
+// Resolving here keeps that asymmetry out of the tool contract, so an agent can
+// take a window_id straight from list_applications and click with it.
+//
+// A failed lookup is deliberately non-fatal: the args are returned unresolved
+// so the driver's own error surfaces rather than a synthetic one.
+func (a *Adapter) windowArgsFor(ctx context.Context, in api.ComputerUseInput) map[string]any {
+	args := windowArgs(in)
+	if in.PID != nil || in.WindowID == nil {
+		return args
+	}
+	result, rmeta := a.invoke(ctx, toolListWindows, map[string]any{}, true)
+	if rmeta.Code != "" {
+		return args
+	}
+	windows, err := decodeWindows(result)
+	if err != nil {
+		return args
+	}
+	for _, w := range windows {
+		if w.WindowID == *in.WindowID {
+			args["pid"] = w.PID
+			return args
+		}
 	}
 	return args
 }
