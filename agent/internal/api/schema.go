@@ -150,20 +150,9 @@ const (
 )
 
 // validComputerUseActions is the closed set of valid ComputerUseInput.Action
-// values, in the order defined by the brief.
-var validComputerUseActions = map[ComputerUseAction]bool{
-	ActionCapture:          true,
-	ActionAccessibility:    true,
-	ActionClick:            true,
-	ActionDoubleClick:      true,
-	ActionDrag:             true,
-	ActionScroll:           true,
-	ActionType:             true,
-	ActionKey:              true,
-	ActionWait:             true,
-	ActionListApplications: true,
-	ActionFocusApplication: true,
-}
+// values, derived from ComputerUseActions so the order clients see and the
+// values the server accepts cannot drift apart.
+var validComputerUseActions = validSet(ComputerUseActions)
 
 // ComputerUseScope selects what a capture or accessibility query targets.
 type ComputerUseScope string
@@ -583,12 +572,7 @@ const (
 	ProcessTerminate ProcessAction = "terminate"
 )
 
-var validProcessActions = map[ProcessAction]bool{
-	ProcessStart:     true,
-	ProcessPoll:      true,
-	ProcessWrite:     true,
-	ProcessTerminate: true,
-}
+var validProcessActions = validSet(ProcessActions)
 
 // ProcessInput manages a long-running background process. ProcessID
 // identifies an existing process for poll/write/terminate; it is assigned by
@@ -838,47 +822,28 @@ type PatchOutput struct {
 // Registration
 // ---------------------------------------------------------------------------
 
-// RegisterAll registers all seven public tools on s using mcp.AddTool, which
-// infers each tool's JSON input/output schema from the Go types above. Every
+// RegisterAll registers all seven public tools on s. Each tool's input schema
+// comes from ToolFor, which infers it from the Go types above and then
+// publishes their closed value sets as JSON Schema enums; output schemas are
+// still inferred by the SDK. Every
 // handler here is a stub: it validates its input where this package defines
 // a Validate method, and otherwise reports CodeInternal "not implemented".
 // Later Phase-2 tasks replace these stubs with real behavior; this function
 // exists so the seven-tool contract is registrable and testable today.
 func RegisterAll(s *mcp.Server) {
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        ToolComputerUse,
-		Description: "Drive the desktop: capture, accessibility, click, double_click, drag, scroll, type, key, wait, list_applications, focus_application.",
-	}, stubComputerUse)
+	mcp.AddTool(s, ToolFor[ComputerUseInput](ToolComputerUse, "Drive the desktop: capture, accessibility, click, double_click, drag, scroll, type, key, wait, list_applications, focus_application."), stubComputerUse)
 
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        ToolTerminal,
-		Description: "Run a single shell command to completion.",
-	}, stubTerminal)
+	mcp.AddTool(s, ToolFor[TerminalInput](ToolTerminal, "Run a single shell command to completion."), stubTerminal)
 
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        ToolProcess,
-		Description: "Start, poll, write to, or terminate a long-running background process.",
-	}, stubProcess)
+	mcp.AddTool(s, ToolFor[ProcessInput](ToolProcess, "Start, poll, write to, or terminate a long-running background process."), stubProcess)
 
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        ToolReadFile,
-		Description: "Read all or part of a file.",
-	}, stubReadFile)
+	mcp.AddTool(s, ToolFor[ReadFileInput](ToolReadFile, "Read all or part of a file."), stubReadFile)
 
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        ToolSearchFiles,
-		Description: "Search a directory tree by file name or content.",
-	}, stubSearchFiles)
+	mcp.AddTool(s, ToolFor[SearchFilesInput](ToolSearchFiles, "Search a directory tree by file name or content."), stubSearchFiles)
 
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        ToolWriteFile,
-		Description: "Write (or overwrite) a file.",
-	}, stubWriteFile)
+	mcp.AddTool(s, ToolFor[WriteFileInput](ToolWriteFile, "Write (or overwrite) a file."), stubWriteFile)
 
-	mcp.AddTool(s, &mcp.Tool{
-		Name:        ToolPatch,
-		Description: "Apply exact-match text replacements to one or more files.",
-	}, stubPatch)
+	mcp.AddTool(s, ToolFor[PatchInput](ToolPatch, "Apply exact-match text replacements to one or more files."), stubPatch)
 }
 
 func stubComputerUse(_ context.Context, _ *mcp.CallToolRequest, in ComputerUseInput) (*mcp.CallToolResult, ComputerUseOutput, error) {

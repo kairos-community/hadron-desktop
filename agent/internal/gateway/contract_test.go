@@ -93,6 +93,62 @@ func TestExactSevenToolsRegistered(t *testing.T) {
 	}
 }
 
+// TestListedToolsAdvertiseEnums checks the schema a real client receives from
+// tools/list, not just the one api builds: the SDK serves its own inferred
+// schema unless a tool supplies InputSchema, and inference cannot see Go's
+// named string types as closed sets. Without this the eleven computer_use
+// actions reach clients as a bare {"type":"string"} and can only be discovered
+// by trial and error.
+func TestListedToolsAdvertiseEnums(t *testing.T) {
+	f := newFixture(t)
+	session := connectMCP(t, f.g, f.creds.userBearer)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	// tool -> property -> first expected value, enough to prove the enum
+	// survived the trip through the SDK's schema handling.
+	want := map[string]map[string][]string{
+		api.ToolComputerUse: {
+			"action": {"capture", "accessibility", "click", "double_click", "drag",
+				"scroll", "type", "key", "wait", "list_applications", "focus_application"},
+			"scope":  {"screen", "window"},
+			"button": {"left", "right", "middle"},
+		},
+		api.ToolProcess:     {"action": {"start", "poll", "write", "terminate"}},
+		api.ToolSearchFiles: {"mode": {"name", "content"}},
+	}
+
+	for _, tool := range res.Tools {
+		expected, ok := want[tool.Name]
+		if !ok {
+			continue
+		}
+		raw, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("%s: marshal input schema: %v", tool.Name, err)
+		}
+		var doc struct {
+			Properties map[string]struct {
+				Enum []string `json:"enum"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("%s: unmarshal input schema: %v", tool.Name, err)
+		}
+		for property, values := range expected {
+			got := doc.Properties[property].Enum
+			if strings.Join(got, ",") != strings.Join(values, ",") {
+				t.Errorf("%s.%s enum = %v, want %v", tool.Name, property, got, values)
+			}
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Bearer 401 / 403
 // ---------------------------------------------------------------------------

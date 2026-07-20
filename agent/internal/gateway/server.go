@@ -363,12 +363,13 @@ func (g *Gateway) registerTools(server *mcp.Server) {
 }
 
 // addRoute registers one tool whose handler routes to the appropriate broker.
-// In is used only for schema inference; the raw client arguments are forwarded
-// verbatim. Out carries the tool's typed result and its embedded ResultMeta,
+// In is used only to build the published input schema (api.ToolFor infers it
+// and annotates the contract's closed value sets as JSON Schema enums); the
+// raw client arguments are forwarded verbatim. Out carries the tool's typed result and its embedded ResultMeta,
 // which meta exposes so the gateway can stamp a synthetic code (paused,
 // exhausted, unavailable, ...) without knowing the concrete type.
 func addRoute[In, Out any](server *mcp.Server, g *Gateway, tool, desc string, meta func(*Out) *api.ResultMeta) {
-	mcp.AddTool(server, &mcp.Tool{Name: tool, Description: desc},
+	mcp.AddTool(server, api.ToolFor[In](tool, desc),
 		func(ctx context.Context, req *mcp.CallToolRequest, _ In) (*mcp.CallToolResult, Out, error) {
 			return route(ctx, g, req, tool, meta)
 		})
