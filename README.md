@@ -64,14 +64,54 @@ kept under `build/sway-desktop/` and `build/i3-desktop/`.
 ## Releases
 
 Pushing a `v`-prefixed tag runs `.github/workflows/release.yml`. The workflow
-builds the Sway and i3/XLibre installer ISOs in parallel, builds the separate
-agent ISO, verifies all SHA-256 checksums, and creates a GitHub Release
-containing three ISOs and three checksum files:
+builds the Sway and i3/XLibre installer ISOs in parallel and builds the agent
+ISO in a job that first runs all five agent gates. It then verifies every
+asset and creates a GitHub Release:
 
 ```sh
 git tag -a v1.0.0 -m "Hadron Desktop v1.0.0"
 git push origin v1.0.0
 ```
+
+Each release carries twelve files — three ISOs, and for every ISO a checksum,
+an SPDX SBOM, and a build manifest:
+
+| Asset | Contents |
+| --- | --- |
+| `hadron-desktop-<flavor>-<tag>-amd64.iso` | the bootable installer |
+| `….iso.sha256` | its SHA-256, in `sha256sum --check` format |
+| `….iso.spdx.json` | SPDX JSON SBOM of the OCI image the ISO wraps, produced by `anchore/syft:v1.29.0` |
+| `….iso.build.json` | the build manifest described below |
+
+`<flavor>` is `sway`, `i3`, or `agent`. The build manifest records exactly what
+went into the image, so a downloaded ISO can be traced back to its sources:
+
+```json
+{
+  "release_tag": "v1.0.0",
+  "git_commit": "…",
+  "hadron_base_reference": "ghcr.io/kairos-io/hadron:main",
+  "hadron_base_digest": "sha256:…",
+  "image_id": "sha256:…",
+  "iso": "hadron-desktop-agent-v1.0.0-amd64.iso",
+  "iso_sha256": "…",
+  "desktop_flavor": "agent",
+  "xlibre_version": "25.2.0",
+  "cua_revision": "…",
+  "atspi_version": "2.54.0"
+}
+```
+
+All eleven keys are present in every manifest. `xlibre_version` is `null` for
+the Wayland-only Sway flavor, and `cua_revision`/`atspi_version` are `null` for
+both non-agent flavors.
+
+The publishing job refuses to upload unless it finds exactly three ISOs, three
+checksums, three SBOMs, and three manifests, every checksum verifies, every SBOM
+parses as SPDX with a non-empty package list, and every manifest carries valid
+values that match the ISO shipped beside it. The agent job uploads nothing at
+all — not even its ISO — until the compatibility, contract, install, recovery,
+and UI gates have all passed. Release artifacts are not signed.
 
 An existing tag can be rebuilt from the Actions page with the workflow's manual
 dispatch. Rebuilt assets replace same-named assets on a mutable release.

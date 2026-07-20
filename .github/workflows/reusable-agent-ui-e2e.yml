@@ -1,0 +1,282 @@
+# Reusable downstream UI end-to-end gate for the Hadron Cua agent appliance.
+#
+# A UI repository calls this workflow to get a REAL, visible XLibre/i3 desktop
+# under test without knowing anything about Kairos, AuroraBoot, or QEMU. This
+# workflow boots the appliance as a detachable fixture VM, hands the caller's
+# own test command a descriptor via HADRON_AGENT_FIXTURE, and cleans up.
+#
+# Everything the caller needs to know about the descriptor, the eight public
+# MCP tools, TLS trust, and secret handling is in test/agent/README.md.
+#
+#   jobs:
+#     agent-ui-e2e:
+#       uses: mudler/hadron-desktop/.github/workflows/reusable-agent-ui-e2e.yml@main
+#       with:
+#         agent_iso_url: https://.../hadron-desktop-agent-v0.1.0-amd64.iso
+#         agent_iso_sha256: 3f2a...
+#         hadron_ref: v0.1.0
+#         test_command: go test ./e2e/... -run TestAgentUI
+#
+# TRUST MODEL. This workflow declares `contents: read` and NOTHING else, and
+# declares no `secrets:` at all -- a caller cannot pass one even with
+# `secrets: inherit`, because an undeclared secret is not forwarded. Calling it
+# therefore cannot give the fixture write access to the caller's repository or
+# sight of its credentials. Keep it that way: the whole point of a downstream
+# gate is that it is cheap to trust.
+name: Reusable agent UI E2E
+
+on:
+  workflow_call:
+    inputs:
+      agent_iso_url:
+        description: URL of the agent appliance ISO to boot.
+        required: true
+        type: string
+      agent_iso_sha256:
+        description: >-
+          Expected SHA-256 of the ISO, 64 lowercase hex characters. Mandatory:
+          an ISO whose checksum is absent, malformed, or mismatched fails the
+          job before QEMU is ever started.
+        required: true
+        type: string
+      hadron_ref:
+        description: Git ref of mudler/hadron-desktop to take the harness from.
+        required: true
+        type: string
+      test_command:
+        description: >-
+          Caller-controlled command, run from the caller's checkout with
+          HADRON_AGENT_FIXTURE pointing at the fixture descriptor.
+        required: true
+        type: string
+      timeout_minutes:
+        description: Overall job timeout. A TCG (no-KVM) runner needs headroom.
+        required: false
+        default: 120
+        type: number
+
+# No write scope anywhere in this workflow. See the trust model above.
+permissions:
+  contents: read
+
+jobs:
+  agent-ui-e2e:
+    name: Agent UI E2E
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+
+    env:
+      # Absolute paths, because run.sh cds to its own repo root and the caller's
+      # test command runs from a different directory.
+      HADRON_DIR: ${{ github.workspace }}/hadron
+      CALLER_DIR: ${{ github.workspace }}/caller
+      ISO_PATH: ${{ runner.temp }}/agent.iso
+
+    steps:
+      # The caller's repository at the caller's ref: inside a reusable workflow
+      # `github.repository`/`github.sha` still refer to the CALLING repo, which
+      # is exactly what actions/checkout defaults to.
+      - name: Check out the calling repository
+        uses: actions/checkout@v7
+        with:
+          path: caller
+          persist-credentials: false
+
+      - name: Check out Hadron at the requested ref
+        uses: actions/checkout@v7
+        with:
+          repository: mudler/hadron-desktop
+          ref: ${{ inputs.hadron_ref }}
+          path: hadron
+          persist-credentials: false
+
+      # Fail on a bad checksum BEFORE anything executes the ISO's contents.
+      # The input is required, so there is no "skip verification" path; a
+      # malformed digest is rejected too, since a typo that never matches is
+      # indistinguishable from a digest that was never checked.
+      - name: Download and verify the agent ISO
+        shell: bash
+        env:
+          AGENT_ISO_URL: ${{ inputs.agent_iso_url }}
+          AGENT_ISO_SHA256: ${{ inputs.agent_iso_sha256 }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$AGENT_ISO_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "agent_iso_sha256 must be 64 lowercase hex characters" >&2
+            exit 1
+          fi
+
+          curl --fail --location --silent --show-error \
+            --retry 3 --retry-delay 5 \
+            --output "$ISO_PATH" "$AGENT_ISO_URL"
+
+          actual="$(sha256sum "$ISO_PATH" | awk '{print $1}')"
+          if [ "$actual" != "$AGENT_ISO_SHA256" ]; then
+            echo "ISO checksum mismatch" >&2
+            echo "  expected: $AGENT_ISO_SHA256" >&2
+            echo "  actual:   $actual" >&2
+            rm -f "$ISO_PATH"
+            exit 1
+          fi
+          echo "ISO verified: $actual"
+
+      # The harness shells out to exactly these (see _agent_require_bins in
+      # run.sh and the dependency check in make-seed.sh). python3-pil converts
+      # QMP .ppm screendumps to .png; websockify/novnc back the optional web
+      # console. Docker is preinstalled on GitHub-hosted runners.
+      - name: Install fixture dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils ovmf xorriso jq openssl curl \
+            python3 python3-pil websockify novnc
+
+      # Standard runners expose 14 GB of SSD; the guest disk alone is 24 GiB
+      # sparse. Drop preinstalled SDKs this job never uses.
+      - name: Reclaim runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+          df -h /
+
+      # `fixture` blocks for the VM's whole lifetime and prints NOTHING on
+      # stdout but the descriptor path, so background it and poll that file.
+      # FIXTURE_PROV_ISO makes it boot the verified ISO instead of building one
+      # from a container image -- see the preflight step below for the one
+      # consequence of that.
+      - name: Start the fixture VM
+        id: fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/fixture"
+          descriptor_out="$RUNNER_TEMP/fixture/descriptor.path"
+          : > "$descriptor_out"
+
+          FIXTURE_PROV_ISO="$ISO_PATH" \
+          FIXTURE_BOOT_TIMEOUT="${FIXTURE_BOOT_TIMEOUT:-1800}" \
+            "$HADRON_DIR/test/agent/run.sh" fixture > "$descriptor_out" &
+          fixture_pid=$!
+          echo "$fixture_pid" > "$RUNNER_TEMP/fixture/launcher.pid"
+
+          # Poll for the descriptor path, failing fast if the harness exits.
+          deadline=$((SECONDS + 2100))
+          descriptor=""
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            if ! kill -0 "$fixture_pid" 2>/dev/null; then
+              echo "run.sh fixture exited before emitting a descriptor" >&2
+              exit 1
+            fi
+            descriptor="$(tr -d '[:space:]' < "$descriptor_out")"
+            [ -n "$descriptor" ] && break
+            sleep 5
+          done
+          if [ -z "$descriptor" ]; then
+            echo "timed out waiting for the fixture descriptor" >&2
+            exit 1
+          fi
+
+          # The descriptor path is the entire downstream contract.
+          echo "HADRON_AGENT_FIXTURE=$descriptor" >> "$GITHUB_ENV"
+          echo "descriptor=$descriptor" >> "$GITHUB_OUTPUT"
+          echo "Fixture descriptor: $descriptor"
+
+      # /readyz is unauthenticated, so a green fixture does not prove the
+      # descriptor's bearer is the one the guest accepts. It is not, when the
+      # supplied ISO carries no matching agent cloud-config: `fixture` mints a
+      # bearer pair per VM, but a PREBUILT ISO can only carry the digests it was
+      # built with, and a stock `make agent-iso` image carries none (the guest
+      # then mints a throwaway first-run token instead). Catch that here, where
+      # the message can say so, instead of letting the caller's suite fail as
+      # though its own code were broken. Anything other than 401 means the
+      # credential reached the gateway.
+      - name: Preflight the descriptor credential
+        shell: bash
+        run: |
+          set -euo pipefail
+          desc="$HADRON_AGENT_FIXTURE"
+          mcp_url="$(jq -r '.mcp_url' "$desc")"
+          ca="$(jq -r '.ca_certificate_file' "$desc")"
+          token_file="$(jq -r '.bearer_token_file' "$desc")"
+
+          # The bearer goes to curl via a header FILE, never on the command
+          # line, so it cannot appear in the runner's process list.
+          header_file="$RUNNER_TEMP/fixture/auth.header"
+          ( umask 077; printf 'Authorization: Bearer %s\n' \
+              "$(tr -d '\r\n' < "$token_file")" > "$header_file" )
+
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            --cacert "$ca" --header "@$header_file" \
+            --request POST "$mcp_url" || echo 000)"
+          rm -f "$header_file"
+
+          if [ "$status" = "401" ]; then
+            echo "The fixture bearer was rejected (HTTP 401)." >&2
+            echo "This VM's cloud-config did not reach the guest, so the appliance" >&2
+            echo "does not know its bearer digests. run.sh injects that config into a" >&2
+            echo "copy of the supplied ISO (_agent_inject_cloud_config); check that" >&2
+            echo "step's output, and that the ISO is a Hadron agent image." >&2
+            exit 1
+          fi
+          echo "Descriptor credential accepted by the gateway (HTTP $status)."
+
+      - name: Run the caller's test command
+        shell: bash
+        working-directory: caller
+        run: ${{ inputs.test_command }}
+
+      # ALWAYS stop the guest: a leaked QEMU keeps the runner's disk image and,
+      # on a self-hosted runner, would outlive the job entirely.
+      - name: Stop the fixture VM
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          "$HADRON_DIR/test/agent/run.sh" stop || true
+
+      # Artifacts only, never runtime/ -- runtime/ is where the plaintext
+      # bearer files live. Text artifacts still go through the harness's own
+      # redaction, because a guest serial console can print a first-run token.
+      - name: Redact and collect artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          art="$HADRON_DIR/test/agent/artifacts"
+          [ -d "$art" ] || exit 0
+
+          # shellcheck source=/dev/null
+          source "$HADRON_DIR/test/agent/lib/common.sh"
+
+          # Enumerate first, then rewrite: rewriting in the same pass would let
+          # find walk into the temporary files this loop creates.
+          mapfile -d '' -t files < <(find "$art" -type f \
+            \( -name '*.log' -o -name '*.txt' -o -name '*.json' \) -print0)
+          for f in "${files[@]:-}"; do
+            [ -n "$f" ] || continue
+            if hdn_agent_redact < "$f" > "$f.redacted" 2>/dev/null; then
+              mv "$f.redacted" "$f"
+            else
+              rm -f "$f.redacted"
+            fi
+          done
+
+          chmod -R u+rwX "$art" || true
+
+      - name: Upload fixture artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent-ui-e2e-artifacts
+          path: hadron/test/agent/artifacts/**
+          if-no-files-found: warn
+          retention-days: 7

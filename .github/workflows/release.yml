@@ -18,6 +18,16 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Pinned SBOM generator. The exact tag is part of the released evidence, so it
+  # is never floated to a moving tag such as `latest`.
+  SYFT_IMAGE: anchore/syft:v1.29.0
+  # Every agent VM gate resolves its appliance image through this variable
+  # (`test/agent/run.sh` takes `${1:-${AGENT_IMAGE:-agent-desktop:dev}}`, and the
+  # Makefile declares `AGENT_IMAGE ?= agent-desktop:dev`), so one value keeps the
+  # ISO build and the gates on the exact same tag.
+  AGENT_IMAGE: agent-desktop:dev
+
 jobs:
   build:
     name: Build ${{ matrix.desktop }} ISO
@@ -89,6 +99,32 @@ jobs:
           cd dist
           sha256sum "$asset" > "$asset.sha256"
 
+      # SPDX JSON for the final OCI image the ISO was produced from. The ISO is
+      # only a bootable wrapper around that image, so the image is the artifact
+      # whose package inventory is meaningful.
+      - name: Generate SPDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Makefile: `IMAGE ?= $(DESKTOP)-desktop:dev`.
+          image="${DESKTOP}-desktop:dev"
+          asset="hadron-desktop-${DESKTOP}-${RELEASE_TAG}-amd64.iso"
+
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            "$SYFT_IMAGE" "docker:$image" --output spdx-json \
+            > "dist/$asset.spdx.json"
+
+          jq -e '.spdxVersion and .packages' "dist/$asset.spdx.json" >/dev/null
+
+      - name: Generate build manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="hadron-desktop-${DESKTOP}-${RELEASE_TAG}-amd64.iso"
+          ./scripts/release-manifest.sh "$DESKTOP" "$RELEASE_TAG" "${DESKTOP}-desktop:dev" \
+            "dist/$asset" "dist/$asset.build.json"
       - name: Upload ${{ matrix.desktop }} workflow artifact
         uses: actions/upload-artifact@v7
         with:
@@ -99,8 +135,11 @@ jobs:
           retention-days: 7
 
   build-agent:
-    name: Build agent ISO
+    name: Gate and build agent ISO
     runs-on: ubuntu-24.04
+    # GitHub-hosted jobs are capped at six hours; the agent build plus the five
+    # VM gates share that budget, and every individual gate additionally carries
+    # its own shell timeout inside test/agent/run.sh.
     timeout-minutes: 330
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
@@ -137,11 +176,93 @@ jobs:
           docker system prune --all --force
           df -h /
 
+      - name: Install agent VM dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            jq \
+            novnc \
+            ovmf \
+            python3-pil \
+            qemu-system-x86 \
+            websockify \
+            xorriso
+          # The harness picks KVM when /dev/kvm is readable and falls back to
+          # multi-threaded TCG otherwise; make the fast path usable when the
+          # runner image exposes nested virtualisation.
+          if [[ -e /dev/kvm ]]; then
+            sudo chmod 0666 /dev/kvm
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+
       - name: Build agent ISO
         shell: bash
         run: |
           set -euo pipefail
           make VERSION="$RELEASE_TAG" agent-iso
+
+      # The gates below re-wrap the freshly built appliance image with their own
+      # `cidata` seeds, so the appliance is built exactly once here and every
+      # gate consumes that same image. The build cache is dropped now that the
+      # image and ISO exist, leaving the VM gates room for their disks.
+      - name: Reclaim build cache before the gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker builder prune --all --force
+          df -h /
+
+      # --------------------------------------------------------------------
+      # Every agent gate runs before a single release byte is prepared. This
+      # job intentionally uploads nothing at all until all five have passed --
+      # gate diagnostics are retained by .github/workflows/agent-gates.yml,
+      # which runs the same gates on pull requests, manual dispatch, and
+      # nightly.
+      # --------------------------------------------------------------------
+
+      # Builds its own probe-instrumented test image (test/agent/Dockerfile.compat)
+      # on top of the agent overlay, so it drives the full local image chain.
+      - name: Gate - native compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          test/agent/run.sh compatibility
+
+      # Boots the appliance live against a blank disk and proves the eight
+      # public MCP tools plus the privilege boundaries, without writing to the
+      # attached disk.
+      - name: Gate - MCP and privilege contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test/agent/run.sh contract "$AGENT_IMAGE"
+
+      - name: Gate - zero-touch install
+        shell: bash
+        run: |
+          set -euo pipefail
+          test/agent/run.sh install "$AGENT_IMAGE"
+
+      - name: Gate - recovery and emergency pause
+        shell: bash
+        run: |
+          set -euo pipefail
+          test/agent/run.sh recovery "$AGENT_IMAGE"
+
+      # Drives the GTK reference app and the pinned Chromium Flatpak in the
+      # visible XLibre session through public computer_use only.
+      - name: Gate - GTK and Chromium UI
+        shell: bash
+        run: |
+          set -euo pipefail
+          test/agent/run.sh ui "$AGENT_IMAGE"
 
       - name: Prepare release assets
         shell: bash
@@ -161,6 +282,41 @@ jobs:
           cd dist
           sha256sum "$asset" > "$asset.sha256"
 
+      - name: Generate SPDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          asset="hadron-desktop-agent-${RELEASE_TAG}-amd64.iso"
+
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            "$SYFT_IMAGE" "docker:$AGENT_IMAGE" --output spdx-json \
+            > "dist/$asset.spdx.json"
+
+          jq -e '.spdxVersion and .packages' "dist/$asset.spdx.json" >/dev/null
+
+      # Diagnostics only, and only when a gate failed. The "upload nothing
+      # until the gates pass" rule governs RELEASE ASSETS: shipping an
+      # unvalidated ISO is the risk it guards against. Leaving no evidence at
+      # all behind a failed release gate just makes it undebuggable, and these
+      # artifacts are the redacted ones the gates already produce.
+      - name: Upload gate diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent-gate-diagnostics
+          path: test/agent/artifacts/**
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Generate build manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="hadron-desktop-agent-${RELEASE_TAG}-amd64.iso"
+          ./scripts/release-manifest.sh agent "$RELEASE_TAG" "$AGENT_IMAGE" \
+            "dist/$asset" "dist/$asset.build.json"
       - name: Upload agent workflow artifact
         uses: actions/upload-artifact@v7
         with:
@@ -183,7 +339,7 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
     steps:
-      - name: Download both ISO artifacts
+      - name: Download all release artifacts
         uses: actions/download-artifact@v8
         with:
           pattern: release-*
@@ -197,15 +353,75 @@ jobs:
           shopt -s nullglob
           isos=(release/*.iso)
           checksums=(release/*.sha256)
+          sboms=(release/*.spdx.json)
+          manifests=(release/*.build.json)
 
-          if (( ${#isos[@]} != 3 || ${#checksums[@]} != 3 )); then
-            echo "Expected three ISOs and three checksum files" >&2
+          if (( ${#isos[@]} != 3 \
+             || ${#checksums[@]} != 3 \
+             || ${#sboms[@]} != 3 \
+             || ${#manifests[@]} != 3 )); then
+            echo "Expected three ISOs, three checksums, three SBOMs, and three build manifests" >&2
+            echo "Found ${#isos[@]} ISOs, ${#checksums[@]} checksums, ${#sboms[@]} SBOMs, ${#manifests[@]} manifests" >&2
             find release -maxdepth 1 -type f -print >&2
             exit 1
           fi
 
           cd release
           sha256sum --check ./*.sha256
+
+          # Each SBOM must be parseable SPDX JSON with a package inventory.
+          for sbom in ./*.spdx.json; do
+            jq -e '.spdxVersion and (.packages | length > 0)' "$sbom" >/dev/null \
+              || { echo "$sbom is not a usable SPDX document" >&2; exit 1; }
+          done
+
+          # Every manifest carries the same key set; the flavor decides which of
+          # the optional values are allowed to be null.
+          for manifest in ./*.build.json; do
+            jq -e '
+              . as $m
+              | ["release_tag","git_commit","hadron_base_reference","hadron_base_digest",
+                 "image_id","iso","iso_sha256","desktop_flavor","xlibre_version",
+                 "cua_revision","atspi_version"]
+                | all(. as $k | $m | has($k))
+            ' "$manifest" >/dev/null \
+              || { echo "$manifest is missing required keys" >&2; exit 1; }
+
+            jq -e '
+              (.release_tag | type == "string" and length > 0)
+              and (.git_commit | test("^[0-9a-f]{40}$"))
+              and (.hadron_base_reference | type == "string" and length > 0)
+              and (.hadron_base_digest | test("^sha256:[0-9a-f]{64}$"))
+              and (.image_id | test("^sha256:[0-9a-f]{64}$"))
+              and (.iso_sha256 | test("^[0-9a-f]{64}$"))
+              and (.desktop_flavor as $flavor | ["sway","i3","agent"] | index($flavor) != null)
+              and (if .desktop_flavor == "sway"
+                   then .xlibre_version == null
+                   else (.xlibre_version | type == "string" and length > 0) end)
+              and (if .desktop_flavor == "agent"
+                   then (.cua_revision | test("^[0-9a-f]{40}$"))
+                        and (.atspi_version | type == "string" and length > 0)
+                   else .cua_revision == null and .atspi_version == null end)
+            ' "$manifest" >/dev/null \
+              || { echo "$manifest has an invalid or empty required value" >&2; exit 1; }
+
+            # The manifest must describe the ISO it was published next to.
+            iso="$(jq -r '.iso' "$manifest")"
+            declared="$(jq -r '.iso_sha256' "$manifest")"
+            actual="$(sha256sum "$iso" | cut -d' ' -f1)"
+            if [[ "$declared" != "$actual" ]]; then
+              echo "$manifest records $declared for $iso but the file hashes to $actual" >&2
+              exit 1
+            fi
+          done
+
+          # Exactly one manifest per flavor, so a duplicated build cannot pass
+          # the count check while a flavor is missing.
+          flavors="$(jq -r '.desktop_flavor' ./*.build.json | sort | tr '\n' ' ')"
+          if [[ "$flavors" != "agent i3 sway " ]]; then
+            echo "Expected one manifest each for sway, i3, and agent; got: $flavors" >&2
+            exit 1
+          fi
 
       - name: Create or update GitHub Release
         shell: bash
@@ -214,7 +430,12 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          assets=(release/*.iso release/*.sha256)
+          assets=(
+            release/*.iso
+            release/*.sha256
+            release/*.spdx.json
+            release/*.build.json
+          )
 
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "${assets[@]}" \
