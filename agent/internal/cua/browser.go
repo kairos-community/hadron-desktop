@@ -212,6 +212,15 @@ type pageState struct {
 	ScrollY int    `json:"scroll_y"`
 	Text    string `json:"text"`
 	Value   string `json:"value"`
+
+	// ViewportW/H are innerWidth/innerHeight, reported by every script so the
+	// viewport-to-screen conversion never needs a second round trip.
+	ViewportW int `json:"vw"`
+	ViewportH int `json:"vh"`
+
+	// Rect is the targeted element's viewport-relative box, for actions that
+	// resolve one.
+	Rect *jsRect `json:"rect,omitempty"`
 	// Error is set by the script itself for conditions only it can see, most
 	// importantly a ref that no longer resolves.
 	Error string `json:"error"`
@@ -244,31 +253,175 @@ func (a *Adapter) browserSnapshot(ctx context.Context, target pageTarget, in api
 	if meta.Code != "" {
 		return api.BrowserOutput{ResultMeta: meta}, nil
 	}
+
+	// Annotate every element with its screen position, so a caller that needs
+	// computer_use (a canvas, a drag, anything the DOM cannot express) does not
+	// have to rediscover the chrome offset the hard way. One extra call, and
+	// the whole snapshot shares the conversion.
+	elements := state.Elements
+	if win, ok := a.windowFrame(ctx, target); ok && win.W > 0 && win.H > 0 &&
+		state.ViewportW > 0 && state.ViewportH > 0 {
+		chromeTop := win.H - state.ViewportH
+		sideBorder := (win.W - state.ViewportW) / 2
+		if chromeTop >= 0 && sideBorder >= 0 {
+			for i := range elements {
+				sx := win.X + sideBorder + elements[i].X
+				sy := win.Y + chromeTop + elements[i].Y
+				elements[i].ScreenX, elements[i].ScreenY = &sx, &sy
+			}
+		}
+	}
+
 	return api.BrowserOutput{
 		URL:       state.URL,
 		Title:     state.Title,
-		Elements:  state.Elements,
+		Elements:  elements,
 		Truncated: state.Truncated,
 		WindowID:  int(target.windowID),
 	}, nil
 }
 
+// browserClick delivers a click on the element a ref names.
+//
+// It prefers a REAL pointer click at the element's screen position, because a
+// JavaScript el.click() is not a user gesture: the Fullscreen API, clipboard
+// access and autoplay all refuse a scripted click, and refuse it silently --
+// the call reports success and nothing happens. Observed live: clicking a page's
+// "Fullscreen" control by ref returned ok and did nothing at all.
+//
+// So: scroll the element into view, read its box, convert to screen
+// coordinates, and click there. When that conversion is not available (window
+// geometry unreadable, or the element cannot be brought on-screen) fall back to
+// el.click() rather than failing, and say which path ran.
 func (a *Adapter) browserClick(ctx context.Context, target pageTarget, in api.BrowserInput) (api.BrowserOutput, error) {
 	idx, err := refIndex(in.Ref)
 	if err != nil {
 		return browserErr(api.CodeInvalidArgument, err.Error(), false), nil
 	}
-	js := fmt.Sprintf(`(function(){%s el.click();return JSON.stringify({url:location.href,title:document.title});})()`,
+
+	// Scroll into view and report the resulting box; do not click yet.
+	measure := fmt.Sprintf(`(function(){%s
+el.scrollIntoView({block:'center',inline:'center'});
+var r=el.getBoundingClientRect();
+return JSON.stringify({url:location.href,title:document.title,
+  vw:window.innerWidth,vh:window.innerHeight,
+  rect:{x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height)}});})()`,
 		resolveRefJS(idx))
-	state, meta := a.pageJS(ctx, target, js)
+
+	state, meta := a.pageJS(ctx, target, measure)
 	if meta.Code != "" {
 		return api.BrowserOutput{ResultMeta: meta}, nil
 	}
 	if out, stale := staleRef(state, in.Ref); stale {
 		return out, nil
 	}
+
+	method := "script"
+	if pt, ok := a.screenPoint(ctx, target, state); ok {
+		if _, rmeta := a.invokeAs(ctx, toolClick, map[string]any{
+			"pid":           target.pid,
+			"window_id":     target.windowID,
+			"x":             pt.x,
+			"y":             pt.y,
+			"button":        string(api.ButtonLeft),
+			"delivery_mode": deliveryForeground,
+		}, false, "browser"); rmeta.Code != "" {
+			return api.BrowserOutput{ResultMeta: rmeta}, nil
+		}
+		method = "pointer"
+	} else {
+		clickJS := fmt.Sprintf(`(function(){%s el.click();return JSON.stringify({url:location.href,title:document.title});})()`,
+			resolveRefJS(idx))
+		if _, m := a.pageJS(ctx, target, clickJS); m.Code != "" {
+			return api.BrowserOutput{ResultMeta: m}, nil
+		}
+	}
+
 	// A click can navigate; report where the page actually ended up.
-	return a.stateAfterSettle(ctx, target)
+	out, err := a.stateAfterSettle(ctx, target)
+	out.ClickMethod = method
+	return out, err
+}
+
+// screenPoint converts the measured element box into the screen coordinates
+// computer_use and the driver's own click tool use.
+//
+// The two spaces differ by the window's position plus its chrome -- tab strip,
+// URL bar, notification banners -- which is 156px on a stock Chromium window.
+// The window's screen box comes from get_window_state (whose frames are already
+// screen-relative) and the viewport size from the same script that measured the
+// element, so this costs one extra call and never a second script.
+func (a *Adapter) screenPoint(ctx context.Context, target pageTarget, state pageState) (point, bool) {
+	if state.Rect == nil || state.Rect.W <= 0 || state.Rect.H <= 0 {
+		return point{}, false
+	}
+	if state.ViewportW <= 0 || state.ViewportH <= 0 {
+		return point{}, false
+	}
+	win, ok := a.windowFrame(ctx, target)
+	if !ok || win.W <= 0 || win.H <= 0 {
+		return point{}, false
+	}
+
+	// Chrome sits above the viewport; any side border is split evenly. Both
+	// are derived rather than assumed, so a different browser or a banner
+	// simply changes the numbers.
+	chromeTop := win.H - state.ViewportH
+	sideBorder := (win.W - state.ViewportW) / 2
+	if chromeTop < 0 || sideBorder < 0 {
+		// The viewport cannot be larger than its window; something is
+		// inconsistent, so do not guess a click position from it.
+		return point{}, false
+	}
+
+	x := win.X + sideBorder + state.Rect.X + state.Rect.W/2
+	y := win.Y + chromeTop + state.Rect.Y + state.Rect.H/2
+
+	// A centre that landed outside the window means the element is off-screen
+	// despite the scroll (a sticky overlay, a virtualized list); clicking
+	// there would hit whatever else is at those pixels.
+	if x < win.X || x > win.X+win.W || y < win.Y+chromeTop || y > win.Y+win.H {
+		return point{}, false
+	}
+	return point{x: x, y: y}, true
+}
+
+// windowFrame reads the browser window's screen box. get_window_state reports
+// element frames in screen coordinates, and the outermost of them is the window
+// itself.
+func (a *Adapter) windowFrame(ctx context.Context, target pageTarget) (cuaFrame, bool) {
+	result, meta := a.invokeAs(ctx, toolGetWindowState, map[string]any{
+		"pid":       target.pid,
+		"window_id": target.windowID,
+	}, true, "browser")
+	if meta.Code != "" {
+		return cuaFrame{}, false
+	}
+	var out cuaElementsOutput
+	if err := decodeStructured(result, &out); err != nil {
+		return cuaFrame{}, false
+	}
+	var best cuaFrame
+	found := false
+	for _, e := range out.Elements {
+		if e.Frame == nil {
+			continue
+		}
+		if !found || e.Frame.W*e.Frame.H > best.W*best.H {
+			best, found = *e.Frame, true
+		}
+	}
+	return best, found
+}
+
+type point struct{ x, y int }
+
+// jsRect is an element box as the measuring script reports it.
+type jsRect struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+	W int `json:"w"`
+	H int `json:"h"`
 }
 
 func (a *Adapter) browserType(ctx context.Context, target pageTarget, in api.BrowserInput) (api.BrowserOutput, error) {
@@ -430,13 +583,31 @@ func submitJS(submit bool) string {
 // elements with their roles, accessible names and bounds, and leave the nodes
 // in window.__hadronRefs for later ref actions.
 //
+// The selector takes bare 'a', not a[href]: js-dos's "Click to start" overlay
+// is an anchor with no href wired up in JS, and requiring href made the one
+// control that starts the game invisible to every snapshot. canvas is included
+// for the same reason -- it is where such applications actually live.
+//
+// A second, bounded pass picks up elements a page made clickable with
+// addEventListener and gave no role: computed cursor:pointer is the strongest
+// signal available for those. It is capped because walking every node of a
+// large document on each snapshot is not free.
+//
+// The script carries no comments of its own: it crosses the wire on every
+// call, so the explanation lives here instead.
+//
 // The nodes are kept in a JavaScript array rather than stamped onto the DOM as
 // data-* attributes: attributes are visible to the page's own selectors and
 // CSS, so marking them up could change the very page we are inspecting.
 func snapshotJS(limit int) string {
 	return fmt.Sprintf(`(function(){
-var sel='a[href],button,input,select,textarea,summary,[role=button],[role=link],[role=textbox],[role=checkbox],[role=tab],[role=menuitem],[onclick],[tabindex]';
+var sel='a,button,input,select,textarea,summary,canvas,[role],[onclick],[tabindex]';
 var nodes=[].slice.call(document.querySelectorAll(sel));
+var extra=[].slice.call(document.querySelectorAll('div,span,img,li,td,p'));
+for(var k=0;k<extra.length&&k<2000;k++){
+  var c=extra[k];
+  if(nodes.indexOf(c)<0&&window.getComputedStyle(c).cursor==='pointer'){nodes.push(c);}
+}
 var out=[],refs=[],truncated=false;
 for(var i=0;i<nodes.length;i++){
   if(out.length>=%d){truncated=true;break;}
@@ -457,7 +628,8 @@ for(var i=0;i<nodes.length;i++){
             width:Math.round(r.width),height:Math.round(r.height)});
 }
 window.__hadronRefs=refs;
-return JSON.stringify({url:location.href,title:document.title,elements:out,truncated:truncated});})()`, limit)
+return JSON.stringify({url:location.href,title:document.title,vw:window.innerWidth,vh:window.innerHeight,
+                       elements:out,truncated:truncated});})()`, limit)
 }
 
 // refIndex turns a public ref ("e12") into its index in window.__hadronRefs.

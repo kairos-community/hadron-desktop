@@ -60,6 +60,10 @@ The design was checked against:
 - Exposing Cua computer-server's unauthenticated REST or WebSocket API.
 - Running an agent model or planning loop inside the appliance.
 - Supporting arbitrary raw background input as a v1 contract.
+- Holding a key down. `computer_use key` is an atomic tap: cua-driver exposes no
+  key-down/key-up pair, so hold-to-act interfaces (real-time games,
+  press-and-hold controls) are out of scope. See
+  `specs/2026-07-20-browser-tool-amendment.md`.
 - Treating bearer tokens or application-level tool filtering as the security
   boundary. The operating-system user and VM remain the primary boundary.
 - Providing hostile-code containment after the optional administrator token

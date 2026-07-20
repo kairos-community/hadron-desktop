@@ -172,3 +172,70 @@ overloads one tool with two different targeting models — pixels and refs —
 whose arguments are mutually meaningless. The validation rules would have to
 reject most field combinations, which is what a separate tool expresses
 directly.
+
+## Addendum (2026-07-20): limits found by stress-testing
+
+Driving DOOM in a browser (js-dos) exercised the boundary between `browser` and
+`computer_use` harder than the docs gate does. Four things came out of it; three
+are fixed, one is a standing limitation.
+
+### Fixed: a scripted click is not a user gesture
+
+`browser click` originally called `el.click()` in the page. That is not user
+activation, so the Fullscreen API, clipboard access and autoplay all refuse it
+-- and refuse it *silently*: clicking a page's "Fullscreen" control returned
+success and nothing happened.
+
+`click` now scrolls the element into view, converts its box to screen
+coordinates, and dispatches a REAL pointer event, falling back to `el.click()`
+only when that conversion is unavailable. The result reports `click_method`
+(`pointer` or `script`) so a caller can tell a trusted click from an untrusted
+one instead of watching a successful call do nothing.
+
+### Fixed: viewport coordinates are not screen coordinates
+
+`getBoundingClientRect` is viewport-relative; `computer_use` clicks in screen
+coordinates. They differ by the window position plus the browser chrome -- 156px
+on a stock window here. The spec previously offered element bounds so a caller
+could "fall back to computer_use", which was misleading: doing that literally
+put a click 158px above its target.
+
+Elements now carry `screen_x`/`screen_y` alongside `x`/`y`, derived from the
+window box (`get_window_state`, whose frames are screen-relative) and the
+viewport size reported by the same script. They are omitted, rather than
+defaulted, when the geometry cannot be read.
+
+### Fixed: role-less clickables were invisible
+
+The selector required `a[href]`. js-dos's "Click to start" is an anchor with no
+href wired up in JavaScript, so the one control that starts the game did not
+appear in any snapshot -- all 17 elements were ordinary links. The selector now
+takes bare `a` and `canvas`, plus a bounded second pass over elements whose
+computed `cursor` is `pointer`.
+
+### Standing limitation: keys cannot be held
+
+`computer_use key` delivers an atomic tap. There is no key-down/key-up pair and
+no hold duration, so hold-to-act interfaces -- real-time games, press-and-hold
+controls, click-drag-with-modifier gestures -- cannot be driven through the
+public surface. In DOOM this is visible as a marine who turns a sliver per
+keypress and never fires.
+
+This is not a gap we can close locally. Verified against the shipped image:
+
+- `cua-driver` exposes no `key_down`/`key_up`; `press_key` is atomic, and its
+  `duration_ms` strings belong to mouse glide/dwell, not key hold.
+- the image carries no `xdotool`, `xte`, `ydotool` or `wtype`, so the
+  `terminal` tool offers no escape hatch either.
+
+Two upgrade paths exist, neither free:
+
+1. **Upstream `key_down`/`key_up` in cua-driver**, then expose `duration_ms` on
+   `computer_use key`. Correct, but gated on a component we do not release.
+2. **Ship a local XTEST helper** and implement the hold in the session broker.
+   Self-contained, but it injects input outside the Cua adapter, and so
+   **bypasses the single-seat serialization** that keeps a snapshot from
+   interleaving with a click. That invariant is deliberate.
+
+Until a real use case demands it, this stays a documented non-goal: the
+appliance automates applications, and hold-to-act is a game and CAD need.

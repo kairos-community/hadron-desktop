@@ -27,6 +27,9 @@ func browserWindows() *mcp.CallToolResult {
 // containing JSON -- the shape unwrapJSON has to peel.
 func jsReply(t *testing.T, payload map[string]any) *mcp.CallToolResult {
 	t.Helper()
+	if _, ok := payload["vw"]; !ok {
+		payload["vw"], payload["vh"] = fakeViewW, fakeViewH
+	}
 	inner, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
@@ -38,6 +41,24 @@ func jsReply(t *testing.T, payload map[string]any) *mcp.CallToolResult {
 	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(wrapped)}}}
 }
 
+// Geometry of the fake browser window, mirroring a stock Chromium: 1280x800 on
+// screen with a 1280x644 viewport, i.e. 156px of chrome -- the exact offset
+// measured on the live appliance.
+const (
+	fakeWinW, fakeWinH   = 1280, 800
+	fakeViewW, fakeViewH = 1280, 644
+	fakeChromeTop        = fakeWinH - fakeViewH
+)
+
+func windowStateReply() *mcp.CallToolResult {
+	return &mcp.CallToolResult{StructuredContent: map[string]any{
+		"elements": []any{
+			map[string]any{"element_index": 0, "role": "window",
+				"frame": map[string]any{"x": 0, "y": 0, "w": fakeWinW, "h": fakeWinH}},
+		},
+	}}
+}
+
 // newBrowserCaller returns a caller that resolves windows and hands every
 // execute_javascript call to js.
 func newBrowserCaller(t *testing.T, js func(script string) *mcp.CallToolResult) *fakeCaller {
@@ -46,6 +67,10 @@ func newBrowserCaller(t *testing.T, js func(script string) *mcp.CallToolResult) 
 		switch name {
 		case toolListWindows:
 			return browserWindows(), nil
+		case toolGetWindowState:
+			return windowStateReply(), nil
+		case toolClick:
+			return &mcp.CallToolResult{}, nil
 		case toolPage:
 			if got := args["action"]; got != "execute_javascript" {
 				t.Errorf("page action = %v, want execute_javascript (the only one implemented on the Linux backend)", got)
@@ -457,5 +482,138 @@ func TestBrowserUsesTitleWhenAppNameIsEmpty(t *testing.T) {
 	}
 	if out.WindowID != 30 {
 		t.Fatalf("window_id = %d, want 30", out.WindowID)
+	}
+}
+
+// TestBrowserClickUsesARealPointer is the fix for a silent failure: el.click()
+// is not a user gesture, so a page's Fullscreen control reported a successful
+// click and did nothing. A real pointer event at the element's screen position
+// is a genuine gesture.
+func TestBrowserClickUsesARealPointer(t *testing.T) {
+	caller := newBrowserCaller(t, func(script string) *mcp.CallToolResult {
+		if strings.Contains(script, "el.click()") {
+			t.Error("click must not fall back to el.click() when the screen position is known")
+		}
+		return jsReply(t, map[string]any{
+			"url": "https://kairos.io/", "title": "Kairos",
+			// An element 40x18 at viewport (261,203).
+			"rect": map[string]any{"x": 261, "y": 203, "w": 40, "h": 18},
+		})
+	})
+
+	out, _ := NewAdapter(caller).Browser(context.Background(),
+		api.BrowserInput{Action: api.BrowserClick, Ref: "e1"})
+	if out.Code != "" {
+		t.Fatalf("code = %q, want success: %s", out.Code, out.Message)
+	}
+	if out.ClickMethod != "pointer" {
+		t.Fatalf("click_method = %q, want %q", out.ClickMethod, "pointer")
+	}
+
+	var click recordedCall
+	for _, c := range caller.calls {
+		if c.name == toolClick {
+			click = c
+		}
+	}
+	if click.name == "" {
+		t.Fatal("no pointer click was dispatched")
+	}
+	// Centre of the element, converted: x = 261 + 40/2, y = 156 + 203 + 18/2.
+	wantX, wantY := 261+20, fakeChromeTop+203+9
+	if click.args["x"] != wantX || click.args["y"] != wantY {
+		t.Fatalf("clicked (%v,%v), want (%d,%d) -- viewport y plus the %dpx chrome offset",
+			click.args["x"], click.args["y"], wantX, wantY, fakeChromeTop)
+	}
+}
+
+// TestBrowserClickFallsBackToScript: when the window geometry cannot be read
+// there is no way to convert coordinates, and refusing outright would be worse
+// than a scripted click -- but the caller must be told which one happened.
+func TestBrowserClickFallsBackToScript(t *testing.T) {
+	scripted := false
+	caller := &fakeCaller{handler: func(_ context.Context, name string, args map[string]any) (*mcp.CallToolResult, error) {
+		switch name {
+		case toolListWindows:
+			return browserWindows(), nil
+		case toolGetWindowState:
+			// No frames: geometry unavailable.
+			return &mcp.CallToolResult{StructuredContent: map[string]any{"elements": []any{}}}, nil
+		case toolClick:
+			t.Error("a pointer click must not be dispatched without a screen position")
+			return &mcp.CallToolResult{}, nil
+		case toolPage:
+			script, _ := args["javascript"].(string)
+			if strings.Contains(script, "el.click()") {
+				scripted = true
+			}
+			return jsReply(t, map[string]any{"url": "u", "title": "t",
+				"rect": map[string]any{"x": 10, "y": 10, "w": 20, "h": 20}}), nil
+		}
+		return nil, nil
+	}}
+
+	out, _ := NewAdapter(caller).Browser(context.Background(),
+		api.BrowserInput{Action: api.BrowserClick, Ref: "e1"})
+	if out.Code != "" {
+		t.Fatalf("code = %q, want success: %s", out.Code, out.Message)
+	}
+	if !scripted {
+		t.Error("expected the el.click() fallback to run")
+	}
+	if out.ClickMethod != "script" {
+		t.Fatalf("click_method = %q, want %q so the caller knows the gesture was untrusted", out.ClickMethod, "script")
+	}
+}
+
+// TestBrowserSnapshotReportsScreenCoordinates: the whole point of publishing
+// bounds is that a caller can hand them to computer_use. Viewport bounds alone
+// are off by the chrome height, which is how a click landed 158px high.
+func TestBrowserSnapshotReportsScreenCoordinates(t *testing.T) {
+	caller := newBrowserCaller(t, func(string) *mcp.CallToolResult {
+		return jsReply(t, map[string]any{
+			"url": "https://js-dos.com/DOOM/", "title": "DOOM",
+			"elements": []any{
+				map[string]any{"ref": "e1", "role": "a", "name": "Fullscreen",
+					"x": 460, "y": 622, "width": 116, "height": 26},
+			},
+		})
+	})
+
+	out, _ := NewAdapter(caller).Browser(context.Background(), api.BrowserInput{Action: api.BrowserSnapshot})
+	if len(out.Elements) != 1 {
+		t.Fatalf("elements = %d, want 1", len(out.Elements))
+	}
+	el := out.Elements[0]
+	if el.ScreenX == nil || el.ScreenY == nil {
+		t.Fatal("screen coordinates were not reported")
+	}
+	// This is the real case: the snapshot said y=622 while it rendered at 778.
+	if *el.ScreenX != 460 || *el.ScreenY != 622+fakeChromeTop {
+		t.Fatalf("screen = (%d,%d), want (460,%d)", *el.ScreenX, *el.ScreenY, 622+fakeChromeTop)
+	}
+}
+
+// TestBrowserSnapshotSeesRoleLessClickables: js-dos's "Click to start" is an
+// anchor with no href bound by addEventListener, and requiring a[href] made the
+// one control that starts the game invisible to every snapshot.
+func TestBrowserSnapshotSeesRoleLessClickables(t *testing.T) {
+	var script string
+	caller := newBrowserCaller(t, func(s string) *mcp.CallToolResult {
+		script = s
+		return jsReply(t, map[string]any{"url": "u", "title": "t", "elements": []any{}})
+	})
+
+	if _, err := NewAdapter(caller).Browser(context.Background(),
+		api.BrowserInput{Action: api.BrowserSnapshot}); err != nil {
+		t.Fatalf("Browser: %v", err)
+	}
+	if strings.Contains(script, "a[href]") {
+		t.Error("selector still requires href, which hides anchors that are wired up in JS")
+	}
+	for _, want := range []string{"'a,", "canvas", "cursor==='pointer'"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("snapshot selector is missing %q", want)
+		}
 	}
 }

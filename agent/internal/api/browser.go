@@ -59,13 +59,23 @@ type BrowserElement struct {
 	Name string `json:"name,omitempty"`
 	// Value is the current value of a form control, when it has one.
 	Value string `json:"value,omitempty"`
-	// Bounds are viewport-relative CSS pixels. They are reported so a caller
-	// can reason about layout or fall back to computer_use, not because any
-	// browser action needs them.
+	// X and Y are viewport-relative CSS pixels, as the page itself sees them.
 	X      int `json:"x"`
 	Y      int `json:"y"`
 	Width  int `json:"width"`
 	Height int `json:"height"`
+
+	// ScreenX and ScreenY are the same point in SCREEN coordinates, which is
+	// what computer_use clicks in. The two differ by the browser's chrome --
+	// tab strip, URL bar, any notification banner -- plus the window's own
+	// position, and the gap is large: 156px on a stock window. Handing a
+	// caller only viewport bounds and inviting them to "fall back to
+	// computer_use" produced a click 158px above its target.
+	//
+	// They are omitted when the window geometry could not be read, so a
+	// caller can tell "no conversion available" from "the origin is 0,0".
+	ScreenX *int `json:"screen_x,omitempty"`
+	ScreenY *int `json:"screen_y,omitempty"`
 }
 
 // BrowserInput is the single input type for the browser tool. Only the fields
@@ -288,6 +298,17 @@ type BrowserOutput struct {
 	// WindowID is the browser window the call acted on, which is useful when
 	// the tool resolved it rather than the caller naming it.
 	WindowID int `json:"window_id,omitempty"`
+
+	// ClickMethod reports how a click was delivered: "pointer" for a real
+	// pointer event at the element's screen position, or "script" for a
+	// JavaScript el.click().
+	//
+	// The distinction is not cosmetic. A scripted click is not a user
+	// gesture, so anything gated on user activation -- the Fullscreen API,
+	// clipboard access, autoplay -- refuses it, and refuses it SILENTLY: the
+	// call reports success and nothing happens. Surfacing which path ran lets
+	// a caller understand a click that "worked" but did nothing.
+	ClickMethod string `json:"click_method,omitempty"`
 
 	// Truncated reports that a snapshot hit MaxElements and omitted elements.
 	Truncated bool `json:"truncated,omitempty"`
