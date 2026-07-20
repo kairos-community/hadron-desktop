@@ -143,7 +143,7 @@ func (a *Adapter) ComputerUse(ctx context.Context, in api.ComputerUseInput) (api
 
 func (a *Adapter) capture(ctx context.Context, in api.ComputerUseInput) (api.ComputerUseOutput, error) {
 	if in.Scope == api.ScopeWindow {
-		result, rmeta := a.invoke(ctx, toolGetWindowState, windowArgs(in), true)
+		result, rmeta := a.invoke(ctx, toolGetWindowState, a.windowArgsFor(ctx, in), true)
 		if rmeta.Code != "" {
 			return api.ComputerUseOutput{ResultMeta: rmeta}, nil
 		}
@@ -177,7 +177,7 @@ func (a *Adapter) capture(ctx context.Context, in api.ComputerUseInput) (api.Com
 
 func (a *Adapter) accessibility(ctx context.Context, in api.ComputerUseInput) (api.ComputerUseOutput, error) {
 	if in.Scope == api.ScopeWindow {
-		args := windowArgs(in)
+		args := a.windowArgsFor(ctx, in)
 		args["include_screenshot"] = false
 		result, rmeta := a.invoke(ctx, toolGetWindowState, args, true)
 		if rmeta.Code != "" {

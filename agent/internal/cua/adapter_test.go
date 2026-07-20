@@ -133,11 +133,17 @@ func TestComputerUseMapsEveryActionToTheRightCuaCall(t *testing.T) {
 			},
 		},
 		{
+			// Identified by window_id alone, so the adapter first resolves the
+			// owning pid from list_windows: get_window_state rejects a call
+			// without it. (The fake returns no windows here, so nothing is
+			// added to the args -- the call still goes out, and the driver's
+			// own error would surface.)
 			name: "accessibility window",
 			input: api.ComputerUseInput{
 				Action: api.ActionAccessibility, Scope: api.ScopeWindow, WindowID: int64Ptr(42),
 			},
 			want: []recordedCall{
+				{name: toolListWindows, args: map[string]any{}},
 				{name: toolGetWindowState, args: map[string]any{
 					"window_id": int64(42), "include_screenshot": false,
 				}},
@@ -798,7 +804,7 @@ func TestComputerUseRejectsInvalidInputWithoutCallingCua(t *testing.T) {
 // window_id already names the window, so the adapter resolves the owning pid
 // from list_windows instead of leaking that pairing requirement into the tool
 // contract (api.Validate accepts "pid or window_id").
-func TestPointerActionsResolvePIDFromWindowID(t *testing.T) {
+func TestWindowTargetedActionsResolvePIDFromWindowID(t *testing.T) {
 	const wantWindow, wantPID = int64(12582917), 2121
 
 	windowsHandler := func(_ context.Context, name string, _ map[string]any) (*mcp.CallToolResult, error) {
@@ -822,6 +828,12 @@ func TestPointerActionsResolvePIDFromWindowID(t *testing.T) {
 		{"double_click", api.ComputerUseInput{Action: api.ActionDoubleClick, WindowID: int64Ptr(wantWindow), X: intPtr(10), Y: intPtr(20)}, toolDoubleClick},
 		{"drag", api.ComputerUseInput{Action: api.ActionDrag, WindowID: int64Ptr(wantWindow), FromX: intPtr(1), FromY: intPtr(2), ToX: intPtr(3), ToY: intPtr(4)}, toolDrag},
 		{"scroll", api.ComputerUseInput{Action: api.ActionScroll, WindowID: int64Ptr(wantWindow), Direction: api.DirectionDown, Amount: intPtr(2)}, toolScroll},
+		// window-scoped reads go through get_window_state, which has the same
+		// pid requirement -- an agent must be able to inspect the window it
+		// just found by id (this is what blocked clicking a link located via
+		// the accessibility tree).
+		{"capture(window)", api.ComputerUseInput{Action: api.ActionCapture, Scope: api.ScopeWindow, WindowID: int64Ptr(wantWindow)}, toolGetWindowState},
+		{"accessibility(window)", api.ComputerUseInput{Action: api.ActionAccessibility, Scope: api.ScopeWindow, WindowID: int64Ptr(wantWindow)}, toolGetWindowState},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeCaller{handler: windowsHandler}
@@ -856,7 +868,7 @@ func TestPointerActionsResolvePIDFromWindowID(t *testing.T) {
 
 // When the caller already supplied pid there is nothing to resolve, so the
 // adapter must not spend an extra round trip on list_windows.
-func TestPointerActionsWithPIDSkipTheLookup(t *testing.T) {
+func TestWindowTargetedActionsWithPIDSkipTheLookup(t *testing.T) {
 	fake := &fakeCaller{}
 	in := api.ComputerUseInput{Action: api.ActionClick, PID: intPtr(7), WindowID: int64Ptr(99), X: intPtr(1), Y: intPtr(2)}
 	if _, err := NewAdapter(fake).ComputerUse(t.Context(), in); err != nil {
@@ -871,7 +883,7 @@ func TestPointerActionsWithPIDSkipTheLookup(t *testing.T) {
 
 // A window_id the driver does not know about must not synthesise an error of
 // our own: the call goes out unresolved so the driver's own message surfaces.
-func TestPointerActionUnknownWindowIDStillDispatches(t *testing.T) {
+func TestWindowTargetedActionUnknownWindowIDStillDispatches(t *testing.T) {
 	fake := &fakeCaller{handler: func(_ context.Context, name string, _ map[string]any) (*mcp.CallToolResult, error) {
 		if name == toolListWindows {
 			return &mcp.CallToolResult{StructuredContent: map[string]any{"windows": []any{}}}, nil
