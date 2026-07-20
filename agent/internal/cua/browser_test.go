@@ -345,6 +345,10 @@ func TestUnwrapJSONPeelsTheDriversWrapping(t *testing.T) {
 		"json string":  `"{\"url\":\"https://kairos.io/\"}"`,
 		"double wrap":  `"\"{\\\"url\\\":\\\"https://kairos.io/\\\"}\""`,
 		"with padding": "  {\"url\":\"https://kairos.io/\"}\n",
+		// The shape the real Linux page backend actually returned, captured
+		// from a live run: a CDP path label, then the value as a JSON string.
+		"labelled":             `cdp.runtime.evaluate.user_gesture: "{\"url\":\"https://kairos.io/\"}"`,
+		"labelled bare object": `cdp.runtime.evaluate: {"url":"https://kairos.io/"}`,
 	}
 	for name, payload := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -364,6 +368,11 @@ func TestUnwrapJSONPeelsTheDriversWrapping(t *testing.T) {
 	}
 	if err := unwrapJSON("not json at all", &state); err == nil {
 		t.Error("unparseable reply must be an error")
+	}
+	// A label must not swallow a genuinely broken reply: everything after the
+	// colon here is still not JSON.
+	if err := unwrapJSON("some.label: still not json", &state); err == nil {
+		t.Error("a labelled but unparseable reply must be an error")
 	}
 }
 

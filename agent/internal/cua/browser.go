@@ -510,27 +510,66 @@ func (a *Adapter) pageJS(ctx context.Context, target pageTarget, js string) (pag
 	return state, api.ResultMeta{}
 }
 
-// unwrapJSON decodes the object a script returned. execute_javascript reports
-// its value wrapped and escaped, and how many times is a driver detail rather
-// than something this contract should depend on: a JSON object may arrive
-// directly, or as a JSON string containing that object, or double-wrapped. Peel
-// string layers until an object decodes or there is nothing left to peel.
+// unwrapJSON decodes the object a script returned.
+//
+// How execute_javascript presents that value is a driver detail this contract
+// should not depend on, and in practice it is layered. Observed against the
+// real Linux backend, a reply looks like:
+//
+//	cdp.runtime.evaluate.user_gesture: "{\"url\":\"https://kairos.io/\", ...}"
+//
+// -- a label naming the CDP path it took, then the script's value as an
+// escaped JSON string. Other replies arrive as a bare object, or as a string
+// wrapped more than once. So peel: strip a leading label, unwrap a JSON string
+// layer, and try to decode, until something decodes or there is nothing left
+// to peel.
 func unwrapJSON(text string, out any) error {
 	payload := strings.TrimSpace(text)
 	if payload == "" {
 		return fmt.Errorf("empty reply")
 	}
-	for range 4 {
+	for range 6 {
+		if payload == "" {
+			break
+		}
 		if err := json.Unmarshal([]byte(payload), out); err == nil {
 			return nil
 		}
+		// A JSON string layer: unwrap it and look again.
 		var inner string
-		if err := json.Unmarshal([]byte(payload), &inner); err != nil {
-			break
+		if err := json.Unmarshal([]byte(payload), &inner); err == nil {
+			payload = strings.TrimSpace(inner)
+			continue
 		}
-		payload = strings.TrimSpace(inner)
+		// A driver label prefixing the value.
+		if rest, ok := stripLabel(payload); ok {
+			payload = rest
+			continue
+		}
+		break
 	}
-	return fmt.Errorf("unrecognized reply %.120q", text)
+	return fmt.Errorf("unrecognized reply %.160q", text)
+}
+
+// stripLabel removes a leading `some.label: ` prefix, as the page backend puts
+// in front of a script's value. The label is deliberately narrow -- letters,
+// digits, dot, underscore, dash -- so it cannot match the start of JSON: an
+// object begins with '{' and a string with '"', neither of which is a legal
+// label character.
+func stripLabel(payload string) (string, bool) {
+	colon := strings.IndexByte(payload, ':')
+	if colon <= 0 || colon == len(payload)-1 {
+		return "", false
+	}
+	for _, r := range payload[:colon] {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '_', r == '-':
+		default:
+			return "", false
+		}
+	}
+	return strings.TrimSpace(payload[colon+1:]), true
 }
 
 func browserErr(code api.ErrorCode, message string, retryable bool) api.BrowserOutput {
