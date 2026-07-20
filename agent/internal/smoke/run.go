@@ -47,8 +47,10 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	descriptorPath := fs.String("descriptor", "", "path to the fixture descriptor JSON (required)")
 	adminBearerFile := fs.String("admin-bearer-file", "", "path to a file holding the admin (hdn_a_) bearer (required)")
-	mode := fs.String("mode", "contract", "smoke mode: contract, persist-write, or persist-verify")
+	mode := fs.String("mode", "contract", "smoke mode: contract, persist-write, persist-verify, or exec")
 	marker := fs.String("marker", "", "opaque marker value for the persist-write/persist-verify modes")
+	command := fs.String("command", "", "shell command to run through the public terminal tool (exec mode)")
+	execAdmin := fs.Bool("exec-admin", false, "run the exec-mode command with the admin bearer instead of the user bearer")
 	readyTimeout := fs.Duration("ready-timeout", 60*time.Second, "how long to wait for the gateway /readyz")
 	callTimeout := fs.Duration("call-timeout", 30*time.Second, "per tool-call timeout")
 	if err := fs.Parse(args); err != nil {
@@ -56,9 +58,13 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch *mode {
-	case "contract", "persist-write", "persist-verify":
+	case "contract", "persist-write", "persist-verify", "exec":
 	default:
-		fmt.Fprintf(stderr, "mcp-smoke: unknown mode %q (want: contract, persist-write, or persist-verify)\n", *mode)
+		fmt.Fprintf(stderr, "mcp-smoke: unknown mode %q (want: contract, persist-write, persist-verify, or exec)\n", *mode)
+		return ExitDescriptor
+	}
+	if *mode == "exec" && *command == "" {
+		fmt.Fprintln(stderr, "mcp-smoke: --command is required for mode \"exec\"")
 		return ExitDescriptor
 	}
 	if *descriptorPath == "" {
@@ -125,6 +131,31 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	}
 	var report Report
 	switch *mode {
+	case "exec":
+		// exec is a driver, not an assertion suite: the recovery gate uses it
+		// to inject a failure and needs the command's own output and exit
+		// status on stdout. The command's exit code becomes this process's
+		// exit code so a shell caller can branch on it directly, EXCEPT that a
+		// transport/assertion failure keeps its own reserved code.
+		var res ExecResult
+		report, res = suite.RunExec(ctx, *command, *execAdmin, *callTimeout)
+		if out := report.Outcome(); out != ExitPass {
+			writeArtifact(desc.ArtifactDirectory, artifactReport{
+				Mode: report.Mode, Started: started, Finished: time.Now(),
+				ExitCode: out, Checks: report.Checks,
+			}, stderr)
+			printSummary(stdout, report, out)
+			return out
+		}
+		fmt.Fprint(stdout, res.Stdout)
+		if res.Stderr != "" {
+			fmt.Fprint(stderr, res.Stderr)
+		}
+		writeArtifact(desc.ArtifactDirectory, artifactReport{
+			Mode: report.Mode, Started: started, Finished: time.Now(),
+			ExitCode: res.ExitCode, Passed: 1, Checks: report.Checks,
+		}, stderr)
+		return res.ExitCode
 	case "persist-write":
 		report = suite.RunPersistWrite(ctx, *marker)
 	case "persist-verify":
@@ -186,6 +217,8 @@ func writeArtifact(dir string, rep artifactReport, stderr io.Writer) {
 	}
 	name := "mcp-smoke.json"
 	switch rep.Mode {
+	case "exec":
+		name = "mcp-exec.json"
 	case "persist-write":
 		name = "mcp-persist-write.json"
 	case "persist-verify":

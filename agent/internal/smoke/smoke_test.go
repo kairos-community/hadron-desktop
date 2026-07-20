@@ -848,3 +848,45 @@ func TestMainExitDescriptorPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestExecModeRunsThroughThePublicTerminal covers the driver the recovery gate
+// depends on: it must reach the appliance through the public terminal tool with
+// the requested credential class, and hand back the command's own exit status
+// so a shell caller can branch on it.
+func TestExecModeRunsThroughThePublicTerminal(t *testing.T) {
+	h := buildHarness(t, nil)
+	suite := h.suite()
+
+	report, res := suite.RunExec(context.Background(), "echo hello", false, 10*time.Second)
+	if got := report.Outcome(); got != ExitPass {
+		t.Fatalf("Outcome = %d, want %d: %+v", got, ExitPass, report.Checks)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", res.ExitCode)
+	}
+	// The harness's broker is a stub that echoes a canned reply, so this
+	// asserts the plumbing carries stdout back, not what a real shell would
+	// print -- that is the live recovery gate's job.
+	if res.Stdout == "" {
+		t.Fatal("stdout was empty; exec must return the terminal tool's output")
+	}
+	if len(report.Checks) != 1 || report.Checks[0].Name != "exec_user" {
+		t.Fatalf("checks = %+v, want a single exec_user check", report.Checks)
+	}
+}
+
+// TestExecModeAdminUsesTheAdminBearer: the recovery gate kills root-owned
+// services, so exec must actually route through the admin class rather than
+// quietly running everything as the unprivileged user.
+func TestExecModeAdminUsesTheAdminBearer(t *testing.T) {
+	h := buildHarness(t, nil)
+	suite := h.suite()
+
+	report, _ := suite.RunExec(context.Background(), "id -un", true, 10*time.Second)
+	if got := report.Outcome(); got != ExitPass {
+		t.Fatalf("Outcome = %d, want %d: %+v", got, ExitPass, report.Checks)
+	}
+	if len(report.Checks) != 1 || report.Checks[0].Name != "exec_admin" {
+		t.Fatalf("checks = %+v, want a single exec_admin check", report.Checks)
+	}
+}

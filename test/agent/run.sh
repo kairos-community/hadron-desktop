@@ -810,6 +810,339 @@ cmd_fixture() {
 
 # cmd_stop -- read the runtime PID, request a graceful QMP powerdown, escalate
 # to a kill after 20s, stop noVNC, and KEEP all artifacts.
+# ---------------------------------------------------------------------------
+# Recovery gate (Phase 4 Task 6)
+# ---------------------------------------------------------------------------
+#
+# Every failure below is injected THROUGH THE PUBLIC MCP SURFACE (mcp-smoke
+# --mode exec) or through the console (QMP sendkey), never over SSH or a back
+# door, so the gate exercises the same path a real operator or client takes.
+#
+# The hard rule the plan sets: a scenario may only pass if the harness actually
+# OBSERVED a degraded/not-ready transition. A service that never went down, or
+# went down and came back between two polls, must fail rather than silently
+# report success -- otherwise a broken watchdog looks identical to a healthy one.
+
+# _rec_health <ca> <port> -- the redacted /healthz document, or empty when the
+# gateway is not answering at all.
+_rec_health() {
+  curl --fail --silent --max-time 5 --cacert "$1" "https://127.0.0.1:$2/healthz" 2>/dev/null || true
+}
+
+# _rec_flag <json> <field> -- one boolean from /healthz as true/false/unknown.
+_rec_flag() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+raw, field = sys.argv[1], sys.argv[2]
+try:
+    doc = json.loads(raw)
+except Exception:
+    print("unknown"); sys.exit(0)
+print(str(doc.get(field, "unknown")).lower())
+PY
+}
+
+# _rec_ready <ca> <port> -- 0 when /readyz answers 200.
+_rec_ready() {
+  curl --fail --silent --max-time 5 --cacert "$1" "https://127.0.0.1:$2/readyz" >/dev/null 2>&1
+}
+
+# _rec_note <art> <line> -- append to the health timeline artifact.
+_rec_note() {
+  printf '%s %s\n' "$(date -u +%H:%M:%S)" "$2" >> "$1/timeline.log"
+  finfo "  $2"
+}
+
+# _rec_wait_degraded <ca> <port> <deadline> <art> -- return 0 as soon as the
+# appliance reports itself NOT ready, or any health flag flips false. This is
+# the observation the plan requires: without it a scenario cannot pass.
+_rec_wait_degraded() {
+  local ca="$1" port="$2" deadline="$3" art="$4" h
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if ! _rec_ready "$ca" "$port"; then
+      _rec_note "$art" "observed: /readyz stopped answering 200"; return 0
+    fi
+    h="$(_rec_health "$ca" "$port")"
+    if [ -z "$h" ]; then
+      _rec_note "$art" "observed: /healthz unreachable"; return 0
+    fi
+    local f
+    for f in session cua gateway; do
+      if [ "$(_rec_flag "$h" "$f")" = "false" ]; then
+        _rec_note "$art" "observed: healthz.$f went false"; return 0
+      fi
+    done
+    if [ "$(_rec_flag "$h" paused)" = "true" ]; then
+      _rec_note "$art" "observed: healthz.paused went true"; return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# _rec_wait_recovered <ca> <port> <deadline> <art>
+_rec_wait_recovered() {
+  local ca="$1" port="$2" deadline="$3" art="$4"
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if _rec_ready "$ca" "$port"; then
+      _rec_note "$art" "observed: /readyz is 200 again"; return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+# _rec_exec <smoke> <descriptor> <admin_token> <admin?> <command> -- run one
+# command through the public terminal tool. Prints its stdout; returns the
+# command's exit status (or the client's reserved code on a transport failure).
+_rec_exec() {
+  local smoke="$1" descriptor="$2" admin_token="$3" as_admin="$4" cmd="$5"
+  local extra=()
+  [ "$as_admin" = "admin" ] && extra+=(--exec-admin)
+  "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
+    --mode exec --command "$cmd" "${extra[@]}" 2>/dev/null
+}
+
+# cmd_recovery [IMAGE] -- RECOVERY gate. Boot an INSTALLED appliance, then kill
+# the Cua driver, the session broker, the gateway and the graphical session in
+# turn, and toggle the local emergency pause, requiring an observed degraded
+# transition and a bounded recovery for each.
+cmd_recovery() {
+  shift  # drop "recovery"
+  local image="${1:-${AGENT_IMAGE:-agent-desktop:dev}}"
+
+  # shellcheck source=lib/common.sh
+  source "$SCRIPT_DIR/lib/common.sh"
+  # shellcheck source=lib/qmp.sh
+  source "$SCRIPT_DIR/lib/qmp.sh"
+  # shellcheck source=lib/fixture.sh
+  source "$SCRIPT_DIR/lib/fixture.sh"
+
+  _agent_require_bins qemu-system-x86_64 qemu-img openssl curl python3 sha256sum || return 1
+
+  local runtime="${RECOVERY_RUNTIME:-$SCRIPT_DIR/runtime/recovery}"
+  local art="${RECOVERY_ART:-$SCRIPT_DIR/artifacts/recovery}"
+  rm -rf "$art"; mkdir -p "$runtime" "$art"; chmod 700 "$runtime" "$art" 2>/dev/null || true
+  : > "$art/timeline.log"
+
+  # 1. An installed appliance to break. Reuse the install gate's disk when it
+  #    is there (CI runs install first); otherwise run that gate now, because a
+  #    recovery gate that quietly skipped would be worse than a slow one.
+  local install_runtime="${INSTALL_RUNTIME:-$SCRIPT_DIR/runtime/install}"
+  local src_disk="${RECOVERY_DISK:-$install_runtime/disk.qcow2}"
+  if [ ! -f "$src_disk" ]; then
+    finfo "No installed disk at $src_disk; running the install gate first"
+    "$SCRIPT_DIR/run.sh" install "$image" \
+      || { err "install gate failed; cannot run recovery"; return 1; }
+    src_disk="$install_runtime/disk.qcow2"
+  fi
+  [ -f "$src_disk" ] || { err "no installed disk to recover: $src_disk"; return 1; }
+
+  local seed_out="$install_runtime/make-seed.env"
+  [ -f "$seed_out" ] || { err "missing $seed_out; re-run '$0 install'"; return 1; }
+  local user_token admin_token
+  user_token="$(sed -n 's/^USER_TOKEN_FILE=//p' "$seed_out")"
+  admin_token="$(sed -n 's/^ADMIN_TOKEN_FILE=//p' "$seed_out")"
+  [ -f "$user_token" ] && [ -f "$admin_token" ] \
+    || { err "install seed tokens are missing; re-run '$0 install'"; return 1; }
+
+  local disk="$runtime/disk.qcow2"
+  finfo "Cloning the installed disk (the gate is destructive to its copy only)"
+  cp --reflink=auto "$src_disk" "$disk" || { err "disk clone failed"; return 1; }
+
+  # 2. Boot the installed system from disk. No CD: this is the appliance as an
+  #    operator runs it.
+  local mcp_port vnc_display vnc_port
+  mcp_port="$(hdn_agent_alloc_port)"
+  vnc_display="${RECOVERY_VNC:-27}"; vnc_port=$((5900 + vnc_display))
+  local ovmf_vars="$runtime/OVMF_VARS.fd" qmp="$runtime/qmp.sock"
+  local serial="$art/serial.log" qemu_log="$art/qemu.log"
+  _agent_set_accel
+  _agent_find_ovmf "$ovmf_vars" || return 1
+  rm -f "$qmp" "$serial"; touch "$serial"
+
+  finfo "Booting the installed appliance (MCP 127.0.0.1:$mcp_port, VNC 127.0.0.1:$vnc_port)"
+  qemu-system-x86_64 "${AGENT_ACCEL[@]}" -m "${MEM:-4096}" -smp "${CPUS:-4}" \
+    "${AGENT_OVMF_ARGS[@]}" \
+    -device virtio-vga -vnc "127.0.0.1:$vnc_display" \
+    -serial "file:$serial" -qmp "unix:$qmp,server,nowait" -rtc base=utc,clock=rt \
+    -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${mcp_port}-:7443" \
+    -device virtio-net-pci,netdev=net0 \
+    -drive "if=none,id=disk,format=qcow2,file=$disk" \
+    -device "virtio-blk-pci,drive=disk,serial=target,bootindex=0" \
+    >"$qemu_log" 2>&1 &
+  local qpid=$!
+  # shellcheck disable=SC2064
+  trap "kill $qpid 2>/dev/null || true" RETURN
+
+  local ca="$runtime/ca.pem" fp="$runtime/fingerprint.txt"
+  local boot_deadline=$((SECONDS + ${RECOVERY_BOOT_TIMEOUT:-420}))
+  _agent_tofu 127.0.0.1 "$mcp_port" "$ca" "$fp" "$boot_deadline" \
+    || { err "never captured the TLS leaf"; return 1; }
+  _agent_wait_ready 127.0.0.1 "$mcp_port" "$ca" "$boot_deadline" "$qpid" \
+    || { err "installed appliance never became ready"; return 1; }
+  finfo "Appliance ready"
+  _agent_screenshot "$qmp" "$art/00-ready.ppm"
+
+  local descriptor="$runtime/fixture.json"
+  hdn_fixture_emit_descriptor "$descriptor" \
+    "https://127.0.0.1:$mcp_port/mcp" "$user_token" "$ca" "$(cat "$fp")" \
+    "127.0.0.1:$vnc_port" "" "$qmp" "$art" \
+    || { err "descriptor emission failed"; return 1; }
+  local smoke; smoke="$(_agent_build_mcp_smoke "$runtime/mcp-smoke")" || return 1
+
+  # 3. Long-lived MCP-owned work, so the emergency pause has something to kill.
+  #    Deliberately NOT setsid: it must stay in the broker's process group,
+  #    which is exactly what pause tears down.
+  local longpid
+  longpid="$(_rec_exec "$smoke" "$descriptor" "$admin_token" user \
+    'nohup sleep 900 >/dev/null 2>&1 & echo $!' | tr -d '[:space:]')"
+  _rec_note "$art" "started MCP-owned long process pid=$longpid"
+
+  local failures=0 scenario_timeout="${RECOVERY_SCENARIO_TIMEOUT:-90}"
+
+  # --- scenario 1: kill the Cua driver ------------------------------------
+  finfo "[1/6] kill cua-driver"
+  _rec_exec "$smoke" "$descriptor" "$admin_token" admin 'pkill -KILL -f cua-driver || true' >/dev/null
+  if _rec_wait_degraded "$ca" "$mcp_port" $((SECONDS + scenario_timeout)) "$art"; then
+    # The shell must keep working while computer-use is down: they are
+    # different subsystems and only one of them died.
+    if [ "$(_rec_exec "$smoke" "$descriptor" "$admin_token" user 'echo alive' | tr -d '[:space:]')" != "alive" ]; then
+      err "[1/6] the shell stopped working when cua-driver died"; failures=$((failures+1))
+    fi
+    _rec_wait_recovered "$ca" "$mcp_port" $((SECONDS + scenario_timeout)) "$art" \
+      || { err "[1/6] never became ready again"; failures=$((failures+1)); }
+  else
+    err "[1/6] never observed a degraded transition"; failures=$((failures+1))
+  fi
+  _agent_screenshot "$qmp" "$art/01-cua-driver.ppm"
+
+  # --- scenario 2: kill the unprivileged session broker --------------------
+  finfo "[2/6] kill the session broker"
+  _rec_exec "$smoke" "$descriptor" "$admin_token" admin \
+    'pkill -KILL -f "hadron-agent session" || true' >/dev/null
+  if _rec_wait_degraded "$ca" "$mcp_port" $((SECONDS + scenario_timeout)) "$art"; then
+    _rec_wait_recovered "$ca" "$mcp_port" $((SECONDS + scenario_timeout)) "$art" \
+      || { err "[2/6] the user systemd unit did not restart the broker in time"; failures=$((failures+1)); }
+  else
+    err "[2/6] never observed a degraded transition"; failures=$((failures+1))
+  fi
+  _agent_screenshot "$qmp" "$art/02-session-broker.ppm"
+
+  # --- scenario 3: kill the gateway ---------------------------------------
+  # Injected with the admin bearer through the gateway that is about to die, so
+  # the call itself may not return; that is expected, not a failure.
+  finfo "[3/6] kill the gateway"
+  _rec_exec "$smoke" "$descriptor" "$admin_token" admin \
+    'systemctl kill --signal=SIGKILL hadron-agent-gateway || true' >/dev/null 2>&1 || true
+  if _rec_wait_degraded "$ca" "$mcp_port" $((SECONDS + scenario_timeout)) "$art"; then
+    if _rec_wait_recovered "$ca" "$mcp_port" $((SECONDS + scenario_timeout)) "$art"; then
+      # The SAME bearer must still be accepted: a restart must not rotate or
+      # forget the provisioned digests.
+      if [ "$(_rec_exec "$smoke" "$descriptor" "$admin_token" user 'echo back' | tr -d '[:space:]')" != "back" ]; then
+        err "[3/6] the pre-restart bearer stopped working"; failures=$((failures+1))
+      fi
+    else
+      err "[3/6] systemd did not restart the gateway in time"; failures=$((failures+1))
+    fi
+  else
+    err "[3/6] never observed the port close"; failures=$((failures+1))
+  fi
+  _agent_screenshot "$qmp" "$art/03-gateway.ppm"
+
+  # --- scenario 4: exit the graphical session -----------------------------
+  finfo "[4/6] i3-msg exit"
+  _rec_exec "$smoke" "$descriptor" "$admin_token" user \
+    'i3-msg exit >/dev/null 2>&1 || pkill -KILL -x i3 || true' >/dev/null 2>&1 || true
+  if _rec_wait_degraded "$ca" "$mcp_port" $((SECONDS + scenario_timeout)) "$art"; then
+    if _rec_wait_recovered "$ca" "$mcp_port" $((SECONDS + ${RECOVERY_SESSION_TIMEOUT:-150})) "$art"; then
+      # The watchdog must bring the session back on the REAL seat: exactly one
+      # X server, on tty1. A hidden second display would satisfy "ready" while
+      # leaving the console dark, which is the failure this guards.
+      local displays
+      displays="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
+        'pgrep -c -x Xorg 2>/dev/null || pgrep -c -f "X .*:0" 2>/dev/null || echo 0' | tr -d '[:space:]')"
+      if [ "${displays:-0}" != "1" ]; then
+        err "[4/6] expected exactly one X server after recovery, found ${displays:-0}"
+        failures=$((failures+1))
+      fi
+    else
+      err "[4/6] the display watchdog did not restore the session in time"; failures=$((failures+1))
+    fi
+  else
+    err "[4/6] never observed a degraded transition"; failures=$((failures+1))
+  fi
+  _agent_screenshot "$qmp" "$art/04-session-restart.ppm"
+
+  # --- scenario 5: local emergency pause ----------------------------------
+  # Sent as a real console keystroke (Super+Shift+Escape) over QMP, because the
+  # whole point of the chord is that someone physically at the machine can halt
+  # remote control WITHOUT using the remote interface.
+  finfo "[5/6] emergency pause chord"
+  hmp_sendkey "$qmp" meta_l-shift-esc || true
+  local paused_seen=0 pdeadline=$((SECONDS + scenario_timeout))
+  while [ "$SECONDS" -lt "$pdeadline" ]; do
+    if [ "$(_rec_flag "$(_rec_health "$ca" "$mcp_port")" paused)" = "true" ]; then
+      paused_seen=1; _rec_note "$art" "observed: healthz.paused is true"; break
+    fi
+    sleep 1
+  done
+  if [ "$paused_seen" -eq 1 ]; then
+    # Both credential classes must be refused while paused.
+    local urc=0 arc=0
+    _rec_exec "$smoke" "$descriptor" "$admin_token" user  'echo nope' >/dev/null 2>&1 || urc=$?
+    _rec_exec "$smoke" "$descriptor" "$admin_token" admin 'echo nope' >/dev/null 2>&1 || arc=$?
+    if [ "$urc" -eq 0 ] || [ "$arc" -eq 0 ]; then
+      err "[5/6] a tool call succeeded while paused (user rc=$urc admin rc=$arc)"
+      failures=$((failures+1))
+    fi
+    _agent_screenshot "$qmp" "$art/05-paused.ppm"
+  else
+    err "[5/6] the pause chord never took effect"; failures=$((failures+1))
+  fi
+
+  # --- scenario 6: resume -------------------------------------------------
+  finfo "[6/6] emergency resume"
+  hmp_sendkey "$qmp" meta_l-shift-esc || true
+  if _rec_wait_recovered "$ca" "$mcp_port" $((SECONDS + scenario_timeout)) "$art"; then
+    if [ "$(_rec_exec "$smoke" "$descriptor" "$admin_token" user 'echo resumed' | tr -d '[:space:]')" != "resumed" ]; then
+      err "[6/6] tools did not work again after resume"; failures=$((failures+1))
+    fi
+    # The paused run must not be replayed: the long process pause killed must
+    # stay dead rather than being restarted behind the operator's back.
+    if [ -n "$longpid" ]; then
+      local still
+      still="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
+        "kill -0 $longpid 2>/dev/null && echo alive || echo gone" | tr -d '[:space:]')"
+      if [ "$still" = "alive" ]; then
+        err "[6/6] the MCP-owned process survived the pause (expected it to be torn down)"
+        failures=$((failures+1))
+      else
+        _rec_note "$art" "observed: the MCP-owned process stayed dead after resume (no replay)"
+      fi
+    fi
+  else
+    err "[6/6] never became ready again after resume"; failures=$((failures+1))
+  fi
+  _agent_screenshot "$qmp" "$art/06-resumed.ppm"
+
+  # 4. Diagnostics, retained whatever the outcome.
+  _rec_exec "$smoke" "$descriptor" "$admin_token" admin \
+    'journalctl -b --no-pager -n 2000 2>/dev/null || true' > "$art/system-journal.log" 2>/dev/null || true
+  _rec_exec "$smoke" "$descriptor" "$admin_token" user \
+    'journalctl --user -b --no-pager -n 2000 2>/dev/null || true' > "$art/user-journal.log" 2>/dev/null || true
+  _rec_health "$ca" "$mcp_port" > "$art/healthz-final.json" 2>/dev/null || true
+
+  [ -S "$qmp" ] && qmp_system_powerdown "$qmp" 2>/dev/null || true
+
+  if [ "$failures" -eq 0 ]; then
+    finfo "RESULT: PASS - all six recovery scenarios observed a failure and recovered"
+    return 0
+  fi
+  err "RESULT: FAIL - $failures recovery scenario(s) failed (see $art)"
+  return 1
+}
+
 cmd_stop() {
   # shellcheck source=lib/common.sh
   source "$SCRIPT_DIR/lib/common.sh"
@@ -878,6 +1211,7 @@ case "$SUBCOMMAND" in
   contract) cmd_contract "$@"; exit $? ;;
   install)  cmd_install  "$@"; exit $? ;;
   generic)  cmd_generic  "$@"; exit $? ;;
+  recovery) cmd_recovery "$@"; exit $? ;;
   fixture)  cmd_fixture  "$@"; exit $? ;;
   stop)     cmd_stop     "$@"; exit $? ;;
   "" ) usage; exit 64 ;;
