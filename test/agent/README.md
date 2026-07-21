@@ -96,7 +96,7 @@ All are environment variables read by `cmd_fixture`:
 | `FIXTURE_VNC` | `25` | VNC display number, so the port is `5925` |
 | `NOVNC` | `0` | set to `1` to also start a websockify/noVNC console |
 | `FIXTURE_NOVNC_PORT` | `6090` | noVNC HTTP port |
-| `FIXTURE_DISK_SIZE` | `24G` | guest disk size |
+| `FIXTURE_DISK_SIZE` | `32G` | guest disk size. 24G was not enough to install a browser plus its Flatpak runtimes: flatpak reported "not enough disk space" while the host had 45G free. |
 | `FIXTURE_BOOT_TIMEOUT` | `900` | seconds to wait for gateway readiness |
 | `MEM` / `CPUS` | `4096` / `4` | guest memory (MiB) and vCPUs |
 

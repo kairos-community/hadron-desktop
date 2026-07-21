@@ -496,7 +496,7 @@ cmd_install() {
 
   # 3. blank target disk (large enough for a full install).
   local target="$runtime/disk.qcow2"
-  qemu-img create -f qcow2 "$target" "${INSTALL_DISK_SIZE:-24G}" >/dev/null \
+  qemu-img create -f qcow2 "$target" "${INSTALL_DISK_SIZE:-32G}" >/dev/null \
     || { err "target disk create failed"; return 1; }
 
   # 4. firmware / accel / loopback wiring.
@@ -773,7 +773,7 @@ cmd_fixture() {
   QMP="$FIXTURE_QMP_SOCK" \
   SERIAL_LOG="$serial_log" \
   PID_FILE="$FIXTURE_QEMU_PID" \
-  DISK="$disk" DISK_SIZE="${FIXTURE_DISK_SIZE:-24G}" FRESH=1 \
+  DISK="$disk" DISK_SIZE="${FIXTURE_DISK_SIZE:-32G}" FRESH=1 \
   DESKTOP=i3 \
   VNC="$vnc_display" BIND=127.0.0.1 \
   MEM="${MEM:-4096}" CPUS="${CPUS:-4}" \
