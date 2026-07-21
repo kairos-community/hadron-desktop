@@ -195,7 +195,7 @@ func (s *Suite) checkGTKClick(ctx context.Context, sess *mcp.ClientSession, pid 
 		return fail.named(name)
 	}
 	x, y := center(el)
-	if fail := s.act(ctx, sess, api.ComputerUseInput{
+	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
 		Action: api.ActionClick, X: &x, Y: &y, Button: api.ButtonLeft,
 	}); fail != nil {
 		return fail.named(name)
@@ -231,7 +231,7 @@ func (s *Suite) checkGTKDoubleClick(ctx context.Context, sess *mcp.ClientSession
 		return fail.named(name)
 	}
 	x, y := center(el)
-	if fail := s.act(ctx, sess, api.ComputerUseInput{
+	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
 		Action: api.ActionDoubleClick, X: &x, Y: &y, Button: api.ButtonLeft,
 	}); fail != nil {
 		return fail.named(name)
@@ -280,7 +280,7 @@ func (s *Suite) checkGTKDrag(ctx context.Context, sess *mcp.ClientSession, pid i
 	}
 	fromX, fromY := center(source)
 	toX, toY := center(target)
-	if fail := s.act(ctx, sess, api.ComputerUseInput{
+	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
 		Action: api.ActionDrag,
 		FromX:  &fromX, FromY: &fromY, ToX: &toX, ToY: &toY,
 		Button: api.ButtonLeft,
@@ -328,7 +328,7 @@ func (s *Suite) checkGTKScroll(ctx context.Context, sess *mcp.ClientSession, pid
 
 	x, y := center(rows)
 	amount := uiScrollNotches
-	if fail := s.act(ctx, sess, api.ComputerUseInput{
+	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
 		Action: api.ActionScroll, X: &x, Y: &y,
 		Direction: api.DirectionDown, Amount: &amount,
 	}); fail != nil {
@@ -371,12 +371,12 @@ func (s *Suite) checkGTKTextEntry(ctx context.Context, sess *mcp.ClientSession, 
 		return fail.named(name)
 	}
 	x, y := center(el)
-	if fail := s.act(ctx, sess, api.ComputerUseInput{
+	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
 		Action: api.ActionClick, X: &x, Y: &y, Button: api.ButtonLeft,
 	}); fail != nil {
 		return fail.named(name)
 	}
-	if fail := s.act(ctx, sess, api.ComputerUseInput{Action: api.ActionType, Text: uiTypedText}); fail != nil {
+	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{Action: api.ActionType, Text: uiTypedText}); fail != nil {
 		return fail.named(name)
 	}
 
@@ -405,7 +405,7 @@ func (s *Suite) checkGTKTextEntry(ctx context.Context, sess *mcp.ClientSession, 
 func (s *Suite) checkGTKNamedKey(ctx context.Context, sess *mcp.ClientSession, pid int) CheckResult {
 	const name = "gtk_named_key"
 
-	if fail := s.act(ctx, sess, api.ComputerUseInput{Action: api.ActionKey, Key: uiNamedKey}); fail != nil {
+	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{Action: api.ActionKey, Key: uiNamedKey}); fail != nil {
 		return fail.named(name)
 	}
 	if fail := s.expectAccessibleText(ctx, sess, pid, "Named key: "+gtkKeyName); fail != nil {
@@ -506,7 +506,7 @@ func (s *Suite) checkChromiumDrag(ctx context.Context, sess *mcp.ClientSession, 
 
 	fromX, fromY := center(source)
 	toX, toY := center(target)
-	if fail := s.act(ctx, sess, api.ComputerUseInput{
+	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
 		Action: api.ActionDrag,
 		FromX:  &fromX, FromY: &fromY, ToX: &toX, ToY: &toY,
 		Button: api.ButtonLeft,
@@ -563,12 +563,12 @@ func (s *Suite) checkChromiumType(ctx context.Context, sess *mcp.ClientSession, 
 	}
 
 	x, y := center(el)
-	if fail := s.act(ctx, sess, api.ComputerUseInput{
+	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
 		Action: api.ActionClick, X: &x, Y: &y, Button: api.ButtonLeft,
 	}); fail != nil {
 		return fail.named(name)
 	}
-	if fail := s.act(ctx, sess, api.ComputerUseInput{Action: api.ActionType, Text: uiTypedText}); fail != nil {
+	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{Action: api.ActionType, Text: uiTypedText}); fail != nil {
 		return fail.named(name)
 	}
 
@@ -596,7 +596,7 @@ func (s *Suite) checkChromiumKey(ctx context.Context, sess *mcp.ClientSession, p
 	if fail != nil {
 		return fail.named(name)
 	}
-	if fail := s.act(ctx, sess, api.ComputerUseInput{Action: api.ActionKey, Key: uiNamedKey}); fail != nil {
+	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{Action: api.ActionKey, Key: uiNamedKey}); fail != nil {
 		return fail.named(name)
 	}
 	after, fail := s.chromiumState(ctx, sess, pid)
@@ -801,6 +801,22 @@ func (s *Suite) expectRepaint(ctx context.Context, sess *mcp.ClientSession, pid 
 // purpose: the delay must be observed by the same session that issued the
 // gesture, so a paused or wedged session surfaces here instead of being papered
 // over by the client sleeping happily on its own.
+// actOn dispatches a gesture AT a specific application's window.
+//
+// The driver refuses a bare screen coordinate while its capture scope is
+// "window" -- "Screen-absolute clicks require desktop scope" -- and its
+// keyboard tools reject a call with no target at all ("No windows found for pid
+// 0"). Every gesture here is derived from an accessibility rectangle belonging
+// to one window, so naming that window is both correct and what the driver
+// requires; the adapter fills in the matching window_id.
+func (s *Suite) actOn(ctx context.Context, sess *mcp.ClientSession, pid int, in api.ComputerUseInput) *terminalFail {
+	if in.PID == nil {
+		p := pid
+		in.PID = &p
+	}
+	return s.act(ctx, sess, in)
+}
+
 func (s *Suite) act(ctx context.Context, sess *mcp.ClientSession, in api.ComputerUseInput) *terminalFail {
 	var out api.ComputerUseOutput
 	if err := s.callInto(ctx, sess, api.ToolComputerUse, in, &out); err != nil {
