@@ -1111,28 +1111,58 @@ cmd_recovery() {
 
   # --- scenario 1: kill the Cua driver ------------------------------------
   finfo "[1/6] kill cua-driver"
-  # Cua starts LAZILY: nothing runs it until the first computer_use call. Killing
-  # a driver that was never started matched no process, nothing degraded, and the
-  # scenario reported "never observed a degraded transition" -- describing the
-  # harness, not the appliance. Warm it up first so there is something to kill.
+  # Cua starts LAZILY, so warm it first or there is no driver to kill.
   _rec_warm_cua "$descriptor" "$admin_token" "$art"
-  if [ "$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
-        "$(_rec_count_cmdline cua-driver)" | tr -d "[:space:]")" = "0" ]; then
-    err "[1/6] cua-driver is not running; cannot exercise its recovery"
+  local drv_before
+  drv_before="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
+    "$(_rec_pid_of_comm cua-driver)" | tr -d '[:space:]')"
+  _rec_note "$art" "cua-driver pid before: ${drv_before:-none}"
+
+  if [ -z "$drv_before" ]; then
+    err "[1/6] cua-driver is not running after warm-up; cannot exercise its recovery"
     failures=$((failures+1))
   else
-  _rec_exec "$smoke" "$descriptor" "$admin_token" admin 'pkill -KILL -f cua-driver || true' >/dev/null
-  if _rec_wait_degraded "$ca" "$mcp_port" $((SECONDS + scenario_timeout)) "$art"; then
-    # The shell must keep working while computer-use is down: they are
-    # different subsystems and only one of them died.
-    if [ "$(_rec_exec "$smoke" "$descriptor" "$admin_token" user 'echo alive' | tr -d '[:space:]')" != "alive" ]; then
-      err "[1/6] the shell stopped working when cua-driver died"; failures=$((failures+1))
+    _rec_exec "$smoke" "$descriptor" "$admin_token" admin 'pkill -KILL -f cua-driver || true' >/dev/null
+
+    # The observation is the DRIVER, not /readyz. The broker learns the child
+    # died through its reconnect callback, which only fires once something
+    # touches the connection -- with no traffic after the kill, readiness stays
+    # 200 and a readiness-based wait times out describing nothing. What must
+    # actually happen is that the process goes away.
+    local drv_gone=0 ddeadline=$((SECONDS + scenario_timeout))
+    while [ "$SECONDS" -lt "$ddeadline" ]; do
+      local now
+      now="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
+        "$(_rec_pid_of_comm cua-driver)" | tr -d '[:space:]')"
+      if [ -z "$now" ] || [ "$now" != "$drv_before" ]; then
+        drv_gone=1
+        _rec_note "$art" "observed: cua-driver died (pid $drv_before -> ${now:-none})"
+        break
+      fi
+      sleep 2
+    done
+
+    if [ "$drv_gone" -eq 1 ]; then
+      # The shell must keep working while computer-use is down: they are
+      # different subsystems and only one of them died.
+      if [ "$(_rec_exec "$smoke" "$descriptor" "$admin_token" user 'echo alive' | tr -d '[:space:]')" != "alive" ]; then
+        err "[1/6] the shell stopped working when cua-driver died"; failures=$((failures+1))
+      fi
+      # And computer-use must come back on its own, which is the recovery.
+      _rec_warm_cua "$descriptor" "$admin_token" "$art"
+      local drv_after
+      drv_after="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
+        "$(_rec_pid_of_comm cua-driver)" | tr -d '[:space:]')"
+      if [ -z "$drv_after" ] || [ "$drv_after" = "$drv_before" ]; then
+        err "[1/6] cua-driver did not come back (pid now ${drv_after:-none})"
+        failures=$((failures+1))
+      else
+        _rec_note "$art" "observed: cua-driver reconnected as pid $drv_after"
+      fi
+    else
+      err "[1/6] cua-driver never died; the kill did not take effect"
+      failures=$((failures+1))
     fi
-    _rec_wait_recovered "$ca" "$mcp_port" $((SECONDS + scenario_timeout)) "$art" \
-      || { err "[1/6] never became ready again"; failures=$((failures+1)); }
-  else
-    err "[1/6] never observed a degraded transition"; failures=$((failures+1))
-  fi
   fi
   _agent_screenshot "$qmp" "$art/01-cua-driver.ppm"
 
@@ -1440,21 +1470,32 @@ cmd_ui() {
   # `run`, not `terminal`: the gateway bounds every request at 60s, so a
   # multi-minute Flathub install through `terminal` is cut off and comes back
   # empty -- which previously read as "the guest reports no commit".
+  # Keep the installer's own output. Sending each step to /dev/null made a
+  # flatpak that failed in six seconds indistinguishable from one that ran for
+  # ten minutes: the gate saw an empty commit and blamed the guest. Everything
+  # is echoed into an artifact, and the commit is picked out of it afterwards.
   "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
     --mode run --call-timeout "${UI_INSTALL_TIMEOUT:-25m}" --command \
-    "flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1;
-     flatpak install -y --user --noninteractive flathub org.chromium.Chromium >/dev/null 2>&1;
-     flatpak update -y --user --commit=$want_commit org.chromium.Chromium >/dev/null 2>&1 || true;
-     flatpak info --user --show-commit org.chromium.Chromium" \
-    > "$art/chromium-commit.txt" 2>/dev/null || true
+    "set -x
+     flatpak --version
+     flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+     flatpak install -y --user --noninteractive flathub org.chromium.Chromium
+     flatpak update -y --user --commit=$want_commit org.chromium.Chromium || true
+     echo COMMIT_BEGIN
+     flatpak info --user --show-commit org.chromium.Chromium
+     echo COMMIT_END" \
+    > "$art/chromium-install.log" 2>&1 || true
+  cp -f "$art/chromium-install.log" "$art/chromium-commit.txt" 2>/dev/null || true
 
   # Take the LAST line: flatpak prints progress before the commit, and a
   # partial read here would compare noise against the pinned digest.
   local got_commit
-  got_commit="$(grep -oE '^[0-9a-f]{64}$' "$art/chromium-commit.txt" 2>/dev/null | tail -1 || true)"
+  got_commit="$(grep -oE '^[0-9a-f]{64}$' "$art/chromium-install.log" 2>/dev/null | tail -1 || true)"
   if [ "$got_commit" != "$want_commit" ]; then
     err "Chromium commit mismatch: guest has '${got_commit:0:12}', fixtures pin '${want_commit:0:12}'"
     err "  a drifting browser silently changes what this gate proves"
+    err "  installer output (last 15 lines):"
+    tail -15 "$art/chromium-install.log" 2>/dev/null | sed 's/^/    /' >&2 || true
     _agent_screenshot "$qmp" "$art/fail-chromium-commit.ppm"
     return 1
   fi
