@@ -962,10 +962,24 @@ _rec_wait_recovered() {
 # command's exit status (or the client's reserved code on a transport failure).
 _rec_exec() {
   local smoke="$1" descriptor="$2" admin_token="$3" as_admin="$4" cmd="$5"
+  local timeout="${6:-60s}"
   local extra=()
   [ "$as_admin" = "admin" ] && extra+=(--exec-admin)
   "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
-    --mode exec --command "$cmd" "${extra[@]}" 2>/dev/null
+    --mode exec --command "$cmd" --call-timeout "$timeout" "${extra[@]}" 2>/dev/null
+}
+
+# _rec_warm_cua <descriptor> <admin_token> <art> -- force the lazily-started
+# computer-use backend to come up, by making one computer_use call. Several
+# scenarios need a RUNNING driver to kill or to observe reconnecting.
+_rec_warm_cua() {
+  local descriptor="$1" admin_token="$2" art="$3"
+  local smoke_bin; smoke_bin="$(dirname "$descriptor")/mcp-smoke"
+  [ -x "$smoke_bin" ] || return 0
+  # The contract suite's capture check is the cheapest public way to start it.
+  "$smoke_bin" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
+    --mode exec --command 'true' >/dev/null 2>&1 || true
+  _rec_note "$art" "warmed the computer-use backend"
 }
 
 # cmd_recovery [IMAGE] -- RECOVERY gate. Boot an INSTALLED appliance, then kill
@@ -1068,6 +1082,18 @@ cmd_recovery() {
 
   # --- scenario 1: kill the Cua driver ------------------------------------
   finfo "[1/6] kill cua-driver"
+  # Cua starts LAZILY: nothing runs it until the first computer_use call. Killing
+  # a driver that was never started matched no process, nothing degraded, and the
+  # scenario reported "never observed a degraded transition" -- describing the
+  # harness, not the appliance. Warm it up first so there is something to kill.
+  "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
+    --mode exec --command 'true' >/dev/null 2>&1 || true
+  _rec_warm_cua "$descriptor" "$admin_token" "$art"
+  if [ "$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
+        'pgrep -c -f cua-driver 2>/dev/null || echo 0' | tr -d "[:space:]")" = "0" ]; then
+    err "[1/6] cua-driver is not running; cannot exercise its recovery"
+    failures=$((failures+1))
+  else
   _rec_exec "$smoke" "$descriptor" "$admin_token" admin 'pkill -KILL -f cua-driver || true' >/dev/null
   if _rec_wait_degraded "$ca" "$mcp_port" $((SECONDS + scenario_timeout)) "$art"; then
     # The shell must keep working while computer-use is down: they are
@@ -1079,6 +1105,7 @@ cmd_recovery() {
       || { err "[1/6] never became ready again"; failures=$((failures+1)); }
   else
     err "[1/6] never observed a degraded transition"; failures=$((failures+1))
+  fi
   fi
   _agent_screenshot "$qmp" "$art/01-cua-driver.ppm"
 
@@ -1117,9 +1144,34 @@ cmd_recovery() {
 
   # --- scenario 4: exit the graphical session -----------------------------
   finfo "[4/6] i3-msg exit"
+  # The observation here is NOT /readyz. Exiting i3 does not make the appliance
+  # unready: the gateway and the session broker are separate services that keep
+  # answering while the window manager is gone. Waiting for a readiness dip
+  # therefore timed out and reported "never observed a degraded transition" --
+  # a statement about the wrong signal, not about the watchdog.
+  #
+  # What must actually happen is that the window manager DIES and the watchdog
+  # brings it back on the same seat. So observe i3's pid: it must change, and
+  # exactly one X server must remain.
+  local i3_before
+  i3_before="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
+    'pgrep -x i3 | head -1' | tr -d '[:space:]')"
+  _rec_note "$art" "i3 pid before: ${i3_before:-none}"
   _rec_exec "$smoke" "$descriptor" "$admin_token" user \
     'i3-msg exit >/dev/null 2>&1 || pkill -KILL -x i3 || true' >/dev/null 2>&1 || true
-  if _rec_wait_degraded "$ca" "$mcp_port" $((SECONDS + scenario_timeout)) "$art"; then
+
+  local i3_gone=0 sdeadline=$((SECONDS + scenario_timeout))
+  while [ "$SECONDS" -lt "$sdeadline" ]; do
+    local now
+    now="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
+      'pgrep -x i3 | head -1' | tr -d '[:space:]')"
+    if [ -z "$now" ] || { [ -n "$i3_before" ] && [ "$now" != "$i3_before" ]; }; then
+      i3_gone=1; _rec_note "$art" "observed: i3 went away (pid ${i3_before:-none} -> ${now:-none})"; break
+    fi
+    sleep 2
+  done
+
+  if [ "$i3_gone" -eq 1 ]; then
     if _rec_wait_recovered "$ca" "$mcp_port" $((SECONDS + ${RECOVERY_SESSION_TIMEOUT:-150})) "$art"; then
       # The watchdog must bring the session back on the REAL seat: exactly one
       # X server, on tty1. A hidden second display would satisfy "ready" while
@@ -1127,6 +1179,7 @@ cmd_recovery() {
       local displays
       displays="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
         'pgrep -c -x Xorg 2>/dev/null || pgrep -c -f "X .*:0" 2>/dev/null || echo 0' | tr -d '[:space:]')"
+      _rec_note "$art" "X servers after recovery: ${displays:-0}"
       if [ "${displays:-0}" != "1" ]; then
         err "[4/6] expected exactly one X server after recovery, found ${displays:-0}"
         failures=$((failures+1))
@@ -1135,7 +1188,8 @@ cmd_recovery() {
       err "[4/6] the display watchdog did not restore the session in time"; failures=$((failures+1))
     fi
   else
-    err "[4/6] never observed a degraded transition"; failures=$((failures+1))
+    err "[4/6] i3 never went away; the exit request did not take effect"
+    failures=$((failures+1))
   fi
   _agent_screenshot "$qmp" "$art/04-session-restart.ppm"
 
@@ -1222,12 +1276,18 @@ cmd_recovery() {
 # accessibility -- controls a real browser window.
 
 # _ui_exec <smoke> <descriptor> <admin_token> <user|admin> <command>
+# _ui_exec <smoke> <descriptor> <admin_token> <user|admin> <command> [timeout]
+#
+# The timeout matters: installing Chromium from Flathub takes minutes, and the
+# client's 30s default cut it off mid-download. stdout carries ONLY the
+# command's own output, so a caller can parse it directly.
 _ui_exec() {
   local smoke="$1" descriptor="$2" admin_token="$3" as="$4" cmd="$5"
+  local timeout="${6:-60s}"
   local extra=()
   [ "$as" = "admin" ] && extra+=(--exec-admin)
   "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
-    --mode exec --command "$cmd" "${extra[@]}" 2>/dev/null
+    --mode exec --command "$cmd" --call-timeout "$timeout" "${extra[@]}" 2>/dev/null
 }
 
 # cmd_ui [IMAGE] -- UI gate on an installed appliance.
@@ -1342,10 +1402,13 @@ cmd_ui() {
     "flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1;
      flatpak install -y --user --noninteractive flathub org.chromium.Chromium >/dev/null 2>&1;
      flatpak update -y --user --commit=$want_commit org.chromium.Chromium >/dev/null 2>&1 || true;
-     flatpak info --user --show-commit org.chromium.Chromium" \
+     flatpak info --user --show-commit org.chromium.Chromium" 1200s \
     > "$art/chromium-commit.txt" 2>&1 || true
 
-  local got_commit; got_commit="$(tr -d '[:space:]' < "$art/chromium-commit.txt" 2>/dev/null || true)"
+  # Take the LAST line: flatpak prints progress before the commit, and a
+  # partial read here would compare noise against the pinned digest.
+  local got_commit
+  got_commit="$(grep -oE '^[0-9a-f]{64}$' "$art/chromium-commit.txt" 2>/dev/null | tail -1 || true)"
   if [ "$got_commit" != "$want_commit" ]; then
     err "Chromium commit mismatch: guest has '${got_commit:0:12}', fixtures pin '${want_commit:0:12}'"
     err "  a drifting browser silently changes what this gate proves"

@@ -151,7 +151,12 @@ func Main(args []string, stdout, stderr io.Writer) int {
 				Mode: report.Mode, Started: started, Finished: time.Now(),
 				ExitCode: out, Checks: report.Checks,
 			}, stderr)
-			printSummary(stdout, report, out)
+			// STDERR, not stdout. In exec mode stdout is the command's own
+			// output and a caller parses it; writing a check summary there
+			// makes a failure look like data. A shell reading the Chromium
+			// commit got "[FAIL] exec_user: ..." back and compared it against
+			// the pinned digest, reporting a commit mismatch that did not exist.
+			printSummary(stderr, report, out)
 			return out
 		}
 		fmt.Fprint(stdout, res.Stdout)
