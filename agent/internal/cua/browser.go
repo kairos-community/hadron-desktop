@@ -487,11 +487,33 @@ func (a *Adapter) browserScroll(ctx context.Context, target pageTarget, in api.B
 	case api.DirectionRight:
 		dx = amount
 	}
-	js := fmt.Sprintf(`(function(){window.scrollBy(%d,%d);return JSON.stringify({url:location.href,title:document.title,scroll_x:Math.round(window.scrollX),scroll_y:Math.round(window.scrollY)});})()`, dx, dy)
+
+	// With a ref, scroll THAT element. Content on real pages lives in scrollable
+	// regions -- a chat pane, a table, a sidebar -- and window.scrollBy does not
+	// move them at all: the page reports the same offset afterwards and the
+	// caller cannot tell "nothing scrolled" from "the wrong thing scrolled".
+	var js string
+	if in.Ref != "" {
+		idx, err := refIndex(in.Ref)
+		if err != nil {
+			return browserErr(api.CodeInvalidArgument, err.Error(), false), nil
+		}
+		js = fmt.Sprintf(`(function(){%s
+el.scrollLeft+=%d; el.scrollTop+=%d;
+el.dispatchEvent(new Event('scroll',{bubbles:true}));
+return JSON.stringify({url:location.href,title:document.title,
+  scroll_x:Math.round(el.scrollLeft),scroll_y:Math.round(el.scrollTop)});})()`,
+			resolveRefJS(idx), dx, dy)
+	} else {
+		js = fmt.Sprintf(`(function(){window.scrollBy(%d,%d);return JSON.stringify({url:location.href,title:document.title,scroll_x:Math.round(window.scrollX),scroll_y:Math.round(window.scrollY)});})()`, dx, dy)
+	}
 
 	state, meta := a.pageJS(ctx, target, js)
 	if meta.Code != "" {
 		return api.BrowserOutput{ResultMeta: meta}, nil
+	}
+	if out, stale := staleRef(state, in.Ref); stale {
+		return out, nil
 	}
 	x, y := state.ScrollX, state.ScrollY
 	return api.BrowserOutput{URL: state.URL, Title: state.Title, ScrollX: &x, ScrollY: &y, WindowID: int(target.windowID)}, nil

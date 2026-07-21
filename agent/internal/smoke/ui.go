@@ -344,10 +344,12 @@ func (s *Suite) runChromium(ctx context.Context, sess *mcp.ClientSession) []Chec
 			return nil
 		}))
 
-	checks = append(checks, s.browserGesture(ctx, sess, "chromium_scroll", "",
-		func(string) api.BrowserInput {
-			amount := 400
-			return api.BrowserInput{Action: api.BrowserScroll, Direction: api.DirectionDown, Amount: &amount}
+	// The page keeps its rows in a scrollable region, so this scrolls THAT
+	// element rather than the window -- which is what a real page needs too.
+	checks = append(checks, s.browserGesture(ctx, sess, "chromium_scroll", "scroll",
+		func(ref string) api.BrowserInput {
+			amount := 200
+			return api.BrowserInput{Action: api.BrowserScroll, Ref: ref, Direction: api.DirectionDown, Amount: &amount}
 		},
 		func(before, after fixtureState) error {
 			if after.ScrollValue <= before.ScrollValue {

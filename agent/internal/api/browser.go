@@ -87,7 +87,7 @@ type BrowserInput struct {
 	// URL is the address navigate loads.
 	URL string `json:"url,omitempty" jsonschema:"absolute URL for navigate"`
 
-	// Ref identifies a snapshot element for click, type, and text.
+	// Ref identifies a snapshot element for click, type, text, and scroll.
 	Ref string `json:"ref,omitempty" jsonschema:"element ref from a snapshot"`
 
 	// Text is typed into the element Ref names.
@@ -250,7 +250,10 @@ func (in BrowserInput) Validate() error {
 		}
 
 	case BrowserScroll:
-		if err := in.rejectExtraneous(bDirection | bAmount | bWindowID); err != nil {
+		// ref is optional: without one the page scrolls, with one that element
+		// does. Real pages put content in scrollable regions -- a chat pane, a
+		// table, a sidebar -- that window scrolling never touches.
+		if err := in.rejectExtraneous(bRef | bDirection | bAmount | bWindowID); err != nil {
 			return err
 		}
 		if in.Direction == "" {

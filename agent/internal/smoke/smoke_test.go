@@ -980,6 +980,9 @@ func (d *uiFakeDesktop) browser(in api.BrowserInput) api.BrowserOutput {
 		return api.BrowserOutput{Elements: []api.BrowserElement{
 			{Ref: "e1", Role: "button", Name: "click count"},
 			{Ref: "e2", Role: "input", Name: "text input"},
+			// The page keeps its rows in a scrollable region; scrolling the
+			// window would never move it.
+			{Ref: "e3", Role: "div", Name: "scroll rows"},
 		}}
 	case api.BrowserClick:
 		d.state.Clicks++
