@@ -1349,12 +1349,23 @@ cmd_recovery() {
 # The timeout matters: installing Chromium from Flathub takes minutes, and the
 # client's 30s default cut it off mid-download. stdout carries ONLY the
 # command's own output, so a caller can parse it directly.
+# _ui_exec <smoke> <descriptor> <admin_token> <user|admin> <command> [stderr_log]
+#
+# stdout is the command's own output so a caller can parse it. stderr carries
+# mcp-smoke's diagnosis and is NOT discarded: swallowing it is how an install
+# that failed instantly kept looking like an install that produced no output.
+# Pass a log path to keep it; otherwise it flows to the caller's stderr.
 _ui_exec() {
-  local smoke="$1" descriptor="$2" admin_token="$3" as="$4" cmd="$5"
+  local smoke="$1" descriptor="$2" admin_token="$3" as="$4" cmd="$5" errlog="${6:-}"
   local extra=()
   [ "$as" = "admin" ] && extra+=(--exec-admin)
-  "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
-    --mode exec --command "$cmd" "${extra[@]}" 2>/dev/null
+  if [ -n "$errlog" ]; then
+    "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
+      --mode exec --command "$cmd" "${extra[@]}" 2>>"$errlog"
+  else
+    "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
+      --mode exec --command "$cmd" "${extra[@]}"
+  fi
 }
 
 # cmd_ui [IMAGE] -- UI gate on an installed appliance.
