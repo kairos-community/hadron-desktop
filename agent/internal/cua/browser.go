@@ -615,6 +615,14 @@ func submitJS(submit bool) string {
 // signal available for those. It is capped because walking every node of a
 // large document on each snapshot is not free.
 //
+// Elements carrying a background IMAGE are included too, and the image's URL is
+// reported as the element's value. On many pages the meaningful content is a CSS
+// background rather than an <img> -- icons, avatars, the face of a card -- and
+// without this an agent sees a grid of identical, nameless boxes. The existing
+// opacity filter does the right thing for free: a face-down card keeps its
+// picture at opacity 0, so it is skipped, and the agent learns exactly what a
+// player can see and nothing more.
+//
 // The script carries no comments of its own: it crosses the wire on every
 // call, so the explanation lives here instead.
 //
@@ -628,7 +636,10 @@ var nodes=[].slice.call(document.querySelectorAll(sel));
 var extra=[].slice.call(document.querySelectorAll('div,span,img,li,td,p'));
 for(var k=0;k<extra.length&&k<2000;k++){
   var c=extra[k];
-  if(nodes.indexOf(c)<0&&window.getComputedStyle(c).cursor==='pointer'){nodes.push(c);}
+  if(nodes.indexOf(c)>=0){continue;}
+  var cs=window.getComputedStyle(c);
+  if(cs.cursor==='pointer'){nodes.push(c);continue;}
+  if(cs.backgroundImage&&cs.backgroundImage!=='none'){nodes.push(c);}
 }
 var out=[],refs=[],truncated=false;
 for(var i=0;i<nodes.length;i++){
@@ -645,7 +656,17 @@ for(var i=0;i<nodes.length;i++){
   out.push({ref:'e'+refs.length,
             role:(el.getAttribute('role')||el.tagName.toLowerCase()),
             name:name,
-            value:String(el.value||'').slice(0,200),
+            value:(function(){
+              if(el.value){return String(el.value).slice(0,200);}
+              var bg=window.getComputedStyle(el).backgroundImage||'';
+              var i=bg.indexOf('url(');
+              if(i<0){return '';}
+              var rest=bg.slice(i+4), j=rest.indexOf(')');
+              if(j<0){return '';}
+              var v=rest.slice(0,j), q=v.charAt(0);
+              if(q==='"'||q==="'"){v=v.slice(1,-1);}
+              return v.slice(-200);
+            })(),
             x:Math.round(r.left),y:Math.round(r.top),
             width:Math.round(r.width),height:Math.round(r.height)});
 }
