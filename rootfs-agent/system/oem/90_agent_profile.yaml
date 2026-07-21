@@ -1,0 +1,143 @@
+# Hadron agent appliance: account, linger, and runtime socket bootstrap.
+#
+# Runs on every LIVE or INSTALLED-NORMAL boot of the agent image, and is skipped
+# during the installer (install-mode) boot. It is additionally a hard no-op on
+# any non-agent image via the /etc/hadron-agent/profile marker guard, so the
+# stage can never touch an ordinary desktop install.
+#
+# Before any agent service starts (this is a cos-setup `boot` stage, which runs
+# well ahead of the agent units that reach for network-online.target -- and,
+# being the high-numbered 90_ OEM file, runs AFTER the base Kairos "default
+# user" stage that claims UID 1000 on a live boot) it:
+#   1. establishes the locked, UID-1000 human `agent` account: if UID 1000 is
+#      already owned by the base default user, it TAKES OVER that account
+#      (renames login + per-user group to `agent`, relocates the home); if
+#      UID 1000 is free it creates `agent` fresh; if `agent` already exists it
+#      leaves it be. All detection is getent-free (the base image has no
+#      getent) via awk over /etc/passwd and /etc/group;
+#   2. constrains `agent` to ONLY the approved supplemental groups -- never
+#      admin/sudo/docker -- intersected with the groups that actually exist
+#      (usermod -G replaces the whole set, stripping any privileged membership
+#      the taken-over base account may have carried);
+#   3. owns /home/agent to the agent account;
+#   4. enables linger so the agent user manager (and its session broker) runs
+#      without an interactive login;
+#   5. materializes the /run/hadron-agent socket dir tree with the exact
+#      owners/modes now that the `agent` account exists.
+# The root helper is NOT linked here: it ships baked-enabled and is gated by its
+# own ConditionPathExists=/var/lib/hadron-agent/root/enabled marker (which only
+# provisioning writes, and only when an admin bearer was configured).
+name: "Hadron agent profile"
+stages:
+  boot:
+    - if: '! grep -q "install-mode" /proc/cmdline && [ -f /etc/hadron-agent/profile ]'
+      name: "configure ly autologin for the agent session"
+      commands:
+        - |
+          set -eu
+          # Ly autologin for the appliance: authenticate the locked `agent`
+          # account and start the i3 (XLibre) session unattended, using the
+          # ly-autologin PAM service. Task 6's ly@.service.d/20-agent-profile.conf
+          # relaxes ly's start condition to allow this on a live agent boot; the
+          # values below are the config side and must stay consistent with it.
+          # The systemd condition drop-in is set; here we set /etc/ly/config.ini.
+          cfg=/etc/ly/config.ini
+          [ -f "$cfg" ] || exit 0
+          set_kv() {
+            key="$1"; val="$2"
+            if grep -Eq "^[[:space:]]*#?[[:space:]]*${key}[[:space:]]*=" "$cfg"; then
+              sed -i "s|^[[:space:]]*#\?[[:space:]]*${key}[[:space:]]*=.*|${key} = ${val}|" "$cfg"
+            else
+              printf '%s = %s\n' "$key" "$val" >>"$cfg"
+            fi
+          }
+          set_kv auto_login_user agent
+          set_kv auto_login_session i3
+          set_kv auto_login_service ly-autologin
+    - if: '! grep -q "install-mode" /proc/cmdline && [ -f /etc/hadron-agent/profile ]'
+      name: "create locked agent account, linger, and socket dirs"
+      commands:
+        - |
+          set -eu
+
+          # getent is ABSENT in the base image, so all name-service lookups here
+          # read the files directly. These are files-backed (no LDAP/NSS) on a
+          # Kairos node, so /etc/passwd and /etc/group are authoritative.
+          user_exists()  { awk -F: -v u="$1" '$1==u{f=1} END{exit !f}' /etc/passwd; }
+          group_exists() { awk -F: -v g="$1" '$1==g{f=1} END{exit !f}' /etc/group; }
+          uid_owner()    { awk -F: -v i="$1" '$3==i{print $1; exit}' /etc/passwd; }
+          home_of()      { awk -F: -v u="$1" '$1==u{print $6; exit}' /etc/passwd; }
+
+          # Establish the UID-1000 `agent` account. Three cases, in priority:
+          #   a) `agent` already exists            -> leave it (idempotent reboot)
+          #   b) UID 1000 owned by another account -> TAKE IT OVER (rename to agent)
+          #   c) UID 1000 free                     -> create agent fresh
+          if user_exists agent; then
+            :
+          else
+            owner="$(uid_owner 1000 || true)"
+            if [ -n "$owner" ]; then
+              # Take over the base default user: rename login (and, when present,
+              # its per-user primary group) to `agent` and relocate the home. Only
+              # pass -m (move the old home) when there is a real old home to move
+              # AND /home/agent does not already exist -- usermod -m refuses (and,
+              # under set -e, would abort the whole stage) if the target home is
+              # already present. When we skip -m, the mkdir+chown below owns it.
+              oldhome="$(home_of "$owner" || true)"
+              if [ -n "$oldhome" ] && [ -d "$oldhome" ] && [ "$oldhome" != /home/agent ] && [ ! -e /home/agent ]; then
+                usermod -l agent -d /home/agent -m -s /bin/bash -c "Hadron agent" "$owner"
+              else
+                usermod -l agent -d /home/agent -s /bin/bash -c "Hadron agent" "$owner"
+              fi
+              if group_exists "$owner"; then
+                groupmod -n agent "$owner" || true
+              fi
+            else
+              useradd --uid 1000 --user-group --create-home --home-dir /home/agent \
+                --shell /bin/bash --comment "Hadron agent" agent
+            fi
+          fi
+
+          # Guarantee a resolvable `agent` group. hadron-agent-provision chowns
+          # the session config to root:agent, so this group MUST exist even if the
+          # taken-over account's primary group could not be renamed above.
+          group_exists agent || groupadd agent
+          usermod -g agent agent 2>/dev/null || true
+
+          # Lock the password (no password login); the account is driven only by
+          # linger + the session's display manager, never by a typed password.
+          passwd -l agent >/dev/null 2>&1 || true
+
+          # Constrain to ONLY the approved supplemental groups that exist. Never
+          # admin/sudo/docker. usermod -G replaces the full supplemental set, so
+          # any stray privileged membership (from a taken-over base account) is
+          # removed here too.
+          approved=""
+          for g in audio video render input bluetooth seat hadron-agent-control; do
+            if group_exists "$g"; then
+              approved="${approved:+$approved,}$g"
+            fi
+          done
+          usermod -G "$approved" agent
+
+          # Own the home directory.
+          mkdir -p /home/agent
+          chown agent:agent /home/agent
+
+          # Enable linger so the agent's systemd --user manager runs at boot.
+          loginctl enable-linger agent || true
+
+          # Now that `agent` exists, (re)create the runtime socket dir tree with
+          # the exact owners/modes declared in the tmpfiles fragment. /run is a
+          # per-boot tmpfs, so this is the authoritative first-boot creation.
+          systemd-tmpfiles --create /etc/tmpfiles.d/hadron-agent.conf || true
+
+          # NOTE: the root helper is NOT linked here. It ships with a baked
+          # multi-user.target.wants symlink and is gated purely by its own
+          # ConditionPathExists=/var/lib/hadron-agent/root/enabled (plus
+          # After/Requires=hadron-agent-provision.service). On the admin-disabled
+          # default the marker is never written, so the condition keeps it
+          # stopped; on an admin-enabled machine provision writes the marker
+          # before the helper is reached, so it starts on the SAME boot. This
+          # replaces the old imperative link, which ran before provision (now
+          # ordered After=cos-setup-boot) and so could never see the marker.

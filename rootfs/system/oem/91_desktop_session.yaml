@@ -20,7 +20,12 @@ stages:
         - ln -sf /usr/lib/systemd/system/ly@.service /etc/systemd/system/multi-user.target.wants/ly@tty1.service
         - ln -sf /usr/lib/systemd/system/hadron-splash.service /etc/systemd/system/multi-user.target.wants/hadron-splash.service
         - systemctl daemon-reload
-        # Render the boot splash on tty1 first (oneshot, ~5s, RemainAfterExit so
-        # this is a no-op if it already played via the baked symlink), then ly.
-        - systemctl start hadron-splash.service || true
-        - systemctl start ly@tty1.service || true
+        # Enqueue the splash then ly WITHOUT waiting. ly@.service is Type=idle,
+        # which defers its execution until every pending job is done -- including
+        # THIS cos-setup-boot run. A blocking `systemctl start` would therefore
+        # deadlock (cos-setup-boot waits for the start job; the idle unit waits
+        # for cos-setup-boot to finish). --no-block breaks the cycle: ly runs
+        # once cos-setup-boot completes, by which point later boot stages (e.g.
+        # the agent appliance's account-creation stage) have already run.
+        - systemctl start --no-block hadron-splash.service || true
+        - systemctl start --no-block ly@tty1.service || true

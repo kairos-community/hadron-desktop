@@ -1,7 +1,7 @@
 # Hadron desktop
 
-Two tiling desktop variants built on top of the minimal
-[Hadron](https://github.com/kairos-io/hadron) base image:
+Two tiling desktop variants plus an opt-in agent overlay built on top of the
+minimal [Hadron](https://github.com/kairos-io/hadron) base image:
 
 | `DESKTOP` | Display stack | Desktop | Native desktop tools |
 |-----------|---------------|---------|----------------------|
@@ -25,6 +25,8 @@ and a `test/` harness) and depends only on the published Hadron images
   wl-clipboard, slurp and swayidle.
 - **i3:** XLibre 25.2.0, X11 Mesa/GLX, the XLibre libinput driver, i3 4.25.1,
   st, dmenu, i3bar, dunst and xsel.
+- **Agent overlay:** an opt-in i3-based appliance build that layers Cua and
+  the agent services on top of the XLibre desktop.
 - **Login:** `ly` runs on `tty1`. It launches Sway directly for the Wayland
   session and owns the XLibre server lifecycle for the i3 X session.
 - **Networking:** NetworkManager + wpa_supplicant (wifi).
@@ -41,9 +43,12 @@ and a `test/` harness) and depends only on the published Hadron images
 make image                 # default Wayland/Sway image: sway-desktop:dev
 make DESKTOP=i3 image      # XLibre/i3 image: i3-desktop:dev
 make images                # build both image variants
+make agent-image           # build the opt-in agent overlay image
+make agent-iso             # build the opt-in agent ISO
 
 make                       # default Sway image + installer ISO
 make DESKTOP=i3 iso        # XLibre/i3 image + installer ISO
+make agent-iso VERSION=v1.2.3
 ```
 
 The equivalent direct Docker builds are:
@@ -59,14 +64,54 @@ kept under `build/sway-desktop/` and `build/i3-desktop/`.
 ## Releases
 
 Pushing a `v`-prefixed tag runs `.github/workflows/release.yml`. The workflow
-builds the Sway and i3/XLibre installer ISOs in parallel, verifies their SHA-256
-checksums, and creates a GitHub Release containing both ISOs and both checksum
-files:
+builds the Sway and i3/XLibre installer ISOs in parallel and builds the agent
+ISO in a job that first runs all five agent gates. It then verifies every
+asset and creates a GitHub Release:
 
 ```sh
 git tag -a v1.0.0 -m "Hadron Desktop v1.0.0"
 git push origin v1.0.0
 ```
+
+Each release carries twelve files — three ISOs, and for every ISO a checksum,
+an SPDX SBOM, and a build manifest:
+
+| Asset | Contents |
+| --- | --- |
+| `hadron-desktop-<flavor>-<tag>-amd64.iso` | the bootable installer |
+| `….iso.sha256` | its SHA-256, in `sha256sum --check` format |
+| `….iso.spdx.json` | SPDX JSON SBOM of the OCI image the ISO wraps, produced by `anchore/syft:v1.29.0` |
+| `….iso.build.json` | the build manifest described below |
+
+`<flavor>` is `sway`, `i3`, or `agent`. The build manifest records exactly what
+went into the image, so a downloaded ISO can be traced back to its sources:
+
+```json
+{
+  "release_tag": "v1.0.0",
+  "git_commit": "…",
+  "hadron_base_reference": "ghcr.io/kairos-io/hadron:main",
+  "hadron_base_digest": "sha256:…",
+  "image_id": "sha256:…",
+  "iso": "hadron-desktop-agent-v1.0.0-amd64.iso",
+  "iso_sha256": "…",
+  "desktop_flavor": "agent",
+  "xlibre_version": "25.2.0",
+  "cua_revision": "…",
+  "atspi_version": "2.54.0"
+}
+```
+
+All eleven keys are present in every manifest. `xlibre_version` is `null` for
+the Wayland-only Sway flavor, and `cua_revision`/`atspi_version` are `null` for
+both non-agent flavors.
+
+The publishing job refuses to upload unless it finds exactly three ISOs, three
+checksums, three SBOMs, and three manifests, every checksum verifies, every SBOM
+parses as SPDX with a non-empty package list, and every manifest carries valid
+values that match the ISO shipped beside it. The agent job uploads nothing at
+all — not even its ISO — until the compatibility, contract, install, recovery,
+and UI gates have all passed. Release artifacts are not signed.
 
 An existing tag can be rebuilt from the Actions page with the workflow's manual
 dispatch. Rebuilt assets replace same-named assets on a mutable release.
@@ -120,6 +165,23 @@ The guest emits `SWAYTEST: PASS/FAIL <name>` markers on the serial console; the
 harness parses them and exits non-zero on any failure. Screenshots captured with
 `grim` are written to a scratch disk and extracted to `test/artifacts/`.
 
+The `test/agent/` directory holds the agent overlay's own test suite
+(`run.sh compatibility` boots the real graphical XLibre/i3 session in QEMU and
+drives it with `cua-driver`; focused scripts like `systemd_units_test.sh` and
+`session_launcher_test.sh` check narrower slices statically). Notably,
+`profile_isolation.sh` builds (or, with `SKIP_BUILD=1`, reuses) all three
+images — `sway-desktop:dev`, `i3-desktop:dev`, `agent-desktop:dev` — exports
+each one's real filesystem with `docker export`, and asserts against that
+export: the plain Sway/i3 images contain none of the agent-only files,
+units, or accounts, the agent image contains all of them, and the generic
+agent image's file contents carry no live bearer, no configured digest, and
+no PEM private key:
+
+```sh
+bash test/agent/profile_isolation.sh
+SKIP_BUILD=1 bash test/agent/profile_isolation.sh   # reuse already-built images
+```
+
 ### Users and login
 
 The image bakes in **no user**. The desktop user is created at install time and
@@ -140,6 +202,52 @@ There are two ways to create that user:
   block — see the example file) via AuroraBoot `--cloud-config` or a datasource.
   When one is present the wizard detects it and runs the normal unattended
   install instead of prompting — so CI and automated installs are unaffected.
+
+The top-level build targets are:
+
+```sh
+make DESKTOP=sway iso
+make DESKTOP=i3 iso
+make agent-iso VERSION=v1.2.3
+```
+
+`agent-iso` first builds the i3 base image, then layers `Dockerfile.agent` on
+top to produce the opt-in agent appliance. The agent ISO still uses the same
+unattended install mechanism: if the datasource already contains `users:` and
+`install:` the wizard skips the prompt path. For the agent appliance, the seed
+also needs `hadron_agent.enabled=true` so the overlay starts its agent profile
+instead of the plain desktop path.
+
+Minimal unattended agent seed:
+
+```yaml
+#cloud-config
+install:
+  auto: true
+  device: /dev/vda
+  reboot: true
+users:
+  - name: agent
+    passwd: "$6$..."
+hadron_agent:
+  enabled: true
+  auth:
+    user_token_hash: "sha256:..."
+```
+
+**Tokens and keys are runtime seed data, never Docker build args.** The bearer
+digests (`user_token_hash`/`admin_token_hash`) and any TLS material for the
+gateway are written into the datasource/cloud-config that AuroraBoot or the
+installer feeds the *booted* image; they are read by the OEM provisioning
+stage at boot (`system/oem/90_agent_profile.yaml`), not baked into a layer by
+`agent-image`/`agent-iso`. Those two targets only ever take `BASE_IMAGE`,
+`AGENT_BASE_IMAGE` and `VERSION` as `--build-arg`s (see the `Makefile`) — no
+credential ever needs to (or should) flow through `docker build`. This is
+also why the generic `agent-desktop`/agent ISO ships with no bearer, no
+configured digest and no private key embedded in it:
+`test/agent/profile_isolation.sh` exports the actual built images and proves
+it (both that the plain Sway/i3 images carry none of the agent files, and
+that the generic agent image's filesystem contents contain no live secret).
 
 ### Production vs test launch
 

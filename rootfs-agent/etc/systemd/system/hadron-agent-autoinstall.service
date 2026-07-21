@@ -1,0 +1,39 @@
+# Hadron agent appliance: seed-gated zero-touch (autoinstall) disk install.
+#
+# This is the PROGRAMMATIC-CI path. It runs on the ISO's NORMAL default boot
+# (NOT install-mode) and, ONLY when the merged /oem seed FULLY authorizes a
+# zero-touch install, wipes the configured disk and reboots into the installed
+# appliance. When the seed does not authorize it, the unit is SKIPPED and the
+# ordinary, NON-DESTRUCTIVE live agent boot proceeds untouched.
+#
+# The authorization gate is the ExecCondition: `inspect-seed
+# --require-auto-install --quiet` exits 0 ONLY when install.auto=true AND
+# install.device is a /dev/... path AND hadron_agent.enabled=true. A non-zero
+# ExecCondition makes systemd skip (not fail) the unit, so a live boot with no
+# authorizing seed simply never installs. --quiet keeps it silent so it is a
+# clean condition.
+#
+# Ordering: this oneshot runs BEFORE both hadron-agent-provision.service and
+# ly@tty1.service, and RemainAfterExit keeps it "active" once it has started so
+# that -- when it IS authorized -- it holds the ordering barrier through
+# `kairos-agent install` and the reboot, and no live desktop (Ly autologin) ever
+# races the disk install for tty1.
+#
+# Guards: !install-mode (never fights the interactive installer for tty1) and
+# the /etc/hadron-agent/profile marker (a hard no-op on any non-agent image, so
+# the Task-4 wants-symlink dangles harmlessly on ordinary desktop images).
+[Unit]
+Description=Hadron agent seed-gated zero-touch install
+ConditionKernelCommandLine=!install-mode
+ConditionPathExists=/etc/hadron-agent/profile
+Before=hadron-agent-provision.service ly@tty1.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Root: writes the install cloud-config into /oem and drives kairos-agent install.
+ExecCondition=/usr/bin/hadron-agent provision inspect-seed --require-auto-install --quiet
+ExecStart=/usr/local/bin/hadron-agent-install --noninteractive
+
+[Install]
+WantedBy=multi-user.target

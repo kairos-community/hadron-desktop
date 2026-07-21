@@ -1,0 +1,30 @@
+# Hadron agent provisioning: materialize the machine's TLS identity, bearer
+# digests, and per-service config.json files from the merged /oem cloud-config,
+# BEFORE the gateway (or the display manager) is allowed to start.
+#
+# ConditionPathExists=/etc/hadron-agent/profile makes this a hard no-op on any
+# image that is not the agent appliance overlay: the ordinary desktop images
+# ship no such marker, so the unit (and its dangling wants-symlink) does
+# nothing there.
+[Unit]
+Description=Hadron agent provisioning (machine TLS, bearer digests, service configs)
+ConditionPathExists=/etc/hadron-agent/profile
+Wants=network-online.target
+# The `agent` account (and its group) is created by our 90_agent_profile OEM
+# stage, which runs INSIDE the cos-setup `boot` stage (cos-setup-boot.service).
+# Provision chowns the session config to root:agent, so it MUST run after that
+# stage completes -- otherwise the group is unknown and provision fails. We
+# mirror the base hadron-user-setup.service, which orders after both cos-setup
+# stages for the same "the user doesn't exist yet" reason.
+After=network-online.target hadron-agent-autoinstall.service cos-setup-boot.service cos-setup-network.service
+Before=hadron-agent-gateway.service ly@tty1.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Runs as root (no User=): it writes root-owned state and chowns each file to
+# the service identity that will read it (gateway/session/root).
+ExecStart=/usr/bin/hadron-agent provision --oem-dir /oem --state-dir /var/lib/hadron-agent --runtime-dir /run/hadron-agent
+
+[Install]
+WantedBy=multi-user.target

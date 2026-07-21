@@ -1336,16 +1336,21 @@ RUN pip3 install meson ninja
 RUN meson setup buildDir ${COMMON_MESON_FLAGS} -Dman=disabled
 RUN DESTDIR=/xdg-dbus-proxy ninja -C buildDir install
 
-# GPG trio — flatpak 1.16 hard-requires libgpgme at build (runtime signature
-# verification additionally needs a gpg binary, which we don't ship; remotes are
-# added with --no-gpg-verify).
+# GPG support — flatpak 1.16 hard-requires libgpgme at build; runtime
+# verification is supplied by signed-flatpak-runtime.
 FROM toolchain AS libgpg-error
-ARG LIBGPGERROR_VERSION=1.51
+ARG LIBGPGERROR_VERSION=1.56
+ARG LIBGPGERROR_SHA256=82c3d2deb4ad96ad3925d6f9f124fe7205716055ab50e291116ef27975d169c0
 RUN mkdir -p /libgpg-error
 WORKDIR /build
-RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors https://www.gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-${LIBGPGERROR_VERSION}.tar.bz2 -o g.tar.bz2 && tar -xf g.tar.bz2 && rm g.tar.bz2 && mv libgpg-error-* src
+RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+      https://gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-${LIBGPGERROR_VERSION}.tar.bz2 \
+      -o source.tar.bz2 && \
+    echo "${LIBGPGERROR_SHA256}  source.tar.bz2" | sha256sum -c - && \
+    tar -xf source.tar.bz2 && rm source.tar.bz2 && mv libgpg-error-* src
 WORKDIR /build/src
-RUN ./configure ${COMMON_CONFIGURE_ARGS} --disable-doc --disable-tests --enable-install-gpg-error-config
+RUN ./configure ${COMMON_CONFIGURE_ARGS} --disable-doc --disable-tests \
+      --enable-install-gpg-error-config
 RUN make -j"$(nproc)" && make DESTDIR=/libgpg-error install
 
 FROM toolchain AS libassuan
@@ -1370,6 +1375,166 @@ WORKDIR /build/src
 # uses; _LARGEFILE64_SOURCE makes musl expose them as off_t aliases.
 RUN CPPFLAGS="-D_LARGEFILE64_SOURCE" ./configure ${COMMON_CONFIGURE_ARGS} --disable-gpg-test --disable-gpgsm-test --disable-g13-test --enable-languages=cpp --disable-doc
 RUN make -j"$(nproc)" && make DESTDIR=/gpgme install
+
+FROM toolchain AS libgcrypt
+COPY --from=libgpg-error /libgpg-error /
+ARG LIBGCRYPT_VERSION=1.12.2
+ARG LIBGCRYPT_SHA256=7ce33c2492221a0436f96a8500215e9f3e3dcb5fd26a757cd415e7a843babd5e
+RUN mkdir -p /libgcrypt
+WORKDIR /build
+RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+      https://gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-${LIBGCRYPT_VERSION}.tar.bz2 \
+      -o source.tar.bz2 && \
+    echo "${LIBGCRYPT_SHA256}  source.tar.bz2" | sha256sum -c - && \
+    tar -xf source.tar.bz2 && rm source.tar.bz2 && mv libgcrypt-* src
+WORKDIR /build/src
+RUN ./configure ${COMMON_CONFIGURE_ARGS} --disable-doc
+RUN make -j"$(nproc)" && make DESTDIR=/libgcrypt install
+
+FROM toolchain AS libksba
+COPY --from=libgpg-error /libgpg-error /
+ARG LIBKSBA_VERSION=1.8.0
+ARG LIBKSBA_SHA256=296b9db9095749f2aa104202d7ab7fd09ad10710e00780a709c9754b1a1d9292
+RUN mkdir -p /libksba
+WORKDIR /build
+RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+      https://gnupg.org/ftp/gcrypt/libksba/libksba-${LIBKSBA_VERSION}.tar.bz2 \
+      -o source.tar.bz2 && \
+    echo "${LIBKSBA_SHA256}  source.tar.bz2" | sha256sum -c - && \
+    tar -xf source.tar.bz2 && rm source.tar.bz2 && mv libksba-* src
+WORKDIR /build/src
+RUN ./configure ${COMMON_CONFIGURE_ARGS} --disable-doc
+RUN make -j"$(nproc)" && make DESTDIR=/libksba install
+
+FROM toolchain AS npth
+ARG NPTH_VERSION=1.8
+ARG NPTH_SHA256=8bd24b4f23a3065d6e5b26e98aba9ce783ea4fd781069c1b35d149694e90ca3e
+RUN mkdir -p /npth
+WORKDIR /build
+RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+      https://gnupg.org/ftp/gcrypt/npth/npth-${NPTH_VERSION}.tar.bz2 \
+      -o source.tar.bz2 && \
+    echo "${NPTH_SHA256}  source.tar.bz2" | sha256sum -c - && \
+    tar -xf source.tar.bz2 && rm source.tar.bz2 && mv npth-* src
+WORKDIR /build/src
+RUN ./configure ${COMMON_CONFIGURE_ARGS} --disable-tests
+RUN make -j"$(nproc)" && make DESTDIR=/npth install
+
+FROM toolchain AS sqlite-gnupg
+ARG SQLITE_VERSION=3490200
+ARG SQLITE_SHA256=5c6d8697e8a32a1512a9be5ad2b2e7a891241c334f56f8b0fb4fc6051e1652e8
+RUN mkdir -p /sqlite-gnupg
+WORKDIR /build
+RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+      https://sqlite.org/2025/sqlite-autoconf-${SQLITE_VERSION}.tar.gz \
+      -o source.tar.gz && \
+    echo "${SQLITE_SHA256}  source.tar.gz" | sha256sum -c - && \
+    tar -xf source.tar.gz && rm source.tar.gz && mv sqlite-autoconf-* src
+WORKDIR /build/src
+RUN CFLAGS="-O2 -pipe -flto" ./configure --prefix=/usr \
+      --host=x86_64-hadron-linux-musl --build=x86_64-hadron-linux-musl \
+      --enable-shared --disable-static --disable-readline --disable-static-shell
+RUN make -j"$(nproc)" && make DESTDIR=/sqlite-gnupg install
+
+FROM toolchain AS ntbtls
+COPY --from=libgpg-error /libgpg-error /
+COPY --from=libgcrypt /libgcrypt /
+COPY --from=libksba /libksba /
+ARG NTBTLS_VERSION=0.3.2
+ARG NTBTLS_SHA256=bdfcb99024acec9c6c4b998ad63bb3921df4cfee4a772ad6c0ca324dbbf2b07c
+RUN mkdir -p /ntbtls
+WORKDIR /build
+RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+      https://gnupg.org/ftp/gcrypt/ntbtls/ntbtls-${NTBTLS_VERSION}.tar.bz2 \
+      -o source.tar.bz2 && \
+    echo "${NTBTLS_SHA256}  source.tar.bz2" | sha256sum -c - && \
+    tar -xf source.tar.bz2 && rm source.tar.bz2 && mv ntbtls-* src
+WORKDIR /build/src
+RUN ./configure ${COMMON_CONFIGURE_ARGS}
+RUN make -j"$(nproc)" && make DESTDIR=/ntbtls install
+
+FROM toolchain AS gnupg
+COPY --from=libgpg-error /libgpg-error /
+COPY --from=libassuan /libassuan /
+COPY --from=libgcrypt /libgcrypt /
+COPY --from=libksba /libksba /
+COPY --from=npth /npth /
+COPY --from=ntbtls /ntbtls /
+COPY --from=sqlite-gnupg /sqlite-gnupg /
+ARG GNUPG_VERSION=2.4.9
+ARG GNUPG_SHA256=dd17ab2e9a04fd79d39d853f599cbc852062ddb9ab52a4ddeb4176fd8b302964
+RUN mkdir -p /gnupg
+WORKDIR /build
+RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+      https://gnupg.org/ftp/gcrypt/gnupg/gnupg-${GNUPG_VERSION}.tar.bz2 \
+      -o source.tar.bz2 && \
+    echo "${GNUPG_SHA256}  source.tar.bz2" | sha256sum -c - && \
+    tar -xf source.tar.bz2 && rm source.tar.bz2 && mv gnupg-* src
+WORKDIR /build/src
+RUN ./configure ${COMMON_CONFIGURE_ARGS} --libexecdir=/usr/lib/gnupg \
+      --disable-gpgsm --disable-scdaemon --disable-wks-tools \
+      --disable-card-support --disable-tpm2d \
+      --disable-doc --disable-nls --disable-ldap --disable-libdns \
+      --disable-bzip2
+RUN make -j"$(nproc)" && make DESTDIR=/gnupg install && \
+    rm -f /gnupg/usr/bin/gpg-card /gnupg/usr/bin/gpg-wks-client \
+      /gnupg/usr/lib/gnupg/gpg-wks-client
+RUN test -x /gnupg/usr/bin/gpg && test -x /gnupg/usr/bin/gpgv && \
+    test -x /gnupg/usr/bin/gpgconf && test -x /gnupg/usr/bin/gpg-agent && \
+    test -x /gnupg/usr/bin/dirmngr && \
+    test -x /gnupg/usr/lib/gnupg/keyboxd && \
+    test ! -e /gnupg/usr/bin/gpgsm && test ! -e /gnupg/usr/bin/gpg-card && \
+    test ! -e /gnupg/usr/bin/gpg-wks-client && \
+    test ! -e /gnupg/usr/lib/gnupg/gpg-wks-client && \
+    test ! -e /gnupg/usr/lib/gnupg/scdaemon && \
+    test ! -e /gnupg/usr/lib/gnupg/tpm2daemon
+
+FROM toolchain AS signed-flatpak-runtime
+COPY --from=libgpg-error /libgpg-error /
+COPY --from=libassuan /libassuan /
+COPY --from=libgcrypt /libgcrypt /
+COPY --from=libksba /libksba /
+COPY --from=npth /npth /
+COPY --from=ntbtls /ntbtls /
+COPY --from=sqlite-gnupg /sqlite-gnupg /
+COPY --from=gnupg /gnupg /
+COPY --from=gnupg /gnupg /signed-flatpak-runtime
+RUN mkdir -p /signed-flatpak-runtime/usr/lib \
+      /signed-flatpak-runtime/usr/share/hadron && \
+    cp -a /usr/lib/libgcrypt.so* /signed-flatpak-runtime/usr/lib/ && \
+    cp -a /usr/lib/libksba.so* /signed-flatpak-runtime/usr/lib/ && \
+    cp -a /usr/lib/libnpth.so* /signed-flatpak-runtime/usr/lib/ && \
+    cp -a /usr/lib/libntbtls.so* /signed-flatpak-runtime/usr/lib/ && \
+    cp -a /usr/lib/libsqlite3.so* /signed-flatpak-runtime/usr/lib/ && \
+    rm -rf /signed-flatpak-runtime/usr/share/doc \
+      /signed-flatpak-runtime/usr/share/info \
+      /signed-flatpak-runtime/usr/share/man \
+      /signed-flatpak-runtime/usr/share/locale
+ARG FLATHUB_DESCRIPTOR_SHA256=3371dd250e61d9e1633630073fefda153cd4426f72f4afa0c3373ae2e8fea03a
+ARG FLATHUB_PRIMARY_FINGERPRINT=6E5C05D979C76DAF93C081354184DD4D907A7CAE
+RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+      https://dl.flathub.org/repo/flathub.flatpakrepo \
+      -o /signed-flatpak-runtime/usr/share/hadron/flathub.flatpakrepo && \
+    echo "${FLATHUB_DESCRIPTOR_SHA256}  /signed-flatpak-runtime/usr/share/hadron/flathub.flatpakrepo" | \
+      sha256sum -c - && \
+    test "$(grep -c '^GPGKey=' \
+      /signed-flatpak-runtime/usr/share/hadron/flathub.flatpakrepo)" -eq 1 && \
+    sed -n 's/^GPGKey=//p' \
+      /signed-flatpak-runtime/usr/share/hadron/flathub.flatpakrepo | \
+      base64 -d > /signed-flatpak-runtime/usr/share/hadron/flathub.gpg && \
+    install -d -m700 /tmp/gnupg-home && \
+    test "$(GNUPGHOME=/tmp/gnupg-home gpg --batch --with-colons --show-keys \
+      /signed-flatpak-runtime/usr/share/hadron/flathub.gpg 2>/dev/null | \
+      awk -F: '$1 == "fpr" {print $10; exit}')" = \
+      "${FLATHUB_PRIMARY_FINGERPRINT}"
+RUN : > /signed-flatpak-runtime/usr/share/hadron/gnupg-runtime-size && \
+    bytes="$(du -sb /signed-flatpak-runtime | awk '{print $1}')" && \
+    printf '%s\n' "$bytes" > \
+      /signed-flatpak-runtime/usr/share/hadron/gnupg-runtime-size && \
+    bytes="$(du -sb /signed-flatpak-runtime | awk '{print $1}')" && \
+    test "$bytes" -le 20971520 && \
+    printf '%s\n' "$bytes" > \
+      /signed-flatpak-runtime/usr/share/hadron/gnupg-runtime-size
 
 # AppStream trio — flatpak 1.16 hard-requires libappstream at build.
 FROM toolchain AS libyaml
@@ -1475,8 +1640,8 @@ RUN make -j"$(nproc)" && make DESTDIR=/ostree install
 # --- flatpak ---------------------------------------------------------------
 # Sandboxed app runtime. Uses our system bubblewrap / xdg-dbus-proxy /
 # fusermount3 (no bundled copies). libseccomp/libcap/libcurl/libxml2/libsystemd
-# come from the toolchain. GPG verification is built (gpgme) but has no gpg
-# binary at runtime, so remotes are added with --no-gpg-verify.
+# come from the toolchain. The GnuPG engine and trust bootstrap for runtime
+# verification are supplied by signed-flatpak-runtime.
 FROM toolchain AS flatpak
 COPY --from=libucontext /libucontext /
 COPY --from=glib2 /glib2 /
@@ -2456,6 +2621,7 @@ COPY --from=toolchain /usr/lib/libxml2.so* /usr/lib/
 COPY --from=libgpg-error /libgpg-error /
 COPY --from=libassuan /libassuan /
 COPY --from=gpgme /gpgme /
+COPY --from=signed-flatpak-runtime /signed-flatpak-runtime /
 COPY --from=libyaml /libyaml /
 COPY --from=libxmlb /libxmlb /
 COPY --from=appstream /appstream /
@@ -2484,7 +2650,8 @@ COPY --from=desktop-config / /
 # install time via a Kairos cloud-config (see cloud-config.yaml) and lives on
 # the persistent /home. We only ensure the groups it will join exist, enable
 # the system services, and configure the ly display manager on tty1.
-RUN ldconfig 2>/dev/null || true; \
+RUN chmod 1777 /tmp; \
+    ldconfig 2>/dev/null || true; \
     # Register the bundled fonts for the selected bar, terminal, and launcher.
     fc-cache -f 2>/dev/null || true; \
     for g in audio video render input bluetooth seat docker; do groupadd -f "$g"; done; \

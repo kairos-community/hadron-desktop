@@ -1,0 +1,12 @@
+{
+  "endpoint": {
+    "listen": "0.0.0.0:7443",
+    "mdns": true,
+    "insecure_loopback": false
+  },
+  "limits": {
+    "max_concurrent_calls": 16,
+    "max_processes": 16,
+    "max_request_bytes": 2097152
+  }
+}

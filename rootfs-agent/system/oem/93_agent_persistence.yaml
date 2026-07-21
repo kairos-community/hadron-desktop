@@ -1,0 +1,57 @@
+# Persist the agent's provisioned state across reboots.
+#
+# Kairos does not persist /var/lib, so /var/lib/hadron-agent -- which holds the
+# gateway's TLS identity, its config, and the root helper's enablement flag --
+# lived on the ephemeral overlay. The provisioner re-materialized it on every
+# boot, and because provision.resolveTLS only reuses an EXISTING tls.crt/tls.key
+# pair, a boot with an empty state directory generated a brand new self-signed
+# identity.
+#
+# The effect is that the appliance's certificate rotated on every reboot,
+# directly contradicting what resolveTLS is written to guarantee ("reused so a
+# later boot never rotates trust"). Any client that pinned the leaf -- which is
+# exactly what the fixture descriptor tells clients to do, and what the install
+# gate's persistence round-trip does -- was broken by a reboot. It failed in the
+# most confusing way available: the appliance came back perfectly healthy, so
+# /healthz was green while every pinned request died in TLS verification.
+#
+# Caught by the Task 11 acceptance run: the install gate's second boot never
+# returned a pinned /readyz, and the guest showed tls.crt with an mtime from
+# that boot.
+#
+# The append below is deliberate. 92_docker.yaml already puts /var/lib/docker in
+# CUSTOM_BIND_MOUNTS in this same file, and cos-setup's rootfs.after stage
+# consumes the variable once; writing the key with a plain `environment:` block
+# would replace Docker's value and silently un-persist every image and container
+# on the machine. So this reads the current value, adds one path, and rewrites
+# the line -- and is a no-op if the path is already listed, so re-running
+# cos-setup cannot duplicate the entry.
+#
+# 93_ sorts after 92_docker so Docker's value is already present when this runs.
+#
+# There is deliberately NO `if:` guard. The rootfs stage runs in the initramfs
+# context, where the installed system's /etc is not yet the running one, so a
+# guard on /etc/hadron-agent/profile silently skips the stage -- which is
+# exactly what happened on the first attempt at this fix, leaving the
+# certificate still rotating. 92_docker.yaml sets its bind mount unconditionally
+# for the same reason. The guard is unnecessary anyway: this file ships only in
+# the agent overlay, so its mere presence is the profile check.
+name: "Hadron agent persistent state"
+stages:
+  rootfs:
+    - name: "persist /var/lib/hadron-agent across reboots"
+      commands:
+        - |
+          layout=/run/cos/cos-layout.env
+          touch "$layout"
+          # shellcheck source=/dev/null
+          . "$layout" 2>/dev/null || true
+          case " ${CUSTOM_BIND_MOUNTS:-} " in
+            *" /var/lib/hadron-agent "*)
+              # Already listed: nothing to do, and re-adding would duplicate it.
+              exit 0
+              ;;
+          esac
+          merged="${CUSTOM_BIND_MOUNTS:-} /var/lib/hadron-agent"
+          sed -i '/^CUSTOM_BIND_MOUNTS=/d' "$layout"
+          printf 'CUSTOM_BIND_MOUNTS="%s"\n' "${merged# }" >> "$layout"

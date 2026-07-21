@@ -1,0 +1,13 @@
+[Unit]
+Description=Collect Cua XLibre compatibility artifacts
+After=ly@tty1.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/cua-compat-report
+TimeoutStartSec=420
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target

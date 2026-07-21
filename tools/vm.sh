@@ -23,6 +23,16 @@
 #   NOVNC=1      also serve noVNC web    (needs websockify + a noVNC checkout)
 #   NOVNC_PORT   noVNC web port         (default 6090)
 #   BIND         VNC/noVNC bind address (default 0.0.0.0)
+#
+# Detachable-fixture knobs (all optional; UNSET means the QEMU command line is
+# byte-for-byte the standard dev VM above -- the Phase-4 agent fixture in
+# test/agent/run.sh sets these, nothing else does):
+#   HOST_MCP_PORT  forward host 127.0.0.1:<port> to the guest's :7443 gateway
+#                  (adds hostfwd=tcp:127.0.0.1:<port>-:7443 to the user netdev)
+#   QMP            QMP control socket path (adds -qmp unix:<path>,server,nowait)
+#   SERIAL_LOG     capture the guest serial console to this file (-serial file:)
+#   PID_FILE       write the QEMU pid here (-pidfile); removed first if stale
+#   SEED_ISO       attach this ISO as a read-only cidata seed CD-ROM
 set -euo pipefail
 
 cd "$(dirname "$0")/.."          # repo root
@@ -99,6 +109,43 @@ ACCEL=(); [ -e /dev/kvm ] && ACCEL=(-enable-kvm -cpu host)
 # Optional QMP control socket (for scripting/screenshots): QMP=/path/to.sock
 QMP_ARGS=(); [ -n "${QMP:-}" ] && QMP_ARGS=(-qmp "unix:$QMP,server,nowait")
 
+# --- optional detachable-fixture knobs -------------------------------------
+# When ALL of these are unset the arrays below expand to nothing (or to the
+# stock netdev), so the QEMU command line is identical to the standard dev VM.
+
+# User networking. HOST_MCP_PORT adds a loopback-only hostfwd to the guest
+# gateway on :7443; unset leaves the plain netdev untouched. The commas inside
+# each element are QEMU option syntax, not array separators.
+# shellcheck disable=SC2054
+NET_ARGS=(-netdev user,id=net0 -device virtio-net-pci,netdev=net0)
+if [ -n "${HOST_MCP_PORT:-}" ]; then
+  # shellcheck disable=SC2054
+  NET_ARGS=(
+    -netdev "user,id=net0,hostfwd=tcp:127.0.0.1:${HOST_MCP_PORT}-:7443"
+    -device virtio-net-pci,netdev=net0
+  )
+fi
+
+# Serial console capture.
+SERIAL_ARGS=(); [ -n "${SERIAL_LOG:-}" ] && SERIAL_ARGS=(-serial "file:$SERIAL_LOG")
+
+# QEMU pidfile. Remove a stale file first so -pidfile does not refuse to start.
+PIDFILE_ARGS=()
+if [ -n "${PID_FILE:-}" ]; then
+  rm -f "$PID_FILE"
+  PIDFILE_ARGS=(-pidfile "$PID_FILE")
+fi
+
+# Read-only cidata seed CD-ROM (NoCloud): third IDE CD, no bootindex so it
+# never competes with the disk (0) or installer CD (1).
+SEED_ARGS=()
+if [ -n "${SEED_ISO:-}" ]; then
+  [ -f "$SEED_ISO" ] || { echo "error: SEED_ISO not found: $SEED_ISO" >&2; exit 1; }
+  # shellcheck disable=SC2054  # commas are QEMU option syntax, not separators.
+  SEED_ARGS=(-drive "if=none,id=seed,media=cdrom,readonly=on,file=$SEED_ISO"
+             -device ide-cd,drive=seed)
+fi
+
 # --- optional noVNC web proxy ----------------------------------------------
 WS_PID=""
 cleanup() { [ -n "$WS_PID" ] && kill "$WS_PID" 2>/dev/null || true; }
@@ -130,8 +177,11 @@ exec qemu-system-x86_64 \
   -drive if=none,id=hd0,format=qcow2,file="$DISK" \
   -device virtio-blk-pci,drive=hd0,bootindex=0 \
   "${CDROM[@]}" \
+  "${SEED_ARGS[@]}" \
   -device virtio-vga \
-  -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+  "${NET_ARGS[@]}" \
   -audiodev none,id=snd0 -device intel-hda -device hda-output,audiodev=snd0 \
   "${QMP_ARGS[@]}" \
+  "${SERIAL_ARGS[@]}" \
+  "${PIDFILE_ARGS[@]}" \
   -vnc "$BIND:$VNC"

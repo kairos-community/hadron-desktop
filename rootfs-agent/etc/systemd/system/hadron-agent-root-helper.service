@@ -1,0 +1,42 @@
+# Hadron agent privileged root helper.
+#
+# This unit is the explicit root-equivalent admin contract: it is INTENTIONALLY
+# NOT sandboxed. It permits arbitrary filesystem and child-process access, and
+# no RestrictAddressFamilies (or any other sandbox) is applied to it or its
+# children. The controls that make this safe are, by design, external to the
+# process: it listens on a Unix socket only (no network listener), it validates
+# an admin bearer independently of the gateway, and the whole appliance runs
+# inside a VM boundary.
+#
+# It is gated on /var/lib/hadron-agent/root/enabled, which the provisioner
+# writes only when an admin bearer was configured, so a machine with no admin
+# credential never runs the helper at all. The unit ships baked-enabled (a
+# multi-user.target.wants symlink in the agent overlay), but that only makes it
+# WANTED: ConditionPathExists=/var/lib/hadron-agent/root/enabled below is the
+# real gate, so on the admin-disabled default the helper is skipped every boot,
+# and on an admin-enabled machine it starts once provision (ordered before it)
+# has written the marker -- on the same boot, not a boot late.
+[Unit]
+Description=Hadron agent privileged root helper (admin MCP broker)
+ConditionPathExists=/etc/hadron-agent/profile
+ConditionPathExists=/var/lib/hadron-agent/root/enabled
+Requires=hadron-agent-provision.service
+After=hadron-agent-provision.service
+
+[Service]
+Type=simple
+# Runs as root (no User=): this is the root-equivalent admin path by design. It
+# re-verifies the admin bearer against the digest (with rotation) provisioned
+# into its own config.json, independently of the gateway.
+ExecStart=/usr/bin/hadron-agent root-helper --config /var/lib/hadron-agent/root/config.json
+# SIGHUP triggers a parse-then-atomically-swap reload of the admin digest.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+RestartSteps=5
+RestartMaxDelaySec=30s
+# Own a delegated cgroup subtree so MCP commands can be placed in child cgroups.
+Delegate=yes
+
+[Install]
+WantedBy=multi-user.target

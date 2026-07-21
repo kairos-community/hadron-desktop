@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hadron Cua Chromium Fixture</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      color: #111;
+      background: #fff;
+      font: 18px/1.4 sans-serif;
+    }
+    main { width: 850px; }
+    .controls {
+      display: grid;
+      grid-template-columns: 190px 240px 1fr;
+      gap: 18px;
+      align-items: start;
+    }
+    button, input, output, [role="button"] {
+      display: block;
+      min-height: 48px;
+      padding: 10px 14px;
+      font: inherit;
+    }
+    .drag-row {
+      display: flex;
+      gap: 300px;
+      margin-top: 28px;
+    }
+    .drag-box {
+      display: grid;
+      width: 180px;
+      height: 90px;
+      border: 2px solid #333;
+      place-items: center;
+      user-select: none;
+    }
+    #rows {
+      width: 850px;
+      height: 180px;
+      margin-top: 28px;
+      overflow-y: scroll;
+      border: 2px solid #333;
+    }
+    #rows div { min-height: 38px; padding: 6px 12px; }
+    #state {
+      min-height: 56px;
+      padding: 12px;
+      overflow-wrap: anywhere;
+      border: 2px solid #333;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Hadron Cua Chromium Fixture</h1>
+    <div class="controls">
+      <button id="click-count" type="button" aria-label="Click count">Clicks: 0</button>
+      <button id="double-click-count" type="button" aria-label="Double click count">Double clicks: 0</button>
+      <input id="text-input" type="text" aria-label="Text input" placeholder="Type text" autocomplete="off">
+      <output id="named-key" tabindex="0" aria-label="Named key">Named key: none</output>
+    </div>
+
+    <div class="drag-row">
+      <div id="drag-source" class="drag-box" role="group" tabindex="0"
+           draggable="true" aria-label="Drag source">Drag source</div>
+      <div id="drag-target" class="drag-box" role="region" aria-label="Drag target">Drag target: waiting</div>
+    </div>
+
+    <div id="rows" role="region" tabindex="0" aria-label="Scrollable rows"></div>
+    <pre id="state" aria-label="Fixture state"></pre>
+  </main>
+
+  <script>
+    (() => {
+      'use strict';
+
+      const baseTitle = 'Hadron Cua Chromium Fixture';
+      const state = {
+        clicks: 0,
+        double_clicks: 0,
+        text: '',
+        key: '',
+        dragged: false,
+        scroll_value: 0
+      };
+
+      const clickCount = document.getElementById('click-count');
+      const doubleClickCount = document.getElementById('double-click-count');
+      const textInput = document.getElementById('text-input');
+      const namedKey = document.getElementById('named-key');
+      const dragSource = document.getElementById('drag-source');
+      const dragTarget = document.getElementById('drag-target');
+      const rows = document.getElementById('rows');
+      const stateView = document.getElementById('state');
+
+      const render = () => {
+        const serialized = JSON.stringify(state);
+        stateView.textContent = serialized;
+        document.title = `${baseTitle} | ${serialized}`;
+      };
+
+      clickCount.addEventListener('click', () => {
+        state.clicks += 1;
+        clickCount.textContent = `Clicks: ${state.clicks}`;
+        render();
+      });
+
+      doubleClickCount.addEventListener('dblclick', () => {
+        state.double_clicks += 1;
+        doubleClickCount.textContent = `Double clicks: ${state.double_clicks}`;
+        render();
+      });
+
+      textInput.addEventListener('input', () => {
+        state.text = textInput.value;
+        render();
+      });
+
+      document.addEventListener('keydown', (event) => {
+        state.key = event.key;
+        namedKey.textContent = `Named key: ${event.key}`;
+        render();
+      });
+
+      dragSource.addEventListener('dragstart', (event) => {
+        event.dataTransfer.effectAllowed = 'copy';
+        event.dataTransfer.setData('text/plain', 'hadron-cua-fixture');
+      });
+
+      dragTarget.addEventListener('dragover', (event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+      });
+
+      dragTarget.addEventListener('drop', (event) => {
+        event.preventDefault();
+        state.dragged = event.dataTransfer.getData('text/plain') === 'hadron-cua-fixture';
+        dragTarget.textContent = state.dragged ? 'Drag target: dropped' : 'Drag target: waiting';
+        render();
+      });
+
+      rows.addEventListener('scroll', () => {
+        state.scroll_value = Math.round(rows.scrollTop);
+        render();
+      }, { passive: true });
+
+      for (let row = 1; row <= 40; row += 1) {
+        const item = document.createElement('div');
+        item.textContent = `Scrollable row ${String(row).padStart(2, '0')}`;
+        rows.appendChild(item);
+      }
+
+      render();
+    })();
+  </script>
+</body>
+</html>
