@@ -452,9 +452,11 @@ func windowArgs(in api.ComputerUseInput) map[string]any {
 // so the driver's own error surfaces rather than a synthetic one.
 func (a *Adapter) windowArgsFor(ctx context.Context, in api.ComputerUseInput) map[string]any {
 	args := windowArgs(in)
-	if in.PID != nil || in.WindowID == nil {
+	// Nothing to resolve when the caller gave both, or neither.
+	if (in.PID != nil) == (in.WindowID != nil) {
 		return args
 	}
+
 	result, rmeta := a.invoke(ctx, toolListWindows, map[string]any{}, true)
 	if rmeta.Code != "" {
 		return args
@@ -463,9 +465,32 @@ func (a *Adapter) windowArgsFor(ctx context.Context, in api.ComputerUseInput) ma
 	if err != nil {
 		return args
 	}
+
+	if in.WindowID != nil {
+		// window_id given: the driver's pointer tools additionally demand pid.
+		for _, w := range windows {
+			if w.WindowID == *in.WindowID {
+				args["pid"] = w.PID
+				return args
+			}
+		}
+		return args
+	}
+
+	// pid given: the driver's window-scoped tools demand window_id, and refuse
+	// with "Missing required integer field: window_id" (or "No windows found for
+	// pid 0") without it. The public contract promises "pid OR window_id" for
+	// every window-targeted action, so resolving the other half here is what
+	// makes that promise true -- previously only one direction worked, and a
+	// caller who identified an application by pid (which is exactly what
+	// list_applications hands back) could not act on it at all.
+	//
+	// An application can own several windows; take its first in list_windows
+	// order, which is the same representative window_id list_applications
+	// reports for that pid, so the two tools agree on what "the" window is.
 	for _, w := range windows {
-		if w.WindowID == *in.WindowID {
-			args["pid"] = w.PID
+		if w.PID == *in.PID {
+			args["window_id"] = w.WindowID
 			return args
 		}
 	}

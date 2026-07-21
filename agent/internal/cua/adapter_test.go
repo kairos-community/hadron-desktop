@@ -117,6 +117,8 @@ func TestComputerUseMapsEveryActionToTheRightCuaCall(t *testing.T) {
 				Action: api.ActionCapture, Scope: api.ScopeWindow, PID: intPtr(7),
 			},
 			want: []recordedCall{
+				// pid-only: resolve the window_id get_window_state requires.
+				{name: toolListWindows, args: map[string]any{}},
 				{name: toolGetWindowState, args: map[string]any{"pid": 7}},
 			},
 		},
@@ -166,6 +168,10 @@ func TestComputerUseMapsEveryActionToTheRightCuaCall(t *testing.T) {
 				Action: api.ActionDoubleClick, PID: intPtr(5), ElementIndex: intPtr(3),
 			},
 			want: []recordedCall{
+				// pid-only: the adapter resolves the window_id the driver's
+				// window-scoped tools require, exactly as it resolves the pid
+				// when only a window_id was given.
+				{name: toolListWindows, args: map[string]any{}},
 				{name: toolDoubleClick, args: map[string]any{
 					"pid": 5, "element_index": 3, "delivery_mode": deliveryForeground,
 				}},

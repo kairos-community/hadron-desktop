@@ -617,3 +617,61 @@ func TestBrowserSnapshotSeesRoleLessClickables(t *testing.T) {
 		}
 	}
 }
+
+// TestWindowArgsResolveBothDirections is the contract this adapter promises:
+// "pid OR window_id" for every window-targeted action. Only one direction used
+// to work, so a caller who identified an application by pid -- which is exactly
+// what list_applications returns -- got "Missing required integer field:
+// window_id" from the driver and could not act on it at all.
+func TestWindowArgsResolveBothDirections(t *testing.T) {
+	windows := &mcp.CallToolResult{StructuredContent: map[string]any{
+		"windows": []any{
+			map[string]any{"window_id": 4242, "pid": 77, "app_name": "xterm-256color"},
+			map[string]any{"window_id": 1818, "pid": 99, "app_name": "Chromium"},
+		},
+	}}
+
+	for _, tc := range []struct {
+		name             string
+		in               api.ComputerUseInput
+		wantPID, wantWin any
+	}{
+		{
+			name:    "window_id resolves the pid",
+			in:      api.ComputerUseInput{Action: api.ActionCapture, Scope: api.ScopeWindow, WindowID: int64Ptr(1818)},
+			wantPID: 99, wantWin: int64(1818),
+		},
+		{
+			name:    "pid resolves the window_id",
+			in:      api.ComputerUseInput{Action: api.ActionCapture, Scope: api.ScopeWindow, PID: intPtr(77)},
+			wantPID: 77, wantWin: int64(4242),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			caller := &fakeCaller{handler: func(_ context.Context, name string, _ map[string]any) (*mcp.CallToolResult, error) {
+				if name == toolListWindows {
+					return windows, nil
+				}
+				return &mcp.CallToolResult{}, nil
+			}}
+			if _, err := NewAdapter(caller).ComputerUse(context.Background(), tc.in); err != nil {
+				t.Fatalf("ComputerUse: %v", err)
+			}
+			var call recordedCall
+			for _, c := range caller.calls {
+				if c.name == toolGetWindowState {
+					call = c
+				}
+			}
+			if call.name == "" {
+				t.Fatal("get_window_state was never dispatched")
+			}
+			if call.args["pid"] != tc.wantPID {
+				t.Errorf("pid = %v, want %v", call.args["pid"], tc.wantPID)
+			}
+			if call.args["window_id"] != tc.wantWin {
+				t.Errorf("window_id = %v, want %v", call.args["window_id"], tc.wantWin)
+			}
+		})
+	}
+}
