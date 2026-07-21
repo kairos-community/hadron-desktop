@@ -1503,6 +1503,14 @@ cmd_ui() {
   # 5. Chromium at the pinned commit. The commit is asserted, not assumed: a
   #    Flathub update between runs would otherwise silently change what the
   #    gate tests.
+  # Chromium plus its freedesktop runtimes need a couple of GB in the guest.
+  # Without this line an exhausted disk surfaces only as flatpak's "Not enough
+  # disk space", several steps after the point where it could have been seen.
+  local freespace
+  freespace="$(_ui_exec "$smoke" "$descriptor" "$admin_token" user 'df -h /usr/local /home 2>&1 | tail -3')"
+  finfo "Guest free space before installing Chromium:"
+  printf '%s\n' "$freespace" | sed 's/^/    /' >&2
+
   local want_commit; want_commit="$(cat "$SCRIPT_DIR/fixtures/chromium.commit")"
   finfo "Installing Chromium at the pinned commit ${want_commit:0:12}"
   # bash is unbounded, so the multi-minute Flathub install is just one call --
