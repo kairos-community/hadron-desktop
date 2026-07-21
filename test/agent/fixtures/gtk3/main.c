@@ -21,6 +21,14 @@ typedef struct {
     GtkWidget *double_click_button;
     GtkWidget *named_key_label;
     GtkWidget *drag_target_label;
+
+    /* The event boxes, not their child labels. Only a handful of widgets reach
+     * the AT-SPI tree on this appliance -- a live run exposed five for the whole
+     * window -- and child GtkLabels are not among them. State that a remote
+     * agent must be able to READ therefore has to live on the accessible name
+     * of an exposed widget, not only in the label text a sighted user sees. */
+    GtkWidget *named_key_box;
+    GtkWidget *drag_target_box;
 } Fixture;
 
 static void append_json_string(GString *json, const gchar *value)
@@ -166,11 +174,17 @@ static void on_click(GtkButton *button, gpointer user_data)
 {
     Fixture *fixture = user_data;
     gchar *label;
+    gchar *accessible_label;
 
     (void)button;
     fixture->clicks++;
     label = g_strdup_printf("Clicks: %u", fixture->clicks);
     gtk_button_set_label(GTK_BUTTON(fixture->click_button), label);
+    /* "Click count" stays as a prefix so a lookup by that name still matches,
+     * while the count itself becomes readable through accessibility. */
+    accessible_label = g_strdup_printf("Click count %s", label);
+    set_accessible_name(fixture->click_button, accessible_label);
+    g_free(accessible_label);
     g_free(label);
     persist_state(fixture);
 }
@@ -185,9 +199,14 @@ static gboolean on_double_click(GtkWidget *widget,
     if (event->button == GDK_BUTTON_PRIMARY && event->type == GDK_2BUTTON_PRESS) {
         gchar *label;
 
+        gchar *accessible_label;
+
         fixture->double_clicks++;
         label = g_strdup_printf("Double clicks: %u", fixture->double_clicks);
         gtk_button_set_label(GTK_BUTTON(fixture->double_click_button), label);
+        accessible_label = g_strdup_printf("Double click count %s", label);
+        set_accessible_name(fixture->double_click_button, accessible_label);
+        g_free(accessible_label);
         g_free(label);
         persist_state(fixture);
     }
@@ -215,6 +234,9 @@ static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer use
     fixture->key = g_strdup(key_name != NULL ? key_name : "Unknown");
     label = g_strdup_printf("Named key: %s", fixture->key);
     gtk_label_set_text(GTK_LABEL(fixture->named_key_label), label);
+    if (fixture->named_key_box != NULL) {
+        set_accessible_name(fixture->named_key_box, label);
+    }
     g_free(label);
     persist_state(fixture);
 
@@ -256,6 +278,10 @@ static void on_drag_data_received(GtkWidget *widget,
     (void)info;
     g_free(payload);
     fixture->dragged = accepted;
+    if (fixture->drag_target_box != NULL) {
+        set_accessible_name(fixture->drag_target_box,
+                            accepted ? "Drag target: dropped" : "Drag target: waiting");
+    }
     gtk_label_set_text(GTK_LABEL(fixture->drag_target_label),
                        accepted ? "Drag target: dropped" : "Drag target: waiting");
     persist_state(fixture);
@@ -290,6 +316,7 @@ static GtkWidget *new_scrollable_rows(Fixture *fixture)
         g_free(text);
     }
     gtk_container_add(GTK_CONTAINER(scrolled), rows);
+    gtk_widget_set_can_focus(scrolled, TRUE);
     set_accessible_name(scrolled, "Scrollable rows");
     adjustment = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(scrolled));
     g_signal_connect(adjustment, "value-changed", G_CALLBACK(on_scroll_changed), fixture);
@@ -364,12 +391,18 @@ int main(int argc, char **argv)
     gtk_fixed_put(GTK_FIXED(fixed), entry, 40, 220);
 
     named_key_box = new_labeled_event_box("Named key: none", &fixture.named_key_label);
+    fixture.named_key_box = named_key_box;
     gtk_widget_set_size_request(named_key_box, 360, 55);
+    /* Focusable so the accessibility tree includes it: a live run showed plain
+     * containers absent from the tree entirely, which made the control the gate
+     * needed invisible rather than merely unnamed. */
+    gtk_widget_set_can_focus(named_key_box, TRUE);
     set_accessible_name(named_key_box, "Named key");
     gtk_fixed_put(GTK_FIXED(fixed), named_key_box, 40, 295);
 
     drag_source = new_labeled_event_box("Drag source", &drag_source_label);
     gtk_widget_set_size_request(drag_source, 150, 80);
+    gtk_widget_set_can_focus(drag_source, TRUE);
     set_accessible_name(drag_source, "Drag source");
     gtk_drag_source_set(drag_source,
                         GDK_BUTTON1_MASK,
@@ -383,7 +416,9 @@ int main(int argc, char **argv)
     gtk_fixed_put(GTK_FIXED(fixed), drag_source, 40, 420);
 
     drag_target = new_labeled_event_box("Drag target: waiting", &fixture.drag_target_label);
+    fixture.drag_target_box = drag_target;
     gtk_widget_set_size_request(drag_target, 150, 80);
+    gtk_widget_set_can_focus(drag_target, TRUE);
     set_accessible_name(drag_target, "Drag target");
     gtk_drag_dest_set(drag_target,
                       GTK_DEST_DEFAULT_ALL,
