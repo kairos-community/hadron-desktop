@@ -969,6 +969,30 @@ _rec_exec() {
     --mode exec --command "$cmd" --call-timeout "$timeout" "${extra[@]}" 2>/dev/null
 }
 
+# Process probes read /proc directly.
+#
+# The appliance has NO pgrep, and its `ps` is BusyBox, which supports neither
+# `-eo` nor `ax`. Both earlier versions of these probes therefore errored to an
+# empty string, and an empty answer is indistinguishable from "the process is
+# not there" -- so the gate reported that cua-driver was gone and that i3 had
+# exited when it had never successfully looked. /proc is always present and
+# needs no tools at all.
+_rec_count_cmdline() {  # <marker> -- processes whose cmdline contains marker
+  # grep -a on /proc/<pid>/cmdline: the file is NUL-separated, so it is binary
+  # to grep and needs -a. No tr, which an earlier version got wrong in a way
+  # that silently still "worked".
+  printf 'n=0; for p in /proc/[0-9]*; do grep -qa %s "$p/cmdline" 2>/dev/null && n=$((n+1)); done; echo $n' "'$1'"
+}
+_rec_pid_of_comm() {    # <comm> -- first pid whose comm is exactly <comm>
+  printf 'for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2>/dev/null)" = %s ] && { echo ${p#/proc/}; break; }; done' "'$1'"
+}
+_rec_count_comm() {     # <case pattern> -- processes whose comm matches
+  # The pattern is emitted UNQUOTED so `Xorg|X` is a case alternation. Quoting
+  # it made the shell look for a process literally named "Xorg|X", so the count
+  # was always zero and the gate concluded no X server was running.
+  printf 'n=0; for p in /proc/[0-9]*; do case "$(cat "$p/comm" 2>/dev/null)" in %s) n=$((n+1));; esac; done; echo $n' "$1"
+}
+
 # _rec_warm_cua <descriptor> <admin_token> <art> -- force the lazily-started
 # computer-use backend to come up, by making one computer_use call. Several
 # scenarios need a RUNNING driver to kill or to observe reconnecting.
@@ -1093,7 +1117,7 @@ cmd_recovery() {
   # harness, not the appliance. Warm it up first so there is something to kill.
   _rec_warm_cua "$descriptor" "$admin_token" "$art"
   if [ "$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
-        'ps -eo args= | grep -c "[c]ua-driver"' | tr -d "[:space:]")" = "0" ]; then
+        "$(_rec_count_cmdline cua-driver)" | tr -d "[:space:]")" = "0" ]; then
     err "[1/6] cua-driver is not running; cannot exercise its recovery"
     failures=$((failures+1))
   else
@@ -1158,7 +1182,7 @@ cmd_recovery() {
   # exactly one X server must remain.
   local i3_before
   i3_before="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
-    'ps -eo pid=,comm= | awk "\$2==\"i3\"{print \$1; exit}"' | tr -d '[:space:]')"
+    "$(_rec_pid_of_comm i3)" | tr -d '[:space:]')"
   _rec_note "$art" "i3 pid before: ${i3_before:-none}"
   _rec_exec "$smoke" "$descriptor" "$admin_token" user \
     'i3-msg exit >/dev/null 2>&1 || pkill -KILL -x i3 || true' >/dev/null 2>&1 || true
@@ -1167,7 +1191,7 @@ cmd_recovery() {
   while [ "$SECONDS" -lt "$sdeadline" ]; do
     local now
     now="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
-      'ps -eo pid=,comm= | awk "\$2==\"i3\"{print \$1; exit}"' | tr -d '[:space:]')"
+      "$(_rec_pid_of_comm i3)" | tr -d '[:space:]')"
     if [ -z "$now" ] || { [ -n "$i3_before" ] && [ "$now" != "$i3_before" ]; }; then
       i3_gone=1; _rec_note "$art" "observed: i3 went away (pid ${i3_before:-none} -> ${now:-none})"; break
     fi
@@ -1182,7 +1206,7 @@ cmd_recovery() {
       local i3_back="" wdeadline=$((SECONDS + ${RECOVERY_SESSION_TIMEOUT:-150}))
       while [ "$SECONDS" -lt "$wdeadline" ]; do
         i3_back="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
-          'ps -eo pid=,comm= | awk "\$2==\"i3\"{print \$1; exit}"' | tr -d '[:space:]')"
+          "$(_rec_pid_of_comm i3)" | tr -d '[:space:]')"
         [ -n "$i3_back" ] && { _rec_note "$art" "observed: i3 is back (pid $i3_back)"; break; }
         sleep 3
       done
@@ -1193,7 +1217,7 @@ cmd_recovery() {
       # leaving the console dark, which is the failure this guards.
       local displays
       displays="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
-        'ps -eo comm= | grep -cE "^(Xorg|X)$"' | tr -d '[:space:]')"
+        "$(_rec_count_comm 'Xorg|X')" | tr -d '[:space:]')"
       _rec_note "$art" "X servers after recovery: ${displays:-0}"
       if [ "${displays:-0}" != "1" ]; then
         err "[4/6] expected exactly one X server after recovery, found ${displays:-0}"
