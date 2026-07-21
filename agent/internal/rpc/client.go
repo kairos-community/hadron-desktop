@@ -117,9 +117,16 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, authH
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, MaxBodyBytes))
+	// Read one byte past the limit so an oversized body is DETECTED rather than
+	// silently truncated. A truncated body is worse than a rejected one: it
+	// still decodes as "some JSON error" and the real cause (a response too big
+	// for the hop) never reaches anyone.
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
 	if err != nil {
 		return fmt.Errorf("rpc: read response body: %w", err)
+	}
+	if len(respBody) > MaxResponseBytes {
+		return fmt.Errorf("rpc: %s %s: %w", method, path, ErrResponseTooLarge)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

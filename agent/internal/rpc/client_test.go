@@ -2,9 +2,13 @@ package rpc
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestClientCallHealthPauseResumeRoundTrip(t *testing.T) {
@@ -48,6 +52,52 @@ func TestClientCallHealthPauseResumeRoundTrip(t *testing.T) {
 	}
 	if h.resumeCount != 2 {
 		t.Fatalf("resumeCount = %d, want 2", h.resumeCount)
+	}
+}
+
+// TestClientCarriesAScreenshotSizedResponse pins the size a response is allowed
+// to be. A computer_use capture of a busy desktop serializes to several
+// megabytes -- well past the 2 MiB request limit this hop once reused for
+// responses, which truncated every such capture and then reported the resulting
+// decode failure as a retryable SESSION_UNAVAILABLE.
+func TestClientCarriesAScreenshotSizedResponse(t *testing.T) {
+	const screenshotBytes = 6 << 20 // comfortably over MaxBodyBytes
+
+	h := newFakeHandler()
+	h.callFn = func(context.Context, CallRequest, string) (*CallResponse, error) {
+		return &CallResponse{Content: []mcp.Content{&mcp.TextContent{Text: strings.Repeat("x", screenshotBytes)}}}, nil
+	}
+	sockPath, _ := newTestServer(t, h, false)
+	c := NewClient(sockPath)
+	t.Cleanup(c.Close)
+
+	resp, err := c.Call(context.Background(), CallRequest{RequestID: "1", Tool: "computer_use"}, "")
+	if err != nil {
+		t.Fatalf("Call with a %d-byte payload: %v", screenshotBytes, err)
+	}
+	text, ok := resp.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("response content type %T, want *mcp.TextContent", resp.Content[0])
+	}
+	if len(text.Text) != screenshotBytes {
+		t.Fatalf("payload round-tripped as %d bytes, want %d", len(text.Text), screenshotBytes)
+	}
+}
+
+// TestClientRejectsAnOversizedResponse proves the limit still exists and, when
+// crossed, is reported AS a size failure -- not as truncated JSON.
+func TestClientRejectsAnOversizedResponse(t *testing.T) {
+	h := newFakeHandler()
+	h.callFn = func(context.Context, CallRequest, string) (*CallResponse, error) {
+		return &CallResponse{Content: []mcp.Content{&mcp.TextContent{Text: strings.Repeat("x", MaxResponseBytes+1)}}}, nil
+	}
+	sockPath, _ := newTestServer(t, h, false)
+	c := NewClient(sockPath)
+	t.Cleanup(c.Close)
+
+	_, err := c.Call(context.Background(), CallRequest{RequestID: "1", Tool: "computer_use"}, "")
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("Call returned %v, want ErrResponseTooLarge", err)
 	}
 }
 

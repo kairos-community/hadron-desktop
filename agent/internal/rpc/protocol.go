@@ -11,6 +11,7 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -54,6 +55,22 @@ const (
 // rejected as soon as the limit is crossed, without ever buffering more
 // than MaxBodyBytes into memory.
 const MaxBodyBytes = 2 << 20 // 2 MiB
+
+// MaxResponseBytes bounds a response body Client will read. It is deliberately
+// far larger than MaxBodyBytes and matches the gateway's own budget for a
+// serialized tool result: requests are small JSON envelopes, but a RESPONSE
+// carries whatever the tool produced, and a computer_use screenshot of a
+// full, visually busy desktop runs to several megabytes. Sharing the request
+// limit here silently truncated every such capture, and the truncated JSON
+// then failed to decode -- surfacing to callers as a retryable
+// SESSION_UNAVAILABLE, so clients retried forever against a screen that could
+// never fit.
+const MaxResponseBytes = 16 << 20 // 16 MiB
+
+// ErrResponseTooLarge reports a response body over MaxResponseBytes. It is a
+// distinct sentinel so the gateway can map it to a truthful, NON-retryable
+// code: the body is deterministically too big, and retrying cannot help.
+var ErrResponseTooLarge = errors.New("rpc: response body exceeds the maximum size")
 
 // ---------------------------------------------------------------------------
 // Wire types

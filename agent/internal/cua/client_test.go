@@ -27,6 +27,10 @@ type blockInput struct {
 	StartedPath       string `json:"startedPath,omitempty"`
 }
 
+type imageInput struct {
+	Bytes int `json:"bytes"`
+}
+
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv(helperProcessEnv) != "1" {
 		return
@@ -73,6 +77,21 @@ func TestHelperProcess(t *testing.T) {
 		case <-timer.C:
 			return textResult(strconv.FormatInt(maximum.Load(), 10)), nil, nil
 		}
+	})
+
+	// A screenshot-sized reply. Cua's capture tools answer with ImageContent,
+	// which is orders of magnitude larger than every other reply the driver
+	// sends, so it is the one payload shape worth exercising repeatedly.
+	mcp.AddTool(server, &mcp.Tool{Name: "image"}, func(
+		_ context.Context,
+		_ *mcp.CallToolRequest,
+		input imageInput,
+	) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.ImageContent{Data: make([]byte, input.Bytes), MIMEType: "image/png"},
+			},
+		}, nil, nil
 	})
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
@@ -270,6 +289,44 @@ func TestClientSerializesCalls(t *testing.T) {
 	}
 	if observedMaximum != 1 {
 		t.Fatalf("maximum concurrent CallTool operations = %d, want 1", observedMaximum)
+	}
+}
+
+// TestClientRepeatsImageCalls guards the appliance's capture path: on a live
+// appliance every computer_use capture after the FIRST one failed with
+// SESSION_UNAVAILABLE while text-returning calls kept working, and the driver
+// process never died. A screenshot is the only large reply the driver sends, so
+// this replays that shape -- several image calls in a row on one client, with a
+// text call interleaved to show the session is still usable.
+func TestClientRepeatsImageCalls(t *testing.T) {
+	client := startHelper(t)
+
+	// Roughly the size of a real appliance screenshot.
+	const screenshotBytes = 22_000
+
+	for attempt := range 5 {
+		result, err := client.Call(t.Context(), "image", imageInput{Bytes: screenshotBytes})
+		if err != nil {
+			t.Fatalf("image call %d returned an error: %v", attempt+1, err)
+		}
+		if len(result.Content) != 1 {
+			t.Fatalf("image call %d returned %d content items, want 1", attempt+1, len(result.Content))
+		}
+		image, ok := result.Content[0].(*mcp.ImageContent)
+		if !ok {
+			t.Fatalf("image call %d returned content type %T, want *mcp.ImageContent", attempt+1, result.Content[0])
+		}
+		if len(image.Data) != screenshotBytes {
+			t.Fatalf("image call %d returned %d bytes, want %d", attempt+1, len(image.Data), screenshotBytes)
+		}
+
+		result, err = client.Call(t.Context(), "echo", echoInput{Value: "still alive"})
+		if err != nil {
+			t.Fatalf("echo after image call %d returned an error: %v", attempt+1, err)
+		}
+		if got := resultText(t, result); got != "still alive" {
+			t.Fatalf("echo after image call %d returned %q", attempt+1, got)
+		}
 	}
 }
 

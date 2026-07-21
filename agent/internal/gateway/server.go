@@ -449,6 +449,21 @@ func route[Out any](ctx context.Context, g *Gateway, req *mcp.CallToolRequest, t
 	}, authHeader)
 	if callErr != nil {
 		code, timedOut := mapCallError(genCtx, callErr)
+		// The caller only ever sees safeMessage's fixed text, so without this
+		// line the real cause is lost entirely. That matters most for
+		// SESSION_UNAVAILABLE, which mapCallError uses as its catch-all: a
+		// broker-hop failure and a genuinely dead desktop session reach the
+		// client as the same sentence, and only this log tells them apart.
+		//
+		// The cause is a transport-level error string. Like audit, it must never
+		// carry tool arguments, response bodies, or the bearer -- it does not,
+		// because those never reach the error value.
+		g.logger.LogAttrs(ctx, slog.LevelWarn, "tool call failed",
+			slog.String("request_id", rid),
+			slog.String("tool", tool),
+			slog.String("code", string(code)),
+			slog.String("cause", callErr.Error()),
+		)
 		*meta(&out) = api.ResultMeta{Code: code, Message: safeMessage(code), Retryable: code == api.CodeSessionUnavailable}
 		g.audit(ctx, rid, tokenID, class, tool, g.now().Sub(start), code, timedOut, false)
 		return nil, out, nil
@@ -591,6 +606,13 @@ func mapCallError(ctx context.Context, err error) (api.ErrorCode, bool) {
 			return api.CodeDeadlineExceeded, true
 		}
 		return api.CodePaused, false
+	}
+	// A response too large for the broker hop is deterministic: the same call
+	// will produce the same oversized body every time. Reporting it as a
+	// retryable SESSION_UNAVAILABLE (this function's catch-all) sends clients
+	// into an endless retry loop and blames the desktop session for a limit.
+	if errors.Is(err, rpc.ErrResponseTooLarge) {
+		return api.CodeResourceExhausted, false
 	}
 	var se *rpc.StatusError
 	if errors.As(err, &se) {
