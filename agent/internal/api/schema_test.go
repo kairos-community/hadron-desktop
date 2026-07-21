@@ -11,17 +11,17 @@ import (
 )
 
 // TestToolNamesSortedSet is the contract test the brief calls out explicitly:
-// hadron-agent exposes exactly these eight tools, no more, no fewer. The
-// eighth, browser, was added by the 2026-07-20 amendment.
+// hadron-agent exposes exactly these seven tools, no more, no fewer. The
+// browser was added by the 2026-07-20 amendment; terminal and process were
+// replaced by a single unbounded bash tool.
 func TestToolNamesSortedSet(t *testing.T) {
 	want := []string{
+		"bash",
 		"browser",
 		"computer_use",
 		"patch",
-		"process",
 		"read_file",
 		"search_files",
-		"terminal",
 		"write_file",
 	}
 
@@ -35,10 +35,10 @@ func TestToolNamesSortedSet(t *testing.T) {
 	}
 }
 
-// TestRegisterAllExposesExactlyEightTools proves the names above are not
+// TestRegisterAllExposesExactlySevenTools proves the names above are not
 // just constants sitting in this package: registering them on a real
 // *mcp.Server and listing tools over the wire yields the same sorted set.
-func TestRegisterAllExposesExactlyEightTools(t *testing.T) {
+func TestRegisterAllExposesExactlySevenTools(t *testing.T) {
 	ctx := context.Background()
 
 	s := mcp.NewServer(&mcp.Implementation{Name: "hadron-agent-test", Version: "v0.0.0"}, nil)
@@ -189,38 +189,11 @@ func TestComputerUseInputValidate(t *testing.T) {
 }
 
 func TestTerminalInputValidate(t *testing.T) {
-	if err := (TerminalInput{}).Validate(); err == nil {
+	if err := (BashInput{}).Validate(); err == nil {
 		t.Fatal("expected error for missing command")
 	}
-	if err := (TerminalInput{Command: "echo hi"}).Validate(); err != nil {
+	if err := (BashInput{Command: "echo hi"}).Validate(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestProcessInputValidate(t *testing.T) {
-	tests := []struct {
-		name    string
-		in      ProcessInput
-		wantErr bool
-	}{
-		{"unknown action rejected", ProcessInput{Action: "pause"}, true},
-		{"start with command ok", ProcessInput{Action: ProcessStart, Command: "sleep"}, false},
-		{"start without command rejected", ProcessInput{Action: ProcessStart}, true},
-		{"start with process_id rejected", ProcessInput{Action: ProcessStart, Command: "sleep", ProcessID: "p1"}, true},
-		{"poll with process_id ok", ProcessInput{Action: ProcessPoll, ProcessID: "p1"}, false},
-		{"poll without process_id rejected", ProcessInput{Action: ProcessPoll}, true},
-		{"write with input ok", ProcessInput{Action: ProcessWrite, ProcessID: "p1", Input: "data"}, false},
-		{"write without input rejected", ProcessInput{Action: ProcessWrite, ProcessID: "p1"}, true},
-		{"terminate with process_id ok", ProcessInput{Action: ProcessTerminate, ProcessID: "p1"}, false},
-		{"terminate without process_id rejected", ProcessInput{Action: ProcessTerminate}, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.in.Validate()
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
 	}
 }
 
@@ -293,22 +266,10 @@ func schemaFieldSet[T any](t *testing.T) (properties []string, required []string
 	return properties, required
 }
 
-func TestTerminalInputSchemaFrozen(t *testing.T) {
-	props, required := schemaFieldSet[TerminalInput](t)
-	wantProps := []string{"command", "cwd", "env", "max_output_bytes", "timeout_ms"}
+func TestBashInputSchemaFrozen(t *testing.T) {
+	props, required := schemaFieldSet[BashInput](t)
+	wantProps := []string{"command", "cwd", "env"}
 	wantRequired := []string{"command"}
-	if !reflect.DeepEqual(props, wantProps) {
-		t.Fatalf("properties = %v, want %v", props, wantProps)
-	}
-	if !reflect.DeepEqual(required, wantRequired) {
-		t.Fatalf("required = %v, want %v", required, wantRequired)
-	}
-}
-
-func TestProcessInputSchemaFrozen(t *testing.T) {
-	props, required := schemaFieldSet[ProcessInput](t)
-	wantProps := []string{"action", "args", "command", "cwd", "env", "input", "process_id", "pty", "signal", "timeout_ms"}
-	wantRequired := []string{"action"}
 	if !reflect.DeepEqual(props, wantProps) {
 		t.Fatalf("properties = %v, want %v", props, wantProps)
 	}

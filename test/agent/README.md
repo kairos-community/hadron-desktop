@@ -9,7 +9,7 @@ The point of the fixture is that a *downstream* repository — a UI, an agent
 framework, anything that wants to drive a real desktop — can get a real,
 graphical Linux session under test without knowing anything about Kairos,
 AuroraBoot, QEMU, or how the appliance authenticates. All it needs is the
-descriptor and the eight public MCP tools.
+descriptor and the seven public MCP tools.
 
 Everything here drives the DRM-backed XLibre/i3 session that QEMU actually
 scans out. There is no headless mode and no nested display: if a test passes,
@@ -286,7 +286,7 @@ it and `"focus_application"` to bring it forward before driving it.
 
 ## Public computer-use assertions
 
-Everything a downstream test does goes through the eight public MCP tools:
+Everything a downstream test does goes through the seven public MCP tools:
 
 ```text
 computer_use   terminal   process   read_file

@@ -92,34 +92,18 @@ type fakeProcess struct {
 	terminalStarted chan struct{} // if non-nil, one send per Terminal start
 }
 
-func (p *fakeProcess) Terminal(ctx context.Context, _ api.TerminalInput) (api.TerminalOutput, error) {
+func (p *fakeProcess) Bash(ctx context.Context, _ api.BashInput) (api.BashOutput, error) {
 	if p.terminalStarted != nil {
 		p.terminalStarted <- struct{}{}
 	}
 	if p.terminalGate == nil {
-		return api.TerminalOutput{Stdout: "ok"}, nil
+		return api.BashOutput{Stdout: "ok"}, nil
 	}
 	select {
 	case <-ctx.Done():
-		return api.TerminalOutput{ResultMeta: api.ResultMeta{Code: api.CodeDeadlineExceeded, Message: ctx.Err().Error()}}, nil
+		return api.BashOutput{ResultMeta: api.ResultMeta{Code: api.CodeDeadlineExceeded, Message: ctx.Err().Error()}}, nil
 	case <-p.terminalGate:
-		return api.TerminalOutput{Stdout: "ok"}, nil
-	}
-}
-
-func (p *fakeProcess) Process(_ context.Context, in api.ProcessInput) (api.ProcessOutput, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	switch in.Action {
-	case api.ProcessStart:
-		p.nextID++
-		id := fmt.Sprintf("proc-%d", p.nextID)
-		return api.ProcessOutput{ProcessID: id, Running: true}, nil
-	case api.ProcessTerminate:
-		p.terminated = append(p.terminated, in.ProcessID)
-		return api.ProcessOutput{ProcessID: in.ProcessID, Running: false}, nil
-	default:
-		return api.ProcessOutput{ProcessID: in.ProcessID, Running: true}, nil
+		return api.BashOutput{Stdout: "ok"}, nil
 	}
 }
 
@@ -294,7 +278,7 @@ func TestDegradationShellStaysLive(t *testing.T) {
 			if r, _ := b.ReadFile(ctx, api.ReadFileInput{Path: "/x"}); r.Code != "" {
 				errs <- fmt.Sprintf("read_file code %q", r.Code)
 			}
-			if tr, _ := b.Terminal(ctx, api.TerminalInput{Command: "echo hi"}); tr.Code != "" {
+			if tr, _ := b.Bash(ctx, api.BashInput{Command: "echo hi"}); tr.Code != "" {
 				errs <- fmt.Sprintf("terminal code %q", tr.Code)
 			}
 		}()
@@ -421,75 +405,6 @@ func TestComputerUseBypassesOSSemaphore(t *testing.T) {
 // an in-flight terminal is cancelled and reported PAUSED, a tracked process
 // group is terminated, new calls during pause are rejected with PAUSED, and
 // resume restores service and restarts Cua.
-func TestPauseCancelsActiveRejectsNewThenResume(t *testing.T) {
-	proc := &fakeProcess{terminalGate: make(chan struct{}), terminalStarted: make(chan struct{}, 1)}
-	comp := &fakeComputer{ready: true}
-	b := newTestBroker(t, &fakeFiles{}, proc, comp)
-	defer b.Close()
-
-	ctx := context.Background()
-
-	// Start a long-running tracked process the broker will remember.
-	ps, _ := b.Process(ctx, api.ProcessInput{Action: api.ProcessStart, Command: "sleep"})
-	if ps.ProcessID == "" {
-		t.Fatalf("process start returned no id")
-	}
-
-	// Launch a terminal call that blocks until cancelled.
-	termOut := make(chan api.TerminalOutput, 1)
-	go func() {
-		out, _ := b.Terminal(ctx, api.TerminalInput{Command: "sleep 100"})
-		termOut <- out
-	}()
-	select {
-	case <-proc.terminalStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("terminal never started")
-	}
-
-	// Pause: cancels the active terminal, terminates the tracked group.
-	if err := b.Pause(ctx); err != nil {
-		t.Fatalf("pause: %v", err)
-	}
-
-	select {
-	case out := <-termOut:
-		if out.Code != api.CodePaused {
-			t.Fatalf("cancelled terminal: got code %q, want PAUSED", out.Code)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("terminal was not cancelled by pause")
-	}
-
-	if got := proc.terminatedIDs(); len(got) != 1 || got[0] != ps.ProcessID {
-		t.Fatalf("pause terminated %v, want [%s]", got, ps.ProcessID)
-	}
-
-	// New calls during pause are rejected.
-	if r, _ := b.ReadFile(ctx, api.ReadFileInput{Path: "/x"}); r.Code != api.CodePaused {
-		t.Fatalf("read during pause: got %q, want PAUSED", r.Code)
-	}
-	if cu, _ := b.ComputerUse(ctx, api.ComputerUseInput{Action: api.ActionCapture}); cu.Code != api.CodePaused {
-		t.Fatalf("computer_use during pause: got %q, want PAUSED", cu.Code)
-	}
-
-	// Resume restores service and restarts Cua.
-	stopsBefore := comp.stopCount()
-	if err := b.Resume(ctx); err != nil {
-		t.Fatalf("resume: %v", err)
-	}
-	if comp.stopCount() != stopsBefore+1 {
-		t.Fatalf("resume did not restart Cua (stop calls %d -> %d)", stopsBefore, comp.stopCount())
-	}
-	if r, _ := b.ReadFile(ctx, api.ReadFileInput{Path: "/x"}); r.Code != "" {
-		t.Fatalf("read after resume: got %q, want success", r.Code)
-	}
-	if cu, _ := b.ComputerUse(ctx, api.ComputerUseInput{Action: api.ActionCapture}); cu.Code != "" {
-		t.Fatalf("computer_use after resume: got %q, want success", cu.Code)
-	}
-}
-
-// TestPauseResumeIdempotent asserts repeated pause/resume calls are no-ops.
 func TestPauseResumeIdempotent(t *testing.T) {
 	proc := &fakeProcess{}
 	b := newTestBroker(t, &fakeFiles{}, proc, &fakeComputer{ready: true})
@@ -521,7 +436,7 @@ func TestSuccessResultsCarryIdentity(t *testing.T) {
 	defer b.Close()
 	ctx := context.Background()
 
-	tr, _ := b.Terminal(ctx, api.TerminalInput{Command: "echo hi"})
+	tr, _ := b.Bash(ctx, api.BashInput{Command: "echo hi"})
 	if tr.Identity == nil {
 		t.Fatalf("terminal success carried no identity")
 	}

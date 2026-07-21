@@ -79,27 +79,13 @@ func (f *FakeProcess) block(ctx context.Context) (interrupted bool) {
 	}
 }
 
-func (f *FakeProcess) Terminal(ctx context.Context, in api.TerminalInput) (api.TerminalOutput, error) {
+func (f *FakeProcess) Bash(ctx context.Context, in api.BashInput) (api.BashOutput, error) {
 	if f.block(ctx) {
 		// Interrupted mid-call: report the interrupt code the real executors
 		// use so the broker's finish() can translate a pause into PAUSED.
-		return api.TerminalOutput{ResultMeta: api.ResultMeta{Code: api.CodeDeadlineExceeded}}, nil
+		return api.BashOutput{ResultMeta: api.ResultMeta{Code: api.CodeDeadlineExceeded}}, nil
 	}
-	return api.TerminalOutput{Stdout: "ok", ExitCode: 0}, nil
-}
-
-func (f *FakeProcess) Process(ctx context.Context, in api.ProcessInput) (api.ProcessOutput, error) {
-	switch in.Action {
-	case api.ProcessStart:
-		if f.block(ctx) {
-			return api.ProcessOutput{ResultMeta: api.ResultMeta{Code: api.CodeDeadlineExceeded}}, nil
-		}
-		return api.ProcessOutput{ProcessID: "proc-1", PID: 4242, Running: true}, nil
-	case api.ProcessTerminate:
-		return api.ProcessOutput{ProcessID: in.ProcessID, Running: false}, nil
-	default:
-		return api.ProcessOutput{ProcessID: in.ProcessID, Running: true}, nil
-	}
+	return api.BashOutput{Stdout: "ok", ExitCode: 0}, nil
 }
 
 func (f *FakeProcess) Close() error { return nil }

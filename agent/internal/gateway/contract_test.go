@@ -72,7 +72,7 @@ func newFixture(t *testing.T, opts ...func(*Config, *fixture)) *fixture {
 // Tool contract
 // ---------------------------------------------------------------------------
 
-func TestExactEightToolsRegistered(t *testing.T) {
+func TestExactSevenToolsRegistered(t *testing.T) {
 	f := newFixture(t)
 	session := connectMCP(t, f.g, f.creds.userBearer)
 
@@ -99,60 +99,6 @@ func TestExactEightToolsRegistered(t *testing.T) {
 // named string types as closed sets. Without this the eleven computer_use
 // actions reach clients as a bare {"type":"string"} and can only be discovered
 // by trial and error.
-func TestListedToolsAdvertiseEnums(t *testing.T) {
-	f := newFixture(t)
-	session := connectMCP(t, f.g, f.creds.userBearer)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	res, err := session.ListTools(ctx, nil)
-	if err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
-
-	// tool -> property -> first expected value, enough to prove the enum
-	// survived the trip through the SDK's schema handling.
-	want := map[string]map[string][]string{
-		api.ToolComputerUse: {
-			"action": {"capture", "accessibility", "click", "double_click", "drag",
-				"scroll", "type", "key", "wait", "list_applications", "focus_application"},
-			"scope":  {"screen", "window"},
-			"button": {"left", "right", "middle"},
-		},
-		api.ToolProcess:     {"action": {"start", "poll", "write", "terminate"}},
-		api.ToolSearchFiles: {"mode": {"name", "content"}},
-	}
-
-	for _, tool := range res.Tools {
-		expected, ok := want[tool.Name]
-		if !ok {
-			continue
-		}
-		raw, err := json.Marshal(tool.InputSchema)
-		if err != nil {
-			t.Fatalf("%s: marshal input schema: %v", tool.Name, err)
-		}
-		var doc struct {
-			Properties map[string]struct {
-				Enum []string `json:"enum"`
-			} `json:"properties"`
-		}
-		if err := json.Unmarshal(raw, &doc); err != nil {
-			t.Fatalf("%s: unmarshal input schema: %v", tool.Name, err)
-		}
-		for property, values := range expected {
-			got := doc.Properties[property].Enum
-			if strings.Join(got, ",") != strings.Join(values, ",") {
-				t.Errorf("%s.%s enum = %v, want %v", tool.Name, property, got, values)
-			}
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Bearer 401 / 403
-// ---------------------------------------------------------------------------
-
 func TestNoBearerRejected401(t *testing.T) {
 	f := newFixture(t)
 	ts := httptest.NewServer(f.g.Handler())
@@ -228,7 +174,7 @@ func TestUserRoutesAllToSession(t *testing.T) {
 	}
 }
 
-func TestAdminRoutesSeatToolsToSessionAndSixToRoot(t *testing.T) {
+func TestAdminRoutesSeatToolsToSessionAndFiveToRoot(t *testing.T) {
 	f := newFixture(t)
 	session := connectMCP(t, f.g, f.creds.adminBearer)
 
@@ -252,8 +198,8 @@ func TestAdminRoutesSeatToolsToSessionAndSixToRoot(t *testing.T) {
 	}
 
 	rootCalls := f.root.recorded()
-	if len(rootCalls) != 6 {
-		t.Fatalf("root received %d calls, want 6", len(rootCalls))
+	if len(rootCalls) != 5 {
+		t.Fatalf("root received %d calls, want 5 (bash + the four file tools)", len(rootCalls))
 	}
 	// Every root call must carry the forwarded admin bearer verbatim.
 	wantHeader := "Bearer " + f.creds.adminBearer
@@ -270,7 +216,7 @@ func TestAdminRoutesSeatToolsToSessionAndSixToRoot(t *testing.T) {
 func TestSessionCallsCarryNoForwardedHeader(t *testing.T) {
 	f := newFixture(t)
 	session := connectMCP(t, f.g, f.creds.userBearer)
-	callTool(t, session, api.ToolTerminal, validArgs(api.ToolTerminal))
+	callTool(t, session, api.ToolBash, validArgs(api.ToolBash))
 
 	calls := f.session.recorded()
 	if len(calls) != 1 {
@@ -400,13 +346,13 @@ func TestPausedRejectsBothClasses(t *testing.T) {
 	}
 
 	userSession := connectMCP(t, f.g, f.creds.userBearer)
-	res := callTool(t, userSession, api.ToolTerminal, validArgs(api.ToolTerminal))
+	res := callTool(t, userSession, api.ToolBash, validArgs(api.ToolBash))
 	if code := structuredCode(t, res); code != string(api.CodePaused) {
 		t.Fatalf("user paused code = %q, want PAUSED", code)
 	}
 
 	adminSession := connectMCP(t, f.g, f.creds.adminBearer)
-	res = callTool(t, adminSession, api.ToolTerminal, validArgs(api.ToolTerminal))
+	res = callTool(t, adminSession, api.ToolBash, validArgs(api.ToolBash))
 	if code := structuredCode(t, res); code != string(api.CodePaused) {
 		t.Fatalf("admin paused code = %q, want PAUSED", code)
 	}
@@ -432,7 +378,7 @@ func TestPauseCancelsInFlightCall(t *testing.T) {
 
 	done := make(chan string, 1)
 	go func() {
-		res := callTool(t, session, api.ToolTerminal, validArgs(api.ToolTerminal))
+		res := callTool(t, session, api.ToolBash, validArgs(api.ToolBash))
 		done <- structuredCode(t, res)
 	}()
 
@@ -479,7 +425,7 @@ func TestConcurrencyLimitShedsExcess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			s := connectMCP(t, f.g, f.creds.userBearer)
-			callTool(t, s, api.ToolTerminal, validArgs(api.ToolTerminal))
+			callTool(t, s, api.ToolBash, validArgs(api.ToolBash))
 		}()
 	}
 	// Wait until all `limit` calls are in flight, holding the semaphore.
@@ -494,7 +440,7 @@ func TestConcurrencyLimitShedsExcess(t *testing.T) {
 
 	// The next call cannot acquire a slot and is shed with RESOURCE_EXHAUSTED.
 	extra := connectMCP(t, f.g, f.creds.userBearer)
-	res := callTool(t, extra, api.ToolTerminal, validArgs(api.ToolTerminal))
+	res := callTool(t, extra, api.ToolBash, validArgs(api.ToolBash))
 	if code := structuredCode(t, res); code != string(api.CodeResourceExhausted) {
 		t.Fatalf("excess call code = %q, want RESOURCE_EXHAUSTED", code)
 	}
@@ -513,7 +459,7 @@ func TestResponseSizeCapEnforced(t *testing.T) {
 		fx.session.payload = strings.Repeat("x", 8192) // exceeds the cap
 	})
 	session := connectMCP(t, f.g, f.creds.userBearer)
-	res := callTool(t, session, api.ToolTerminal, validArgs(api.ToolTerminal))
+	res := callTool(t, session, api.ToolBash, validArgs(api.ToolBash))
 	if code := structuredCode(t, res); code != string(api.CodeResourceExhausted) {
 		t.Fatalf("oversized response code = %q, want RESOURCE_EXHAUSTED", code)
 	}
@@ -531,7 +477,7 @@ func TestAuditOmitsSecrets(t *testing.T) {
 	const secretText = "TOPSECRETTYPETEXT"
 	const secretPath = "/etc/SECRETFILE_path"
 
-	callTool(t, session, api.ToolTerminal, api.TerminalInput{Command: secretCmd})
+	callTool(t, session, api.ToolBash, api.BashInput{Command: secretCmd})
 	callTool(t, session, api.ToolComputerUse, api.ComputerUseInput{Action: api.ActionType, Text: secretText})
 	callTool(t, session, api.ToolReadFile, api.ReadFileInput{Path: secretPath})
 
@@ -542,7 +488,7 @@ func TestAuditOmitsSecrets(t *testing.T) {
 		}
 	}
 	// Sanity: the audit did run and named the tools.
-	if !strings.Contains(logs, "terminal") || !strings.Contains(logs, "mcp call") {
+	if !strings.Contains(logs, "bash") || !strings.Contains(logs, "mcp call") {
 		t.Fatalf("audit log missing expected non-secret fields:\n%s", logs)
 	}
 }
@@ -557,10 +503,8 @@ func validArgs(tool string) any {
 	switch tool {
 	case api.ToolComputerUse:
 		return api.ComputerUseInput{Action: api.ActionCapture}
-	case api.ToolTerminal:
-		return api.TerminalInput{Command: "true"}
-	case api.ToolProcess:
-		return api.ProcessInput{Action: api.ProcessStart, Command: "true"}
+	case api.ToolBash:
+		return api.BashInput{Command: "true"}
 	case api.ToolReadFile:
 		return api.ReadFileInput{Path: "/tmp/x"}
 	case api.ToolSearchFiles:

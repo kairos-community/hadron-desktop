@@ -66,11 +66,10 @@ type FileService interface {
 	Patch(ctx context.Context, in api.PatchInput) api.PatchOutput
 }
 
-// ProcessManager is the helper's view of the (root-owned) process/terminal
-// executor. *process.Manager satisfies it.
+// ProcessManager is the helper's view of the (root-owned) shell executor.
+// *process.Manager satisfies it.
 type ProcessManager interface {
-	Terminal(ctx context.Context, in api.TerminalInput) (api.TerminalOutput, error)
-	Process(ctx context.Context, in api.ProcessInput) (api.ProcessOutput, error)
+	Bash(ctx context.Context, in api.BashInput) (api.BashOutput, error)
 	// Close terminates every tracked process group; used on helper shutdown.
 	Close() error
 }
@@ -99,8 +98,7 @@ func identityDescriptor(id api.Identity) string {
 // osTools is the closed set of the six OS tools this helper serves. Every other
 // tool name -- including computer_use -- is refused before any authentication.
 var osTools = map[string]struct{}{
-	api.ToolTerminal:    {},
-	api.ToolProcess:     {},
+	api.ToolBash:        {},
 	api.ToolReadFile:    {},
 	api.ToolSearchFiles: {},
 	api.ToolWriteFile:   {},
@@ -290,21 +288,10 @@ func (h *Helper) Pause(_ context.Context) error {
 	}
 	h.paused = true
 	h.gen.cancel() // cancels every in-flight call's execution context
-	ids := make([]string, 0, len(h.procIDs))
-	for id := range h.procIDs {
-		ids = append(ids, id)
-	}
-	h.mu.Unlock()
-
-	// Terminate long-running process groups. One-shot terminal calls are torn
-	// down by the generation cancellation above; only detached, tracked
-	// processes need an explicit terminate.
-	for _, id := range ids {
-		_, _ = h.process.Process(context.Background(), api.ProcessInput{
-			Action:    api.ProcessTerminate,
-			ProcessID: id,
-		})
-	}
+	// Nothing else to terminate. Without the process tool every call is a
+	// one-shot bash invocation, and the generation cancellation above already
+	// tears its process group down; there are no detached, tracked processes
+	// left to chase.
 	return nil
 }
 
@@ -461,23 +448,11 @@ func queuedCancelMeta(ctx context.Context) api.ResultMeta {
 
 // ---------------------------------------------------------------------------
 // Typed per-tool methods (each takes the shared semaphore)
-// ---------------------------------------------------------------------------
-
-func (h *Helper) terminal(ctx context.Context, in api.TerminalInput) api.TerminalOutput {
+func (h *Helper) bash(ctx context.Context, in api.BashInput) api.BashOutput {
 	return guard(h, ctx,
-		func(o *api.TerminalOutput) *api.ResultMeta { return &o.ResultMeta },
-		func(mctx context.Context) api.TerminalOutput {
-			out, _ := h.process.Terminal(mctx, in)
-			return out
-		})
-}
-
-func (h *Helper) processTool(ctx context.Context, in api.ProcessInput) api.ProcessOutput {
-	return guard(h, ctx,
-		func(o *api.ProcessOutput) *api.ResultMeta { return &o.ResultMeta },
-		func(mctx context.Context) api.ProcessOutput {
-			out, _ := h.process.Process(mctx, in)
-			h.trackProcess(in, out)
+		func(o *api.BashOutput) *api.ResultMeta { return &o.ResultMeta },
+		func(mctx context.Context) api.BashOutput {
+			out, _ := h.process.Bash(mctx, in)
 			return out
 		})
 }
@@ -519,33 +494,6 @@ func (h *Helper) patch(ctx context.Context, in api.PatchInput) api.PatchOutput {
 // process that starts while (or exactly as) the helper pauses is terminated
 // immediately so it cannot outlive the pause: because both this check and
 // Pause's snapshot run under h.mu, a new process is either captured by Pause's
-// snapshot or sees paused==true here and self-terminates.
-func (h *Helper) trackProcess(in api.ProcessInput, out api.ProcessOutput) {
-	if in.Action == api.ProcessStart {
-		if out.ResultMeta.Code != "" || out.ProcessID == "" {
-			return
-		}
-		h.mu.Lock()
-		paused := h.paused || h.closed
-		if !paused {
-			h.procIDs[out.ProcessID] = struct{}{}
-		}
-		h.mu.Unlock()
-		if paused {
-			_, _ = h.process.Process(context.Background(), api.ProcessInput{
-				Action:    api.ProcessTerminate,
-				ProcessID: out.ProcessID,
-			})
-		}
-		return
-	}
-	if out.ProcessID != "" && !out.Running {
-		h.mu.Lock()
-		delete(h.procIDs, out.ProcessID)
-		h.mu.Unlock()
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Call dispatch
 // ---------------------------------------------------------------------------
@@ -590,13 +538,9 @@ func (h *Helper) Call(ctx context.Context, tool string, args json.RawMessage, au
 
 	// 3. Dispatch to the OS tool.
 	switch tool {
-	case api.ToolTerminal:
-		return dispatchCall(args, func(in api.TerminalInput) any {
-			return h.terminal(ctx, in)
-		})
-	case api.ToolProcess:
-		return dispatchCall(args, func(in api.ProcessInput) any {
-			return h.processTool(ctx, in)
+	case api.ToolBash:
+		return dispatchCall(args, func(in api.BashInput) any {
+			return h.bash(ctx, in)
 		})
 	case api.ToolReadFile:
 		return dispatchCall(args, func(in api.ReadFileInput) any {

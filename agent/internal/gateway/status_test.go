@@ -257,7 +257,7 @@ func TestNonComputerUseDoesNotFlipActive(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		callTool(t, session, api.ToolTerminal, validArgs(api.ToolTerminal))
+		callTool(t, session, api.ToolBash, validArgs(api.ToolBash))
 	}()
 
 	select {

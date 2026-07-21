@@ -67,8 +67,8 @@ func (s *Suite) RunPersistWrite(ctx context.Context, marker string) Report {
 	// Ask the appliance to reboot. The call may return an error as the gateway
 	// goes down; either way the request has been delivered, so we record it as
 	// issued and let the harness observe the reboot via the forwarded port.
-	var term api.TerminalOutput
-	_ = s.callInto(ctx, adminSess, api.ToolTerminal, api.TerminalInput{Command: "systemctl reboot"}, &term)
+	var term api.BashOutput
+	_ = s.callInto(ctx, adminSess, api.ToolBash, api.BashInput{Command: "systemctl reboot"}, &term)
 	r.Checks = append(r.Checks, pass("persist_reboot_requested", "requested systemctl reboot via the admin path"))
 	return r
 }
@@ -101,8 +101,8 @@ func (s *Suite) RunPersistVerify(ctx context.Context, marker string) Report {
 	}
 
 	// Hostname proves endpoint/host identity is stable across the reboot.
-	var hn api.TerminalOutput
-	if err := s.callInto(ctx, userSess, api.ToolTerminal, api.TerminalInput{Command: "hostname"}, &hn); err != nil {
+	var hn api.BashOutput
+	if err := s.callInto(ctx, userSess, api.ToolBash, api.BashInput{Command: "hostname"}, &hn); err != nil {
 		r.Checks = append(r.Checks, failTransport("persist_hostname", "hostname call failed"))
 	} else if h := strings.TrimSpace(hn.Stdout); h == "" {
 		r.Checks = append(r.Checks, failAssert("persist_hostname", "hostname was empty after reboot"))
@@ -127,8 +127,8 @@ func (s *Suite) RunPersistVerify(ctx context.Context, marker string) Report {
 	}
 
 	// The locked, non-admin agent account must persist across the install+reboot.
-	var ps api.TerminalOutput
-	if err := s.callInto(ctx, adminSess, api.ToolTerminal, api.TerminalInput{Command: "passwd -S agent"}, &ps); err != nil {
+	var ps api.BashOutput
+	if err := s.callInto(ctx, adminSess, api.ToolBash, api.BashInput{Command: "passwd -S agent"}, &ps); err != nil {
 		r.Checks = append(r.Checks, failTransport("persist_agent_locked", "passwd -S call failed"))
 	} else if locked, ok := parsePasswdLocked(ps.Stdout); !ok {
 		r.Checks = append(r.Checks, failAssert("persist_agent_locked", "could not parse passwd -S output for the agent account"))

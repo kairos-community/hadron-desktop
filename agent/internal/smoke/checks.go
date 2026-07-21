@@ -127,9 +127,9 @@ func (s *Suite) RunContract(ctx context.Context) Report {
 	defer adminSess.Close()
 
 	r.Checks = append(r.Checks,
-		s.checkEightTools(ctx, userSess, adminSess),
+		s.checkSevenTools(ctx, userSess, adminSess),
 		s.checkUserUnprivileged(ctx, userSess),
-		s.checkProcessPTYCgroup(ctx, userSess),
+		s.checkBashCgroupContainment(ctx, userSess),
 		s.checkFilesRoundTrip(ctx, userSess),
 		s.checkComputerUseCapture(ctx, userSess),
 		s.checkBrowserReachable(ctx, userSess),
@@ -145,11 +145,11 @@ func (s *Suite) RunContract(ctx context.Context) Report {
 // Checks
 // ---------------------------------------------------------------------------
 
-// checkEightTools proves both credential classes list exactly the eight public
+// checkSevenTools proves both credential classes list exactly the seven public
 // tool names and that the two lists are identical (brief items 1 and 10). The
 // eighth, browser, was added by the 2026-07-20 amendment.
-func (s *Suite) checkEightTools(ctx context.Context, userSess, adminSess *mcp.ClientSession) CheckResult {
-	const name = "eight_tools_both_classes"
+func (s *Suite) checkSevenTools(ctx context.Context, userSess, adminSess *mcp.ClientSession) CheckResult {
+	const name = "seven_tools_both_classes"
 	userNames, err := listToolNames(ctx, userSess, s.callTimeout())
 	if err != nil {
 		return failTransport(name, "listing user tools failed")
@@ -160,12 +160,12 @@ func (s *Suite) checkEightTools(ctx context.Context, userSess, adminSess *mcp.Cl
 	}
 	want := api.ToolNames()
 	if !equalStrings(userNames, want) {
-		return failAssert(name, fmt.Sprintf("user tool set is not the eight public tools (got %d)", len(userNames)))
+		return failAssert(name, fmt.Sprintf("user tool set is not the seven public tools (got %d)", len(userNames)))
 	}
 	if !equalStrings(adminNames, want) {
-		return failAssert(name, fmt.Sprintf("admin tool set is not the eight public tools (got %d)", len(adminNames)))
+		return failAssert(name, fmt.Sprintf("admin tool set is not the seven public tools (got %d)", len(adminNames)))
 	}
-	return pass(name, "both classes list exactly the eight public tools")
+	return pass(name, "both classes list exactly the seven public tools")
 }
 
 // retryWhileUnavailable runs attempt until it reports something other than a
@@ -227,73 +227,53 @@ func (s *Suite) checkUserUnprivileged(ctx context.Context, sess *mcp.ClientSessi
 	return pass(name, fmt.Sprintf("uid=%d user=%s without admin/sudo/docker groups", out.uid, out.user))
 }
 
-// checkProcessPTYCgroup starts a PTY process, drives it over stdin, proves its
-// own cgroup is the dedicated MCP leaf, spawns a grandchild, terminates the
-// process, and proves the grandchild did not survive (brief item 3).
-func (s *Suite) checkProcessPTYCgroup(ctx context.Context, sess *mcp.ClientSession) CheckResult {
-	const name = "process_pty_cgroup_isolation"
+// checkBashCgroupContainment proves that a bash call runs in its own cgroup
+// leaf and that nothing it spawned outlives it.
+//
+// This is the containment guarantee the emergency pause depends on: the leaf is
+// the kill boundary, so a detached grandchild -- one that called setsid
+// precisely to escape its process group -- must still die when the call ends.
+// A process group alone would not catch it.
+//
+// It replaces the old PTY/process-tool version. With `process` gone there is no
+// long-lived handle to drive over stdin, so the whole thing is one script: the
+// script records its own cgroup and spawns the escapee, and a second call
+// checks the escapee is dead. That is a stronger shape anyway -- it asserts the
+// state AFTER the call returned, which is exactly when teardown must have run.
+func (s *Suite) checkBashCgroupContainment(ctx context.Context, sess *mcp.ClientSession) CheckResult {
+	const name = "bash_cgroup_containment"
 
-	var start api.ProcessOutput
-	if err := s.callInto(ctx, sess, api.ToolProcess, api.ProcessInput{
-		Action: api.ProcessStart, Command: "/bin/sh", PTY: true,
-	}, &start); err != nil {
-		return failTransport(name, "process start call failed")
-	}
-	if start.Code != "" || start.ProcessID == "" {
-		return failAssert(name, fmt.Sprintf("could not start PTY process (code=%s)", codeOrNone(start.Code)))
-	}
-	pid := start.ProcessID
+	script := `cat /proc/self/cgroup
+setsid sh -c 'sleep 300' </dev/null >/dev/null 2>&1 &
+echo GC=$!`
 
-	// Ask the process to print its own cgroup, then read it back.
-	if err := s.write(ctx, sess, pid, "cat /proc/self/cgroup\n"); err != nil {
-		return failTransport(name, "process write (cgroup) failed")
+	var run api.BashOutput
+	if err := s.callInto(ctx, sess, api.ToolBash, api.BashInput{Command: script}, &run); err != nil {
+		return failTransport(name, "bash call failed")
 	}
-	cgroup, err := s.pollUntil(ctx, sess, pid,
-		func(seen string) bool { return strings.Contains(seen, cgroupLeafMarker) },
-		s.callTimeout())
-	if err != nil {
-		return failTransport(name, "process poll (cgroup) failed")
+	if run.Code != "" {
+		return failAssert(name, fmt.Sprintf("bash reported %s", run.Code))
 	}
-	if !strings.Contains(cgroup, cgroupLeafMarker) {
+	if !strings.Contains(run.Stdout, cgroupLeafMarker) {
 		return failAssert(name, fmt.Sprintf(
-			"process cgroup is not its dedicated MCP leaf (saw %q)", lastLine(cgroup)))
+			"the command did not run in its dedicated MCP cgroup leaf (saw %q)", lastLine(run.Stdout)))
 	}
-
-	// Spawn a detached grandchild and capture its PID.
-	if err := s.write(ctx, sess, pid, "setsid sh -c 'sleep 300' </dev/null >/dev/null 2>&1 & echo GC=$!\n"); err != nil {
-		return failTransport(name, "process write (grandchild) failed")
-	}
-	gcOut, err := s.pollUntil(ctx, sess, pid,
-		func(seen string) bool { return parseGrandchildPID(seen) != "" },
-		s.callTimeout())
-	if err != nil {
-		return failTransport(name, "process poll (grandchild) failed")
-	}
-	gcPID := parseGrandchildPID(gcOut)
+	gcPID := parseGrandchildPID(run.Stdout)
 	if gcPID == "" {
 		return failAssert(name, "could not observe the spawned grandchild pid")
 	}
 
-	// Kill the process' cgroup leaf, then prove the grandchild is gone.
-	var term api.ProcessOutput
-	if err := s.callInto(ctx, sess, api.ToolProcess, api.ProcessInput{
-		Action: api.ProcessTerminate, ProcessID: pid, Signal: "SIGKILL",
-	}, &term); err != nil {
-		return failTransport(name, "process terminate failed")
-	}
-	if term.Code != "" {
-		return failAssert(name, fmt.Sprintf("terminate reported %s", term.Code))
-	}
-
-	var check api.TerminalOutput
-	cmd := "kill -0 " + gcPID + " 2>/dev/null && echo ALIVE || echo GONE"
-	if err := s.callInto(ctx, sess, api.ToolTerminal, api.TerminalInput{Command: cmd}, &check); err != nil {
+	// The call has returned, so teardown has already run. A detached grandchild
+	// still alive here means the leaf did not hold.
+	var check api.BashOutput
+	probe := "kill -0 " + gcPID + " 2>/dev/null && echo ALIVE || echo GONE"
+	if err := s.callInto(ctx, sess, api.ToolBash, api.BashInput{Command: probe}, &check); err != nil {
 		return failTransport(name, "grandchild liveness probe failed")
 	}
 	if !strings.Contains(check.Stdout, "GONE") || strings.Contains(check.Stdout, "ALIVE") {
-		return failAssert(name, "a grandchild survived process termination")
+		return failAssert(name, "a detached grandchild survived the bash call")
 	}
-	return pass(name, "PTY process ran in its MCP cgroup leaf and left no surviving grandchild")
+	return pass(name, "the command ran in its MCP cgroup leaf and left no surviving grandchild")
 }
 
 // checkFilesRoundTrip writes, reads, searches, and structured-patches a file
@@ -445,8 +425,8 @@ func (s *Suite) checkRootReadDenied(ctx context.Context, sess *mcp.ClientSession
 func (s *Suite) checkDockerSocketDenied(ctx context.Context, sess *mcp.ClientSession) CheckResult {
 	const name = "docker_socket_denied"
 	cmd := "if [ -e /run/docker.sock ]; then if [ -r /run/docker.sock ]; then echo OPEN; else echo DENIED; fi; else echo ABSENT; fi"
-	var out api.TerminalOutput
-	if err := s.callInto(ctx, sess, api.ToolTerminal, api.TerminalInput{Command: cmd}, &out); err != nil {
+	var out api.BashOutput
+	if err := s.callInto(ctx, sess, api.ToolBash, api.BashInput{Command: cmd}, &out); err != nil {
 		return failTransport(name, "terminal call failed")
 	}
 	if out.Code != "" {
@@ -491,8 +471,8 @@ func (s *Suite) checkInvalidAdminRejected(ctx context.Context) CheckResult {
 	}
 	defer sess.Close()
 
-	var out api.TerminalOutput
-	if err := s.callInto(ctx, sess, api.ToolTerminal, api.TerminalInput{Command: "true"}, &out); err != nil {
+	var out api.BashOutput
+	if err := s.callInto(ctx, sess, api.ToolBash, api.BashInput{Command: "true"}, &out); err != nil {
 		return pass(name, "invalid admin bearer rejected at call")
 	}
 	if out.Code == api.CodeUnauthenticated {
@@ -502,94 +482,6 @@ func (s *Suite) checkInvalidAdminRejected(ctx context.Context) CheckResult {
 }
 
 // ---------------------------------------------------------------------------
-// Tool-call helpers
-// ---------------------------------------------------------------------------
-
-// callInto calls tool with args and decodes the structured result into out.
-func (s *Suite) callInto(ctx context.Context, sess *mcp.ClientSession, tool string, args any, out any) error {
-	cctx, cancel := context.WithTimeout(ctx, s.callTimeout())
-	defer cancel()
-	res, err := sess.CallTool(cctx, &mcp.CallToolParams{Name: tool, Arguments: args})
-	if err != nil {
-		return err
-	}
-	if res.StructuredContent == nil {
-		return errors.New("tool result carried no structured content")
-	}
-	data, err := json.Marshal(res.StructuredContent)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(data, out)
-}
-
-func (s *Suite) write(ctx context.Context, sess *mcp.ClientSession, pid, input string) error {
-	var out api.ProcessOutput
-	if err := s.callInto(ctx, sess, api.ToolProcess, api.ProcessInput{
-		Action: api.ProcessWrite, ProcessID: pid, Input: input,
-	}, &out); err != nil {
-		return err
-	}
-	if out.Code != "" {
-		return fmt.Errorf("write reported %s", out.Code)
-	}
-	return nil
-}
-
-// pollUntil polls a tracked process, accumulating its output, until match is
-// satisfied or the budget expires. It returns everything read either way, so a
-// failing caller can report what it actually saw.
-//
-// A single immediate poll is a race, and a subtle one. Writing a command to a
-// PTY does not mean the shell has run it: the terminal echoes the line back
-// first, so an instant poll routinely returns the echo alone. A check asserting
-// on that output then depends on whether the guest happened to be quick --
-// passing on a fast machine and failing on a slower live boot, which looks like
-// a product defect and is not one.
-//
-// Each poll drains the buffer, so the accumulation here is what makes the
-// output comparable to what a human would see on the terminal.
-func (s *Suite) pollUntil(ctx context.Context, sess *mcp.ClientSession, pid string,
-	match func(string) bool, budget time.Duration) (string, error) {
-	if budget <= 0 {
-		budget = 15 * time.Second
-	}
-	deadline := time.Now().Add(budget)
-	var seen strings.Builder
-	for {
-		chunk, err := s.poll(ctx, sess, pid)
-		if err != nil {
-			return seen.String(), err
-		}
-		seen.WriteString(chunk)
-		if match(seen.String()) {
-			return seen.String(), nil
-		}
-		if time.Now().After(deadline) {
-			return seen.String(), nil
-		}
-		select {
-		case <-time.After(500 * time.Millisecond):
-		case <-ctx.Done():
-			return seen.String(), ctx.Err()
-		}
-	}
-}
-
-func (s *Suite) poll(ctx context.Context, sess *mcp.ClientSession, pid string) (string, error) {
-	var out api.ProcessOutput
-	if err := s.callInto(ctx, sess, api.ToolProcess, api.ProcessInput{
-		Action: api.ProcessPoll, ProcessID: pid,
-	}, &out); err != nil {
-		return "", err
-	}
-	if out.Code != "" {
-		return "", fmt.Errorf("poll reported %s", out.Code)
-	}
-	return out.Stdout, nil
-}
-
-// idResult is the parsed output of `id -u; id -un; id -nG`.
 type idResult struct {
 	uid    int
 	user   string
@@ -611,9 +503,27 @@ func (f *terminalFail) named(name string) CheckResult {
 }
 
 // terminalID runs `id -u; id -un; id -nG` and parses the three lines.
+// callInto performs one tool call and decodes its structured result.
+func (s *Suite) callInto(ctx context.Context, sess *mcp.ClientSession, tool string, args any, out any) error {
+	cctx, cancel := context.WithTimeout(ctx, s.callTimeout())
+	defer cancel()
+	res, err := sess.CallTool(cctx, &mcp.CallToolParams{Name: tool, Arguments: args})
+	if err != nil {
+		return err
+	}
+	if res.StructuredContent == nil {
+		return errors.New("tool result carried no structured content")
+	}
+	data, err := json.Marshal(res.StructuredContent)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
+}
+
 func (s *Suite) terminalID(ctx context.Context, sess *mcp.ClientSession) (idResult, *terminalFail) {
-	var out api.TerminalOutput
-	if err := s.callInto(ctx, sess, api.ToolTerminal, api.TerminalInput{Command: "id -u; id -un; id -nG"}, &out); err != nil {
+	var out api.BashOutput
+	if err := s.callInto(ctx, sess, api.ToolBash, api.BashInput{Command: "id -u; id -un; id -nG"}, &out); err != nil {
 		return idResult{}, &terminalFail{transport: true, detail: "terminal id call failed"}
 	}
 	if out.Code != "" {

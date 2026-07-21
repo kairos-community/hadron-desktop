@@ -58,8 +58,8 @@ const unusableDigest = auth.Digest("sha256:0000000000000000000000000000000000000
 
 // fakeProc is a configurable process/terminal executor. It answers the exact
 // commands the contract suite issues (`id -u; id -un; id -nG`, the docker
-// socket probe, the grandchild liveness probe) and simulates a PTY process
-// whose poll output depends on the last stdin write.
+// socket probe, the grandchild liveness probe) and answers the containment
+// script with a cgroup line plus a grandchild pid.
 type fakeProc struct {
 	uid             int
 	user            string
@@ -83,54 +83,32 @@ func newFakeProc(uid int, user string, groups []string) *fakeProc {
 	}
 }
 
-func (f *fakeProc) Terminal(_ context.Context, in api.TerminalInput) (api.TerminalOutput, error) {
+func (f *fakeProc) Bash(_ context.Context, in api.BashInput) (api.BashOutput, error) {
 	switch {
 	case in.Command == "id -u; id -un; id -nG":
-		return api.TerminalOutput{
+		return api.BashOutput{
 			Stdout: fmt.Sprintf("%d\n%s\n%s\n", f.uid, f.user, strings.Join(f.groups, " ")),
 		}, nil
 	case strings.Contains(in.Command, "docker.sock"):
 		switch {
 		case f.dockerReadable:
-			return api.TerminalOutput{Stdout: "OPEN\n"}, nil
+			return api.BashOutput{Stdout: "OPEN\n"}, nil
 		case f.dockerAbsent:
-			return api.TerminalOutput{Stdout: "ABSENT\n"}, nil
+			return api.BashOutput{Stdout: "ABSENT\n"}, nil
 		default:
-			return api.TerminalOutput{Stdout: "DENIED\n"}, nil
+			return api.BashOutput{Stdout: "DENIED\n"}, nil
 		}
+	case strings.Contains(in.Command, "/proc/self/cgroup"):
+		// One script now does what the PTY process used to do over stdin: print
+		// its own cgroup and spawn a detached grandchild.
+		return api.BashOutput{Stdout: f.cgroupLine + "\nGC=4242\n"}, nil
 	case strings.Contains(in.Command, "kill -0"):
 		if f.grandchildAlive {
-			return api.TerminalOutput{Stdout: "ALIVE\n"}, nil
+			return api.BashOutput{Stdout: "ALIVE\n"}, nil
 		}
-		return api.TerminalOutput{Stdout: "GONE\n"}, nil
+		return api.BashOutput{Stdout: "GONE\n"}, nil
 	default:
-		return api.TerminalOutput{Stdout: "ok\n", ExitCode: 0}, nil
-	}
-}
-
-func (f *fakeProc) Process(_ context.Context, in api.ProcessInput) (api.ProcessOutput, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	switch in.Action {
-	case api.ProcessStart:
-		return api.ProcessOutput{ProcessID: "proc-1", PID: 4242, Running: true}, nil
-	case api.ProcessWrite:
-		f.lastWrite[in.ProcessID] = in.Input
-		return api.ProcessOutput{ProcessID: in.ProcessID, Running: true}, nil
-	case api.ProcessPoll:
-		last := f.lastWrite[in.ProcessID]
-		switch {
-		case strings.Contains(last, "cat /proc/self/cgroup"):
-			return api.ProcessOutput{ProcessID: in.ProcessID, Running: true, Stdout: f.cgroupLine + "\n"}, nil
-		case strings.Contains(last, "GC="):
-			return api.ProcessOutput{ProcessID: in.ProcessID, Running: true, Stdout: "GC=99999\n"}, nil
-		default:
-			return api.ProcessOutput{ProcessID: in.ProcessID, Running: true}, nil
-		}
-	case api.ProcessTerminate:
-		return api.ProcessOutput{ProcessID: in.ProcessID, Running: false}, nil
-	default:
-		return api.ProcessOutput{ProcessID: in.ProcessID, Running: true}, nil
+		return api.BashOutput{Stdout: "ok\n", ExitCode: 0}, nil
 	}
 }
 
@@ -574,8 +552,8 @@ func TestGrandchildSurvivalIsNonVacuous(t *testing.T) {
 		h.sessionProc.grandchildAlive = true
 	})
 	r := run(t, h)
-	if c := checkByName(t, r, "process_pty_cgroup_isolation"); c.Passed {
-		t.Fatal("pty/cgroup check passed even though a grandchild survived")
+	if c := checkByName(t, r, "bash_cgroup_containment"); c.Passed {
+		t.Fatal("containment check passed even though a grandchild survived")
 	}
 }
 
@@ -584,8 +562,8 @@ func TestCgroupLeafIsNonVacuous(t *testing.T) {
 		h.sessionProc.cgroupLine = "0::/system.slice/some-other.scope"
 	})
 	r := run(t, h)
-	if c := checkByName(t, r, "process_pty_cgroup_isolation"); c.Passed {
-		t.Fatal("pty/cgroup check passed even though the process was not in an MCP leaf")
+	if c := checkByName(t, r, "bash_cgroup_containment"); c.Passed {
+		t.Fatal("containment check passed even though the command was not in an MCP leaf")
 	}
 }
 

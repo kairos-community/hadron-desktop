@@ -56,9 +56,6 @@ var MouseButtons = []MouseButton{ButtonLeft, ButtonRight, ButtonMiddle}
 // ScrollDirections is the closed, ordered set of scroll directions.
 var ScrollDirections = []ScrollDirection{DirectionUp, DirectionDown, DirectionLeft, DirectionRight}
 
-// ProcessActions is the closed, ordered set of process actions.
-var ProcessActions = []ProcessAction{ProcessStart, ProcessPoll, ProcessWrite, ProcessTerminate}
-
 // FileEncodings is the closed, ordered set of file content encodings.
 var FileEncodings = []FileEncoding{EncodingUTF8, EncodingBase64}
 
@@ -73,7 +70,6 @@ var enumRegistry = map[reflect.Type][]any{
 	reflect.TypeFor[ComputerUseScope]():  toAny(ComputerUseScopes),
 	reflect.TypeFor[MouseButton]():       toAny(MouseButtons),
 	reflect.TypeFor[ScrollDirection]():   toAny(ScrollDirections),
-	reflect.TypeFor[ProcessAction]():     toAny(ProcessActions),
 	reflect.TypeFor[FileEncoding]():      toAny(FileEncodings),
 	reflect.TypeFor[SearchMode]():        toAny(SearchModes),
 	reflect.TypeFor[BrowserAction]():     toAny(BrowserActions),

@@ -2,12 +2,10 @@ package process
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -51,7 +49,7 @@ func ptr[T any](v T) *T { return &v }
 
 func TestTerminalExitStatusAndStreams(t *testing.T) {
 	m := newTestManager(t)
-	out, err := m.Terminal(context.Background(), api.TerminalInput{
+	out, err := m.Bash(context.Background(), api.BashInput{
 		Command: "echo out; echo err 1>&2; exit 7",
 	})
 	if err != nil {
@@ -69,54 +67,78 @@ func TestTerminalExitStatusAndStreams(t *testing.T) {
 	if out.ExitCode != 7 {
 		t.Errorf("exit code = %d, want 7", out.ExitCode)
 	}
-	if out.Truncated {
-		t.Errorf("unexpected truncation")
-	}
 }
 
-func TestTerminalTimeout(t *testing.T) {
+func TestBashHasNoTimeoutButHonoursContext(t *testing.T) {
 	m := newTestManager(t)
+
+	// bash imposes no deadline of its own, so the ONLY thing that can cut a long
+	// command short is the caller's context. That is what keeps the emergency
+	// pause and shutdown working now that the tool promises to run unbounded.
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
 	start := time.Now()
-	out, err := m.Terminal(context.Background(), api.TerminalInput{
-		Command:   "sleep 30",
-		TimeoutMs: ptr(200),
-	})
+	out, err := m.Bash(ctx, api.BashInput{Command: "sleep 30"})
 	if err != nil {
-		t.Fatalf("Terminal returned error: %v", err)
+		t.Fatalf("Bash returned error: %v", err)
 	}
 	if out.Code != api.CodeDeadlineExceeded {
-		t.Fatalf("code = %q, want DEADLINE_EXCEEDED", out.Code)
+		t.Fatalf("code = %q, want DEADLINE_EXCEEDED once the context was cancelled", out.Code)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("timeout took too long: %v", elapsed)
+		t.Errorf("cancellation took too long: %v", elapsed)
 	}
 }
 
-func TestTerminalTruncation(t *testing.T) {
+func TestBashRunsPastTheOldTimeoutCeiling(t *testing.T) {
+	// The old terminal tool clamped every call to MaxTimeout. bash must ignore
+	// that entirely: a command running longer than the old ceiling is the whole
+	// point of removing the bound.
+	m := New(func() Config {
+		c := testConfig()
+		c.MaxTimeout = 150 * time.Millisecond
+		return c
+	}())
+	t.Cleanup(func() { _ = m.Close() })
+
+	out, err := m.Bash(context.Background(), api.BashInput{Command: "sleep 0.6; echo survived"})
+	if err != nil {
+		t.Fatalf("Bash returned error: %v", err)
+	}
+	if out.Code != "" {
+		t.Fatalf("code = %q, want success: bash must outlive the old MaxTimeout", out.Code)
+	}
+	if !strings.Contains(out.Stdout, "survived") {
+		t.Errorf("stdout = %q, want the command to have completed", out.Stdout)
+	}
+}
+
+func TestBashOutputIsUnbounded(t *testing.T) {
 	m := newTestManager(t)
-	out, err := m.Terminal(context.Background(), api.TerminalInput{
-		// Emit ~4KiB but cap capture at 100 bytes.
-		Command:        "for i in $(seq 1 200); do printf '0123456789abcdef1234'; done",
-		MaxOutputBytes: ptr(100),
+	// ~4KiB, which the old terminal tool would have capped and flagged as
+	// truncated. bash promises no output limit, so every byte must come back.
+	const chunks = 200
+	out, err := m.Bash(context.Background(), api.BashInput{
+		Command: "for i in $(seq 1 200); do printf '0123456789abcdef1234'; done",
 	})
 	if err != nil {
-		t.Fatalf("Terminal returned error: %v", err)
+		t.Fatalf("Bash returned error: %v", err)
 	}
-	if !out.Truncated {
-		t.Fatalf("expected Truncated=true")
+	if out.Code != "" {
+		t.Fatalf("code = %q, want success: bash does not truncate", out.Code)
 	}
-	if out.Code != api.CodeOutputTruncated {
-		t.Errorf("code = %q, want OUTPUT_TRUNCATED", out.Code)
-	}
-	if len(out.Stdout) != 100 {
-		t.Errorf("captured %d bytes, want exactly 100", len(out.Stdout))
+	if want := chunks * 20; len(out.Stdout) != want {
+		t.Errorf("captured %d bytes, want all %d", len(out.Stdout), want)
 	}
 }
 
 func TestTerminalEnvAndCwd(t *testing.T) {
 	m := newTestManager(t)
 	dir := t.TempDir()
-	out, err := m.Terminal(context.Background(), api.TerminalInput{
+	out, err := m.Bash(context.Background(), api.BashInput{
 		Command: "printf '%s|%s' \"$PWD\" \"$HADRON_TEST\"",
 		Cwd:     dir,
 		Env:     []string{"HADRON_TEST=xyzzy"},
@@ -142,7 +164,7 @@ func TestTerminalEnvAndCwd(t *testing.T) {
 
 func TestTerminalInvalidArgument(t *testing.T) {
 	m := newTestManager(t)
-	out, err := m.Terminal(context.Background(), api.TerminalInput{Command: ""})
+	out, err := m.Bash(context.Background(), api.BashInput{Command: ""})
 	if err != nil {
 		t.Fatalf("Terminal returned error: %v", err)
 	}
@@ -151,23 +173,6 @@ func TestTerminalInvalidArgument(t *testing.T) {
 	}
 }
 
-func TestTerminalTimeoutClampedToMax(t *testing.T) {
-	m := New(func() Config {
-		c := testConfig()
-		c.MaxTimeout = 150 * time.Millisecond
-		return c
-	}())
-	t.Cleanup(func() { _ = m.Close() })
-	out, _ := m.Terminal(context.Background(), api.TerminalInput{
-		Command:   "sleep 30",
-		TimeoutMs: ptr(3_600_000), // 1 hour requested; clamped to 150ms
-	})
-	if out.Code != api.CodeDeadlineExceeded {
-		t.Fatalf("code = %q, want DEADLINE_EXCEEDED (max-clamp)", out.Code)
-	}
-}
-
-// fileSize returns the size of path, or 0 if it does not exist.
 func fileSize(path string) int64 {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -187,7 +192,7 @@ func TestTerminalKillsGrandchildren(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "ticks")
 	// A grandchild loop that keeps appending until killed; the shell itself
 	// returns immediately.
-	_, err := m.Terminal(context.Background(), api.TerminalInput{
+	_, err := m.Bash(context.Background(), api.BashInput{
 		Command: fmt.Sprintf("(while true; do echo tick >> %q; sleep 0.2; done) & echo started", marker),
 	})
 	if err != nil {
@@ -207,430 +212,3 @@ func TestTerminalKillsGrandchildren(t *testing.T) {
 // ---------------------------------------------------------------------------
 // process: start / poll / write / terminate
 // ---------------------------------------------------------------------------
-
-func TestProcessStartPollExit(t *testing.T) {
-	m := newTestManager(t)
-	start, err := m.Process(context.Background(), api.ProcessInput{
-		Action:  api.ProcessStart,
-		Command: "echo hello; exit 3",
-	})
-	if err != nil {
-		t.Fatalf("start error: %v", err)
-	}
-	if start.Code != "" {
-		t.Fatalf("start failed: %q %s", start.Code, start.Message)
-	}
-	if start.ProcessID == "" {
-		t.Fatal("empty process id")
-	}
-	if start.PID != 0 {
-		t.Errorf("PID must never be exposed, got %d", start.PID)
-	}
-
-	// Poll until exit.
-	deadline := time.Now().Add(5 * time.Second)
-	var last api.ProcessOutput
-	var stdout strings.Builder
-	for time.Now().Before(deadline) {
-		p, err := m.Process(context.Background(), api.ProcessInput{
-			Action:    api.ProcessPoll,
-			ProcessID: start.ProcessID,
-			TimeoutMs: ptr(200),
-		})
-		if err != nil {
-			t.Fatalf("poll error: %v", err)
-		}
-		stdout.WriteString(p.Stdout)
-		last = p
-		if !p.Running {
-			break
-		}
-	}
-	if last.Running {
-		t.Fatal("process still running after deadline")
-	}
-	if !strings.Contains(stdout.String(), "hello") {
-		t.Errorf("stdout %q missing 'hello'", stdout.String())
-	}
-	if last.ExitCode == nil || *last.ExitCode != 3 {
-		t.Errorf("exit code = %v, want 3", last.ExitCode)
-	}
-}
-
-func TestProcessWrite(t *testing.T) {
-	m := newTestManager(t)
-	start, err := m.Process(context.Background(), api.ProcessInput{
-		Action:  api.ProcessStart,
-		Command: "while read line; do echo \"got:$line\"; done",
-	})
-	if err != nil || start.Code != "" {
-		t.Fatalf("start failed: %v %q", err, start.Code)
-	}
-	if _, err := m.Process(context.Background(), api.ProcessInput{
-		Action:    api.ProcessWrite,
-		ProcessID: start.ProcessID,
-		Input:     "ping\n",
-	}); err != nil {
-		t.Fatalf("write error: %v", err)
-	}
-
-	got := pollUntil(t, m, start.ProcessID, func(s string) bool {
-		return strings.Contains(s, "got:ping")
-	})
-	if !strings.Contains(got, "got:ping") {
-		t.Errorf("stdout %q missing echo of input", got)
-	}
-	_, _ = m.Process(context.Background(), api.ProcessInput{
-		Action: api.ProcessTerminate, ProcessID: start.ProcessID,
-	})
-}
-
-func TestProcessPTYEcho(t *testing.T) {
-	m := newTestManager(t)
-	start, err := m.Process(context.Background(), api.ProcessInput{
-		Action:  api.ProcessStart,
-		Command: "cat",
-		PTY:     true,
-	})
-	if err != nil || start.Code != "" {
-		t.Fatalf("start failed: %v %q", err, start.Code)
-	}
-	if _, err := m.Process(context.Background(), api.ProcessInput{
-		Action:    api.ProcessWrite,
-		ProcessID: start.ProcessID,
-		Input:     "hi-pty\n",
-	}); err != nil {
-		t.Fatalf("write error: %v", err)
-	}
-	// A pty echoes input back on the master, so we should see it even though
-	// cat only re-emits after a newline.
-	got := pollUntil(t, m, start.ProcessID, func(s string) bool {
-		return strings.Contains(s, "hi-pty")
-	})
-	if !strings.Contains(got, "hi-pty") {
-		t.Errorf("pty output %q missing echoed input", got)
-	}
-	_, _ = m.Process(context.Background(), api.ProcessInput{
-		Action: api.ProcessTerminate, ProcessID: start.ProcessID,
-	})
-}
-
-func TestProcessUnknownID(t *testing.T) {
-	m := newTestManager(t)
-	for _, action := range []api.ProcessAction{api.ProcessPoll, api.ProcessWrite, api.ProcessTerminate} {
-		in := api.ProcessInput{Action: action, ProcessID: "does-not-exist"}
-		if action == api.ProcessWrite {
-			in.Input = "x"
-		}
-		out, err := m.Process(context.Background(), in)
-		if err != nil {
-			t.Fatalf("%s error: %v", action, err)
-		}
-		if out.Code != api.CodeNotFound {
-			t.Errorf("%s code = %q, want NOT_FOUND", action, out.Code)
-		}
-	}
-}
-
-func TestProcessTerminate(t *testing.T) {
-	m := newTestManager(t)
-	start, _ := m.Process(context.Background(), api.ProcessInput{
-		Action: api.ProcessStart, Command: "sleep 100",
-	})
-	out, err := m.Process(context.Background(), api.ProcessInput{
-		Action: api.ProcessTerminate, ProcessID: start.ProcessID,
-	})
-	if err != nil {
-		t.Fatalf("terminate error: %v", err)
-	}
-	if out.Running {
-		t.Errorf("process still running after terminate")
-	}
-}
-
-// TestProcessLiveLimit asserts the 16-live cap returns RESOURCE_EXHAUSTED and
-// that terminating processes frees slots.
-func TestProcessLiveLimit(t *testing.T) {
-	m := newTestManager(t)
-	var ids []string
-	for i := 0; i < DefaultMaxLive; i++ {
-		out, err := m.Process(context.Background(), api.ProcessInput{
-			Action: api.ProcessStart, Command: "sleep 100",
-		})
-		if err != nil || out.Code != "" {
-			t.Fatalf("start %d failed: %v %q", i, err, out.Code)
-		}
-		ids = append(ids, out.ProcessID)
-	}
-	// 17th must be rejected.
-	over, _ := m.Process(context.Background(), api.ProcessInput{
-		Action: api.ProcessStart, Command: "sleep 100",
-	})
-	if over.Code != api.CodeResourceExhausted {
-		t.Fatalf("17th start code = %q, want RESOURCE_EXHAUSTED", over.Code)
-	}
-	// Terminate one and confirm a slot frees.
-	_, _ = m.Process(context.Background(), api.ProcessInput{
-		Action: api.ProcessTerminate, ProcessID: ids[0],
-	})
-	again, err := m.Process(context.Background(), api.ProcessInput{
-		Action: api.ProcessStart, Command: "sleep 100",
-	})
-	if err != nil || again.Code != "" {
-		t.Fatalf("start after terminate failed: %v %q", err, again.Code)
-	}
-}
-
-// TestProcessConcurrentStartCap hammers start from many goroutines and asserts
-// the live cap is never exceeded (atomic reservation).
-func TestProcessConcurrentStartCap(t *testing.T) {
-	m := newTestManager(t)
-	const attempts = 40
-	var ok atomic.Int32
-	var wg sync.WaitGroup
-	for i := 0; i < attempts; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			out, err := m.Process(context.Background(), api.ProcessInput{
-				Action: api.ProcessStart, Command: "sleep 100",
-			})
-			if err == nil && out.Code == "" {
-				ok.Add(1)
-			}
-		}()
-	}
-	wg.Wait()
-	if got := ok.Load(); got > int32(DefaultMaxLive) {
-		t.Fatalf("started %d processes, cap is %d", got, DefaultMaxLive)
-	}
-}
-
-func TestManagerCloseKillsGrandchildren(t *testing.T) {
-	m := New(testConfig())
-	marker := filepath.Join(t.TempDir(), "ticks")
-	// A process tree: sh runs a foreground sleep and backgrounds a grandchild
-	// loop that appends until killed. Close must reap the whole tree.
-	start, err := m.Process(context.Background(), api.ProcessInput{
-		Action:  api.ProcessStart,
-		Command: fmt.Sprintf("(while true; do echo tick >> %q; sleep 0.2; done) & sleep 100", marker),
-	})
-	if err != nil || start.Code != "" {
-		t.Fatalf("start failed: %v %q", err, start.Code)
-	}
-	// Give the tree a moment to fork its grandchildren.
-	time.Sleep(300 * time.Millisecond)
-	if err := m.Close(); err != nil {
-		t.Fatalf("close error: %v", err)
-	}
-	// After Close, the grandchild loop must have stopped growing the file.
-	time.Sleep(1 * time.Second)
-	s1 := fileSize(marker)
-	time.Sleep(1 * time.Second)
-	s2 := fileSize(marker)
-	if s2 != s1 {
-		t.Fatalf("grandchild survived Close, still writing: %d -> %d bytes", s1, s2)
-	}
-}
-
-// TestFallbackTeardownDoesNotHang exercises the I1 escape hatch. In
-// pgroup-fallback mode (no cgroup) a setsid grandchild escapes the process
-// group AND keeps the inherited stdout/stderr pipe write-ends open. Without a
-// bounded final join, waitChild's readersWG.Wait() — and thus reap's wait on
-// t.done — would block forever because the pipes never EOF and the escapee is
-// out of reach of the process-group SIGKILL. Teardown must still return in
-// bounded time by force-closing the child IO.
-func TestFallbackTeardownDoesNotHang(t *testing.T) {
-	// Force genuine pgroup-fallback (leaf == nil) regardless of whether the
-	// host has a usable delegated cgroup: point at a bogus root so cgroupProbe
-	// fails and beginCgroup takes the AllowPgroupFallback branch. In real
-	// cgroup mode cgroup.kill would reap the escapee and the bound would never
-	// be needed — this test must exercise the escape hatch itself.
-	cfg := testConfig()
-	cfg.CgroupRoot = filepath.Join(t.TempDir(), "no-such-cgroup")
-	m := New(cfg)
-	t.Cleanup(func() { _ = m.Close() })
-	if m.cgroupOK {
-		t.Fatal("expected cgroup placement to be unavailable (forcing pgroup fallback)")
-	}
-	start, err := m.Process(context.Background(), api.ProcessInput{
-		Action: api.ProcessStart,
-		// The shell replaces itself with a short sleep (exec) while a setsid
-		// grandchild leaves the process group and holds fds 1/2 open for a
-		// long time.
-		Command: `setsid sh -c "sleep 60" & exec sleep 0.1`,
-	})
-	if err != nil || start.Code != "" {
-		t.Fatalf("start failed: %v %q", err, start.Code)
-	}
-	// Let the shell exit and the grandchild detach.
-	time.Sleep(300 * time.Millisecond)
-
-	done := make(chan struct{})
-	go func() {
-		_, _ = m.Process(context.Background(), api.ProcessInput{
-			Action: api.ProcessTerminate, ProcessID: start.ProcessID,
-		})
-		close(done)
-	}()
-	select {
-	case <-done:
-		// Returned in bounded time: success.
-	case <-time.After(15 * time.Second):
-		t.Fatal("terminate hung: fallback grandchild held the pipes open")
-	}
-
-	// Close must also return promptly even though the escapee survives.
-	closed := make(chan struct{})
-	go func() { _ = m.Close(); close(closed) }()
-	select {
-	case <-closed:
-	case <-time.After(15 * time.Second):
-		t.Fatal("Close hung after a fallback grandchild survived teardown")
-	}
-}
-
-// TestProcessStartIDGenerationFailure covers M3: when the opaque-id generator
-// fails (crypto/rand error, modelled via the NewID seam) the start must return
-// INTERNAL and mint no handle — never a guessable/PID-derived fallback id — and
-// must not leak the reserved live slot.
-func TestProcessStartIDGenerationFailure(t *testing.T) {
-	cfg := testConfig()
-	cfg.NewID = func() (string, error) { return "", errors.New("rand unavailable") }
-	m := New(cfg)
-	t.Cleanup(func() { _ = m.Close() })
-
-	// Repeat past the live cap: if the reserved slot leaked on failure, later
-	// calls would report RESOURCE_EXHAUSTED instead of INTERNAL.
-	for i := 0; i < DefaultMaxLive+2; i++ {
-		out, err := m.Process(context.Background(), api.ProcessInput{
-			Action: api.ProcessStart, Command: "echo hi",
-		})
-		if err != nil {
-			t.Fatalf("iter %d: unexpected error: %v", i, err)
-		}
-		if out.Code != api.CodeInternal {
-			t.Fatalf("iter %d: code = %q, want INTERNAL (live slot leaked?)", i, out.Code)
-		}
-		if out.ProcessID != "" {
-			t.Errorf("iter %d: a handle was minted on id failure: %q", i, out.ProcessID)
-		}
-	}
-
-	// Terminal shares the seam and must also fail cleanly.
-	tout, err := m.Terminal(context.Background(), api.TerminalInput{Command: "echo hi"})
-	if err != nil {
-		t.Fatalf("terminal unexpected error: %v", err)
-	}
-	if tout.Code != api.CodeInternal {
-		t.Fatalf("terminal code = %q, want INTERNAL", tout.Code)
-	}
-}
-
-// pollUntil polls a process, accumulating stdout, until pred is satisfied, the
-// process exits, or a deadline elapses.
-func pollUntil(t *testing.T, m *Manager, id string, pred func(string) bool) string {
-	t.Helper()
-	var sb strings.Builder
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		p, err := m.Process(context.Background(), api.ProcessInput{
-			Action: api.ProcessPoll, ProcessID: id, TimeoutMs: ptr(200),
-		})
-		if err != nil {
-			t.Fatalf("poll error: %v", err)
-		}
-		sb.WriteString(p.Stdout)
-		if pred(sb.String()) {
-			return sb.String()
-		}
-		if !p.Running {
-			return sb.String()
-		}
-	}
-	return sb.String()
-}
-
-// ---------------------------------------------------------------------------
-// ProcessInput.Args reaches the executable
-// ---------------------------------------------------------------------------
-
-// collectUntilExit polls id until the process exits, returning the joined
-// stdout. It fails the test if the process never exits.
-func collectUntilExit(t *testing.T, m *Manager, id string) string {
-	t.Helper()
-	var stdout strings.Builder
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		p, err := m.Process(context.Background(), api.ProcessInput{
-			Action: api.ProcessPoll, ProcessID: id, TimeoutMs: ptr(200),
-		})
-		if err != nil {
-			t.Fatalf("poll error: %v", err)
-		}
-		stdout.WriteString(p.Stdout)
-		if !p.Running {
-			return stdout.String()
-		}
-	}
-	t.Fatalf("process %s never exited; stdout so far %q", id, stdout.String())
-	return ""
-}
-
-// Args must actually be applied to the executable. They used to be handed to
-// `sh -lc <command>` as trailing words, which binds them to $0/$1/$2 --
-// positional parameters the command line never references -- so every argument
-// was accepted by the API and then silently dropped (a `process` start with
-// command="flatpak", args=["install", ...] ran a bare `flatpak` and failed with
-// "No command specified").
-func TestProcessStartPassesArgsToTheExecutable(t *testing.T) {
-	m := newTestManager(t)
-	start, err := m.Process(context.Background(), api.ProcessInput{
-		Action:  api.ProcessStart,
-		Command: "/bin/echo",
-		Args:    []string{"alpha", "beta"},
-	})
-	if err != nil {
-		t.Fatalf("start error: %v", err)
-	}
-	if start.Code != "" {
-		t.Fatalf("start failed: %q %s", start.Code, start.Message)
-	}
-	if got := strings.TrimSpace(collectUntilExit(t, m, start.ProcessID)); got != "alpha beta" {
-		t.Fatalf("stdout = %q, want %q (args were not applied to the executable)", got, "alpha beta")
-	}
-}
-
-// Args must survive verbatim: no shell re-splitting of an argument that
-// contains spaces or globbing characters.
-func TestProcessStartArgsAreNotReSplitByTheShell(t *testing.T) {
-	m := newTestManager(t)
-	start, err := m.Process(context.Background(), api.ProcessInput{
-		Action:  api.ProcessStart,
-		Command: "/bin/echo",
-		Args:    []string{"one two", "*"},
-	})
-	if err != nil {
-		t.Fatalf("start error: %v", err)
-	}
-	if got := strings.TrimSpace(collectUntilExit(t, m, start.ProcessID)); got != "one two *" {
-		t.Fatalf("stdout = %q, want %q (arguments must not be word-split or globbed)", got, "one two *")
-	}
-}
-
-// With no args the command stays a plain shell command line, which callers that
-// pass a whole pipeline in `command` depend on.
-func TestProcessStartWithoutArgsRemainsAShellCommandLine(t *testing.T) {
-	m := newTestManager(t)
-	start, err := m.Process(context.Background(), api.ProcessInput{
-		Action:  api.ProcessStart,
-		Command: "echo one; echo two",
-	})
-	if err != nil {
-		t.Fatalf("start error: %v", err)
-	}
-	got := strings.Fields(collectUntilExit(t, m, start.ProcessID))
-	if len(got) != 2 || got[0] != "one" || got[1] != "two" {
-		t.Fatalf("stdout fields = %#v, want [one two]", got)
-	}
-}

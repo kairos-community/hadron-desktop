@@ -286,7 +286,7 @@ Explain that tokens and keys are runtime/seed data, never Docker build args.
 
 - [ ] Build `make agent-iso VERSION=v0.1.0-dev` and boot the ISO with `virtio-vga` plus VNC using the Phase 1 harness.
 
-- [ ] Verify live boot creates no writes to an attached blank disk, auto-logs into one XLibre session, displays the one-shot token/fingerprint, becomes ready on 7443, advertises mDNS, and lists exactly eight tools.
+- [ ] Verify live boot creates no writes to an attached blank disk, auto-logs into one XLibre session, displays the one-shot token/fingerprint, becomes ready on 7443, advertises mDNS, and lists exactly seven tools.
 
 - [ ] Verify `id` through `terminal` reports `agent` and no forbidden groups. Verify admin calls are unavailable. Toggle `Super+Shift+Escape` while a long process runs; the call must cancel, process group must die, bar must show Paused, and local i3 must remain usable. Toggle again and verify readiness.
 

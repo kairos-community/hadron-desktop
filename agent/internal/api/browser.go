@@ -318,3 +318,8 @@ type BrowserOutput struct {
 // advertised description cannot drift between the stub server and the real one.
 const BrowserToolDescription = "Drive web content by ref from the page's own accessibility " +
 	"information: navigate, snapshot, click, type, press, scroll, back, text."
+
+// BashToolDescription is shared by RegisterAll and the gateway so the advertised
+// description cannot drift between the stub server and the real one.
+const BashToolDescription = "Run a shell script to completion. No timeout and no output limit: " +
+	"write your own `timeout` into the script if you need one."

@@ -962,11 +962,10 @@ _rec_wait_recovered() {
 # command's exit status (or the client's reserved code on a transport failure).
 _rec_exec() {
   local smoke="$1" descriptor="$2" admin_token="$3" as_admin="$4" cmd="$5"
-  local timeout="${6:-60s}"
   local extra=()
   [ "$as_admin" = "admin" ] && extra+=(--exec-admin)
   "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
-    --mode exec --command "$cmd" --call-timeout "$timeout" "${extra[@]}" 2>/dev/null
+    --mode exec --command "$cmd" "${extra[@]}" 2>/dev/null
 }
 
 # Process probes read /proc directly.
@@ -1352,11 +1351,10 @@ cmd_recovery() {
 # command's own output, so a caller can parse it directly.
 _ui_exec() {
   local smoke="$1" descriptor="$2" admin_token="$3" as="$4" cmd="$5"
-  local timeout="${6:-60s}"
   local extra=()
   [ "$as" = "admin" ] && extra+=(--exec-admin)
   "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
-    --mode exec --command "$cmd" --call-timeout "$timeout" "${extra[@]}" 2>/dev/null
+    --mode exec --command "$cmd" "${extra[@]}" 2>/dev/null
 }
 
 # cmd_ui [IMAGE] -- UI gate on an installed appliance.
@@ -1467,15 +1465,10 @@ cmd_ui() {
   #    gate tests.
   local want_commit; want_commit="$(cat "$SCRIPT_DIR/fixtures/chromium.commit")"
   finfo "Installing Chromium at the pinned commit ${want_commit:0:12}"
-  # `run`, not `terminal`: the gateway bounds every request at 60s, so a
-  # multi-minute Flathub install through `terminal` is cut off and comes back
-  # empty -- which previously read as "the guest reports no commit".
-  # Keep the installer's own output. Sending each step to /dev/null made a
-  # flatpak that failed in six seconds indistinguishable from one that ran for
-  # ten minutes: the gate saw an empty commit and blamed the guest. Everything
-  # is echoed into an artifact, and the commit is picked out of it afterwards.
-  "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
-    --mode run --call-timeout "${UI_INSTALL_TIMEOUT:-25m}" --command \
+  # bash is unbounded, so the multi-minute Flathub install is just one call --
+  # no start/poll handshake, and nothing to lose the process handle to. The
+  # installer's own output is kept so a failure explains itself.
+  _ui_exec "$smoke" "$descriptor" "$admin_token" user \
     "set -x
      flatpak --version
      flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo

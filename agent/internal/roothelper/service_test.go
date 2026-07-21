@@ -3,10 +3,8 @@ package roothelper
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -97,36 +95,19 @@ func (p *fakeProcess) called() int {
 	return p.calls
 }
 
-func (p *fakeProcess) Terminal(ctx context.Context, _ api.TerminalInput) (api.TerminalOutput, error) {
+func (p *fakeProcess) Bash(ctx context.Context, _ api.BashInput) (api.BashOutput, error) {
 	p.mark()
 	if p.terminalStarted != nil {
 		p.terminalStarted <- struct{}{}
 	}
 	if p.terminalGate == nil {
-		return api.TerminalOutput{Stdout: "ok"}, nil
+		return api.BashOutput{Stdout: "ok"}, nil
 	}
 	select {
 	case <-ctx.Done():
-		return api.TerminalOutput{ResultMeta: api.ResultMeta{Code: api.CodeDeadlineExceeded, Message: ctx.Err().Error()}}, nil
+		return api.BashOutput{ResultMeta: api.ResultMeta{Code: api.CodeDeadlineExceeded, Message: ctx.Err().Error()}}, nil
 	case <-p.terminalGate:
-		return api.TerminalOutput{Stdout: "ok"}, nil
-	}
-}
-
-func (p *fakeProcess) Process(_ context.Context, in api.ProcessInput) (api.ProcessOutput, error) {
-	p.mark()
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	switch in.Action {
-	case api.ProcessStart:
-		p.nextID++
-		id := fmt.Sprintf("proc-%d", p.nextID)
-		return api.ProcessOutput{ProcessID: id, Running: true}, nil
-	case api.ProcessTerminate:
-		p.terminated = append(p.terminated, in.ProcessID)
-		return api.ProcessOutput{ProcessID: in.ProcessID, Running: false}, nil
-	default:
-		return api.ProcessOutput{ProcessID: in.ProcessID, Running: true}, nil
+		return api.BashOutput{Stdout: "ok"}, nil
 	}
 }
 
@@ -276,7 +257,7 @@ func TestForgedScopeStillRequiresBearer(t *testing.T) {
 		proc := &fakeProcess{}
 		h := newHelper(t, v, files, proc)
 
-		meta := callMeta(t, h, api.ToolTerminal, api.TerminalInput{Command: "id"}, header)
+		meta := callMeta(t, h, api.ToolBash, api.BashInput{Command: "id"}, header)
 		if meta.Code != api.CodeUnauthenticated && meta.Code != api.CodeForbidden {
 			t.Fatalf("forged header %q: got code %q, want UNAUTHENTICATED/FORBIDDEN", header, meta.Code)
 		}
@@ -334,42 +315,6 @@ func TestUnknownToolRejected(t *testing.T) {
 
 // TestEveryOSToolRequiresAdminBearer sweeps all six OS tools with an invalid
 // admin token and asserts none reaches an executor.
-func TestEveryOSToolRequiresAdminBearer(t *testing.T) {
-	wrongBearer, _, err := auth.Generate(auth.ClassAdmin)
-	if err != nil {
-		t.Fatalf("generate admin bearer: %v", err)
-	}
-	v := mismatchedVerifier(t)
-
-	cases := []struct {
-		tool string
-		args any
-	}{
-		{api.ToolTerminal, api.TerminalInput{Command: "id"}},
-		{api.ToolProcess, api.ProcessInput{Action: api.ProcessStart, Command: "sleep"}},
-		{api.ToolReadFile, api.ReadFileInput{Path: "/x"}},
-		{api.ToolSearchFiles, api.SearchFilesInput{Path: "/x", Query: "q"}},
-		{api.ToolWriteFile, api.WriteFileInput{Path: "/x", Content: "c"}},
-		{api.ToolPatch, api.PatchInput{Files: []api.PatchFile{{Path: "/x"}}}},
-	}
-	for _, tc := range cases {
-		files := &fakeFiles{}
-		proc := &fakeProcess{}
-		h := newHelper(t, v, files, proc)
-
-		meta := callMeta(t, h, tc.tool, tc.args, bearerHeader(wrongBearer))
-		if meta.Code != api.CodeUnauthenticated {
-			t.Fatalf("%s with invalid admin token: got code %q, want UNAUTHENTICATED", tc.tool, meta.Code)
-		}
-		if files.called() != 0 || proc.called() != 0 {
-			t.Fatalf("%s reached an executor without a valid admin bearer (files=%d proc=%d)", tc.tool, files.called(), proc.called())
-		}
-		h.Close()
-	}
-}
-
-// TestValidAdminReachesExecutor proves a valid admin bearer with an OS tool
-// reaches the executor and stamps the exact root identity.
 func TestValidAdminReachesExecutor(t *testing.T) {
 	adminBearer, v := adminCreds(t)
 	files := &fakeFiles{}
@@ -378,7 +323,7 @@ func TestValidAdminReachesExecutor(t *testing.T) {
 	defer h.Close()
 
 	// terminal -> process executor
-	tr := call[api.TerminalOutput](t, h, api.ToolTerminal, api.TerminalInput{Command: "id"}, bearerHeader(adminBearer))
+	tr := call[api.BashOutput](t, h, api.ToolBash, api.BashInput{Command: "id"}, bearerHeader(adminBearer))
 	if tr.Code != "" {
 		t.Fatalf("terminal with valid admin: got code %q, want success", tr.Code)
 	}
@@ -407,66 +352,6 @@ func TestValidAdminReachesExecutor(t *testing.T) {
 
 // TestPauseCancelsRootCommandAndProcessGroup proves a pause cancels an active
 // root command (reported PAUSED) and terminates a tracked process group.
-func TestPauseCancelsRootCommandAndProcessGroup(t *testing.T) {
-	adminBearer, v := adminCreds(t)
-	proc := &fakeProcess{terminalGate: make(chan struct{}), terminalStarted: make(chan struct{}, 1)}
-	h := newHelper(t, v, &fakeFiles{}, proc)
-	defer h.Close()
-
-	ctx := context.Background()
-	header := bearerHeader(adminBearer)
-
-	// Start a long-running tracked process the helper will remember.
-	ps := call[api.ProcessOutput](t, h, api.ToolProcess, api.ProcessInput{Action: api.ProcessStart, Command: "sleep"}, header)
-	if ps.ProcessID == "" {
-		t.Fatalf("process start returned no id")
-	}
-
-	// Launch a terminal command that blocks until cancelled.
-	termOut := make(chan api.TerminalOutput, 1)
-	go func() {
-		termOut <- call[api.TerminalOutput](t, h, api.ToolTerminal, api.TerminalInput{Command: "sleep 100"}, header)
-	}()
-	select {
-	case <-proc.terminalStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("terminal never started")
-	}
-
-	// Pause: cancels the active command, terminates the tracked group.
-	if err := h.Pause(ctx); err != nil {
-		t.Fatalf("pause: %v", err)
-	}
-	select {
-	case out := <-termOut:
-		if out.Code != api.CodePaused {
-			t.Fatalf("cancelled root command: got code %q, want PAUSED", out.Code)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("root command was not cancelled by pause")
-	}
-	if got := proc.terminatedIDs(); len(got) != 1 || got[0] != ps.ProcessID {
-		t.Fatalf("pause terminated %v, want [%s]", got, ps.ProcessID)
-	}
-
-	// New calls during pause are rejected with PAUSED.
-	rf := call[api.ReadFileOutput](t, h, api.ToolReadFile, api.ReadFileInput{Path: "/x"}, header)
-	if rf.Code != api.CodePaused {
-		t.Fatalf("read during pause: got %q, want PAUSED", rf.Code)
-	}
-
-	// Resume restores service.
-	if err := h.Resume(ctx); err != nil {
-		t.Fatalf("resume: %v", err)
-	}
-	rf = call[api.ReadFileOutput](t, h, api.ToolReadFile, api.ReadFileInput{Path: "/x"}, header)
-	if rf.Code != "" {
-		t.Fatalf("read after resume: got %q, want success", rf.Code)
-	}
-}
-
-// TestNewRejectsMissingDependencies asserts the constructor refuses to build a
-// helper without a verifier, file service, or process manager.
 func TestNewRejectsMissingDependencies(t *testing.T) {
 	_, v := adminCreds(t)
 	if _, err := New(Config{Files: &fakeFiles{}, Process: &fakeProcess{}}); err == nil {

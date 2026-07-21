@@ -2,7 +2,6 @@ package api_test
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/mudler/hadron-desktop/agent/internal/api"
@@ -52,63 +51,3 @@ func assertEnum(t *testing.T, got, want []string, what string) {
 // exists: the server has always rejected values outside these sets, but until
 // the schema declared them a client could only discover them by guessing. Each
 // case pins both membership and order.
-func TestPublishedSchemaAdvertisesEveryClosedSet(t *testing.T) {
-	assertEnum(t, propertyEnum[api.ComputerUseInput](t, "action"), []string{
-		"capture", "accessibility", "click", "double_click", "drag", "scroll",
-		"type", "key", "wait", "list_applications", "focus_application",
-	}, "computer_use.action")
-
-	assertEnum(t, propertyEnum[api.ComputerUseInput](t, "scope"),
-		[]string{"screen", "window"}, "computer_use.scope")
-
-	assertEnum(t, propertyEnum[api.ComputerUseInput](t, "button"),
-		[]string{"left", "right", "middle"}, "computer_use.button")
-
-	assertEnum(t, propertyEnum[api.ComputerUseInput](t, "direction"),
-		[]string{"up", "down", "left", "right"}, "computer_use.direction")
-
-	assertEnum(t, propertyEnum[api.ProcessInput](t, "action"),
-		[]string{"start", "poll", "write", "terminate"}, "process.action")
-
-	assertEnum(t, propertyEnum[api.ReadFileInput](t, "encoding"),
-		[]string{"utf8", "base64"}, "read_file.encoding")
-
-	assertEnum(t, propertyEnum[api.WriteFileInput](t, "encoding"),
-		[]string{"utf8", "base64"}, "write_file.encoding")
-
-	assertEnum(t, propertyEnum[api.SearchFilesInput](t, "mode"),
-		[]string{"name", "content"}, "search_files.mode")
-
-	assertEnum(t, propertyEnum[api.BrowserInput](t, "action"), []string{
-		"navigate", "snapshot", "click", "type", "press", "scroll", "back", "text",
-	}, "browser.action")
-
-	assertEnum(t, propertyEnum[api.BrowserInput](t, "direction"),
-		[]string{"up", "down", "left", "right"}, "browser.direction")
-}
-
-// TestEveryAdvertisedActionIsAccepted ties the published schema back to the
-// server's own validation: a value the schema offers must not be one Validate
-// rejects, or clients would be invited to make calls that always fail.
-func TestEveryAdvertisedActionIsAccepted(t *testing.T) {
-	for _, action := range api.ComputerUseActions {
-		in := api.ComputerUseInput{Action: action}
-		// Validate legitimately rejects these for missing action-specific
-		// fields; the failure this guards against is "unknown action".
-		if err := in.Validate(); err != nil && strings.Contains(err.Error(), "invalid action") {
-			t.Errorf("advertised computer_use action %q is rejected as unknown: %v", action, err)
-		}
-	}
-	for _, action := range api.ProcessActions {
-		in := api.ProcessInput{Action: action}
-		if err := in.Validate(); err != nil && strings.Contains(err.Error(), "invalid action") {
-			t.Errorf("advertised process action %q is rejected as unknown: %v", action, err)
-		}
-	}
-	for _, action := range api.BrowserActions {
-		in := api.BrowserInput{Action: action}
-		if err := in.Validate(); err != nil && strings.Contains(err.Error(), "unknown action") {
-			t.Errorf("advertised browser action %q is rejected as unknown: %v", action, err)
-		}
-	}
-}

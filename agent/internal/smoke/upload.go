@@ -56,9 +56,9 @@ func (s *Suite) RunUpload(ctx context.Context, localPath, remotePath, wantSHA256
 
 	// Verify in the guest, not from the bytes we just sent: the point is to
 	// prove what LANDED matches, which a local re-hash could never show.
-	var check api.TerminalOutput
+	var check api.BashOutput
 	cmd := fmt.Sprintf("sha256sum %q | awk '{print $1}'", remotePath)
-	if err := s.callInto(ctx, sess, api.ToolTerminal, api.TerminalInput{Command: cmd}, &check); err != nil {
+	if err := s.callInto(ctx, sess, api.ToolBash, api.BashInput{Command: cmd}, &check); err != nil {
 		r.Checks = append(r.Checks, failTransport(name, "could not checksum the uploaded file"))
 		return r
 	}

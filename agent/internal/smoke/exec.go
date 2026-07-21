@@ -10,13 +10,12 @@ import (
 
 // ExecResult is the outcome of one exec-mode run.
 type ExecResult struct {
-	Stdout    string
-	Stderr    string
-	ExitCode  int
-	Truncated bool
+	Stdout   string
+	Stderr   string
+	ExitCode int
 }
 
-// RunExec executes a single shell command through the public `terminal` tool
+// RunExec executes a single shell script through the public `bash` tool
 // and returns what the appliance reported.
 //
 // This exists for the recovery gate, which has to inject failures into a
@@ -46,20 +45,21 @@ func (s *Suite) RunExec(ctx context.Context, command string, admin bool, timeout
 	}
 	defer sess.Close()
 
-	ms := int(timeout / time.Millisecond)
-	in := api.TerminalInput{Command: command, TimeoutMs: &ms}
+	// bash takes no timeout: it runs to completion. The caller's own budget
+	// is applied by the context.
+	in := api.BashInput{Command: command}
 
-	var out api.TerminalOutput
-	if err := s.callInto(ctx, sess, api.ToolTerminal, in, &out); err != nil {
-		r.Checks = append(r.Checks, failTransport(name, "terminal call failed"))
+	var out api.BashOutput
+	if err := s.callInto(ctx, sess, api.ToolBash, in, &out); err != nil {
+		r.Checks = append(r.Checks, failTransport(name, "bash call failed"))
 		return r, ExecResult{ExitCode: -1}
 	}
 	if out.Code != "" {
-		r.Checks = append(r.Checks, failAssert(name, fmt.Sprintf("terminal reported %s", out.Code)))
+		r.Checks = append(r.Checks, failAssert(name, fmt.Sprintf("bash reported %s", out.Code)))
 		return r, ExecResult{ExitCode: -1}
 	}
 
-	res := ExecResult{Stdout: out.Stdout, Stderr: out.Stderr, ExitCode: out.ExitCode, Truncated: out.Truncated}
+	res := ExecResult{Stdout: out.Stdout, Stderr: out.Stderr, ExitCode: out.ExitCode}
 	r.Checks = append(r.Checks, pass(name,
 		fmt.Sprintf("command ran as %s and exited %d", class, out.ExitCode)))
 	return r, res

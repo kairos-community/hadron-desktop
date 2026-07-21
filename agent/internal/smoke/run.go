@@ -61,17 +61,13 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch *mode {
-	case "contract", "persist-write", "persist-verify", "exec", "upload", "ui", "run", "warm":
+	case "contract", "persist-write", "persist-verify", "exec", "upload", "ui", "warm":
 	default:
-		fmt.Fprintf(stderr, "mcp-smoke: unknown mode %q (want: contract, persist-write, persist-verify, exec, run, warm, upload, or ui)\n", *mode)
+		fmt.Fprintf(stderr, "mcp-smoke: unknown mode %q (want: contract, persist-write, persist-verify, exec, warm, upload, or ui)\n", *mode)
 		return ExitDescriptor
 	}
 	if *mode == "upload" && (*localFile == "" || *remoteFile == "") {
 		fmt.Fprintln(stderr, "mcp-smoke: --local-file and --remote-file are required for mode \"upload\"")
-		return ExitDescriptor
-	}
-	if *mode == "run" && *command == "" {
-		fmt.Fprintln(stderr, "mcp-smoke: --command is required for mode \"run\"")
 		return ExitDescriptor
 	}
 	if *mode == "exec" && *command == "" {
@@ -172,14 +168,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 			ExitCode: res.ExitCode, Passed: 1, Checks: report.Checks,
 		}, stderr)
 		return res.ExitCode
-	case "run", "warm":
-		// Same stdout contract as exec: the command's own output, nothing else.
+	case "warm":
 		var res ExecResult
-		if *mode == "warm" {
-			report, res = suite.RunWarm(ctx)
-		} else {
-			report, res = suite.RunLongCommand(ctx, *command, *execAdmin, *callTimeout)
-		}
+		report, res = suite.RunWarm(ctx)
 		out := report.Outcome()
 		writeArtifact(desc.ArtifactDirectory, artifactReport{
 			Mode: report.Mode, Started: started, Finished: time.Now(),
@@ -187,11 +178,6 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		}, stderr)
 		if out != ExitPass {
 			printSummary(stderr, report, out)
-			return out
-		}
-		fmt.Fprint(stdout, res.Stdout)
-		if res.Stderr != "" {
-			fmt.Fprint(stderr, res.Stderr)
 		}
 		return res.ExitCode
 	case "upload":
@@ -261,8 +247,6 @@ func writeArtifact(dir string, rep artifactReport, stderr io.Writer) {
 	switch rep.Mode {
 	case "exec":
 		name = "mcp-exec.json"
-	case "run":
-		name = "mcp-run.json"
 	case "warm":
 		name = "mcp-warm.json"
 	case "upload":

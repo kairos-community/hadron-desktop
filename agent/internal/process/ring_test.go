@@ -1,12 +1,7 @@
 package process
 
 import (
-	"bytes"
-	"context"
 	"testing"
-	"time"
-
-	"github.com/mudler/hadron-desktop/agent/internal/api"
 )
 
 func TestRingMonotonicCursor(t *testing.T) {
@@ -83,41 +78,3 @@ func TestRingExactWrap(t *testing.T) {
 // TestPollReportsTruncationOnOverrun drives a real process whose output
 // overruns a tiny ring, then asserts poll reports OUTPUT_TRUNCATED with a
 // dropped-bytes gap.
-func TestPollReportsTruncationOnOverrun(t *testing.T) {
-	cfg := testConfig()
-	cfg.RingSize = 64 // tiny ring to force overrun
-	m := New(cfg)
-	t.Cleanup(func() { _ = m.Close() })
-
-	start, err := m.Process(context.Background(), api.ProcessInput{
-		Action:  api.ProcessStart,
-		Command: "for i in $(seq 1 500); do printf 'XXXXXXXXXX'; done",
-	})
-	if err != nil || start.Code != "" {
-		t.Fatalf("start failed: %v %q", err, start.Code)
-	}
-
-	// Wait for the process to finish producing, then poll once — the ring is
-	// far smaller than the ~5000 bytes emitted, so bytes were dropped.
-	var sawTruncated bool
-	var buf bytes.Buffer
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		p, err := m.Process(context.Background(), api.ProcessInput{
-			Action: api.ProcessPoll, ProcessID: start.ProcessID, TimeoutMs: ptr(200),
-		})
-		if err != nil {
-			t.Fatalf("poll error: %v", err)
-		}
-		buf.WriteString(p.Stdout)
-		if p.Truncated && p.Code == api.CodeOutputTruncated {
-			sawTruncated = true
-		}
-		if !p.Running {
-			break
-		}
-	}
-	if !sawTruncated {
-		t.Fatalf("expected a poll to report OUTPUT_TRUNCATED for an overrun ring")
-	}
-}

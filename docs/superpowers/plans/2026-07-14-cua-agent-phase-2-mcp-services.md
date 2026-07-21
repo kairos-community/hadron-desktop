@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build one static Hadron agent binary that exposes exactly eight authenticated MCP tools while preserving the unprivileged desktop boundary and independently validating optional administrator access.
+**Goal:** Build one static Hadron agent binary that exposes exactly seven authenticated MCP tools while preserving the unprivileged desktop boundary and independently validating optional administrator access.
 
 **Architecture:** One binary has `gateway`, `session`, `root-helper`, `control`, `status`, and later `provision` subcommands. The HTTPS gateway is the only listener. It validates bearer credentials and proxies fixed-schema calls over permissioned Unix HTTP sockets. The agent-owned session broker implements shell, PTY process, file, and serialized Cua operations. The optional root helper implements only OS tools and revalidates the raw admin bearer. Streamable HTTP is stateless so emergency pause can cancel all active work without hidden SDK session state.
 

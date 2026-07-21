@@ -165,10 +165,8 @@ func validArgs(tool string) any {
 	switch tool {
 	case api.ToolComputerUse:
 		return api.ComputerUseInput{Action: api.ActionCapture}
-	case api.ToolTerminal:
-		return api.TerminalInput{Command: "true"}
-	case api.ToolProcess:
-		return api.ProcessInput{Action: api.ProcessStart, Command: "true"}
+	case api.ToolBash:
+		return api.BashInput{Command: "true"}
 	case api.ToolReadFile:
 		return api.ReadFileInput{Path: "/tmp/x"}
 	case api.ToolSearchFiles:
@@ -392,7 +390,7 @@ func TestContractPauseCancelsActiveCall(t *testing.T) {
 
 	done := make(chan api.ErrorCode, 1)
 	go func() {
-		res := callTool(t, session, api.ToolTerminal, validArgs(api.ToolTerminal))
+		res := callTool(t, session, api.ToolBash, validArgs(api.ToolBash))
 		done <- resultMeta(t, res).Code
 	}()
 

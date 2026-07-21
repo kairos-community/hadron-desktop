@@ -8,7 +8,7 @@
 //
 //   - verifies the presented bearer (via package auth) and admits both the
 //     user and admin classes to /mcp;
-//   - routes by class and tool -- an ordinary user bearer sends ALL eight
+//   - routes by class and tool -- an ordinary user bearer sends ALL seven
 //     tools to the unprivileged session broker; an admin bearer sends
 //     computer_use and browser to the session broker too (the desktop and the
 //     browser always run as the unprivileged agent), but the other six OS
@@ -281,12 +281,23 @@ func (g *Gateway) buildHandler() http.Handler {
 	return mux
 }
 
+// withRequestTimeout no longer imposes the deadline itself.
+//
+// bash is specified to have no timeout: it exists so an agent can install a
+// package or wait on a build, and a 60s cap at the HTTP layer would make that
+// impossible no matter what the tool promised. A deadline cannot be extended
+// once set, so the bound is applied per tool in route() instead, where the tool
+// name is known. Every other tool keeps exactly the bound it had.
 func (g *Gateway) withRequestTimeout(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), g.requestTimeout)
-		defer cancel()
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+	return next
+}
+
+// callDeadline returns the per-call bound for a tool, and whether one applies.
+func (g *Gateway) callDeadline(tool string) (time.Duration, bool) {
+	if tool == api.ToolBash {
+		return 0, false
+	}
+	return g.requestTimeout, true
 }
 
 func (g *Gateway) withBodyLimit(next http.Handler) http.Handler {
@@ -336,19 +347,16 @@ func (g *Gateway) handleReadyz(w http.ResponseWriter, r *http.Request) {
 // Tool registration and routing
 // ---------------------------------------------------------------------------
 
-// registerTools installs the eight public tools on server, each backed by a
+// registerTools installs the seven public tools on server, each backed by a
 // routing handler. The input/output types are package api's, so the JSON
 // schema the SDK infers is byte-for-byte the frozen contract.
 func (g *Gateway) registerTools(server *mcp.Server) {
 	addRoute[api.ComputerUseInput, api.ComputerUseOutput](server, g, api.ToolComputerUse,
 		"Drive the desktop: capture, accessibility, click, double_click, drag, scroll, type, key, wait, list_applications, focus_application.",
 		func(o *api.ComputerUseOutput) *api.ResultMeta { return &o.ResultMeta })
-	addRoute[api.TerminalInput, api.TerminalOutput](server, g, api.ToolTerminal,
-		"Run a single shell command to completion.",
-		func(o *api.TerminalOutput) *api.ResultMeta { return &o.ResultMeta })
-	addRoute[api.ProcessInput, api.ProcessOutput](server, g, api.ToolProcess,
-		"Start, poll, write to, or terminate a long-running background process.",
-		func(o *api.ProcessOutput) *api.ResultMeta { return &o.ResultMeta })
+	addRoute[api.BashInput, api.BashOutput](server, g, api.ToolBash,
+		api.BashToolDescription,
+		func(o *api.BashOutput) *api.ResultMeta { return &o.ResultMeta })
 	addRoute[api.ReadFileInput, api.ReadFileOutput](server, g, api.ToolReadFile,
 		"Read all or part of a file.",
 		func(o *api.ReadFileOutput) *api.ResultMeta { return &o.ResultMeta })
@@ -386,6 +394,12 @@ func route[Out any](ctx context.Context, g *Gateway, req *mcp.CallToolRequest, t
 	var out Out
 	start := g.now()
 	rid := newRequestID()
+
+	if d, bounded := g.callDeadline(tool); bounded {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d)
+		defer cancel()
+	}
 
 	cred, tokenID, ok := credentialOf(req)
 	if !ok {

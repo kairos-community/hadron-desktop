@@ -649,7 +649,14 @@ type capWriter struct {
 	truncated bool
 }
 
+// Write appends up to limit bytes. A limit of zero or less means UNBOUNDED,
+// which is what bash uses: the tool promises no output cap, and a zero here
+// would otherwise mean "capture nothing" -- a silent way to return empty output.
 func (w *capWriter) Write(p []byte) (int, error) {
+	if w.limit <= 0 {
+		w.buf = append(w.buf, p...)
+		return len(p), nil
+	}
 	if len(w.buf) < w.limit {
 		room := w.limit - len(w.buf)
 		if room >= len(p) {
@@ -745,23 +752,24 @@ func applyCgroupFD(attr *syscall.SysProcAttr, fd *os.File) {
 // timeout, capturing bounded and SEPARATE stdout/stderr. The child is a
 // process-group leader placed (when possible) in a cgroup leaf; whichever way
 // the command ends, teardown runs so backgrounded grandchildren are killed.
-func (m *Manager) Terminal(ctx context.Context, in api.TerminalInput) (api.TerminalOutput, error) {
+func (m *Manager) Bash(ctx context.Context, in api.BashInput) (api.BashOutput, error) {
 	if err := in.Validate(); err != nil {
-		return api.TerminalOutput{ResultMeta: failMeta(api.CodeInvalidArgument, err.Error(), false)}, nil
+		return api.BashOutput{ResultMeta: failMeta(api.CodeInvalidArgument, err.Error(), false)}, nil
 	}
-	timeout := clampTimeout(in.TimeoutMs, m.cfg.DefaultTimeout, m.cfg.MaxTimeout)
-	streamCap := clampCap(in.MaxOutputBytes, m.cfg.DefaultStreamCap, m.cfg.MaxStreamCap)
+	// No timeout and no output cap: bash runs to completion. A caller that wants
+	// a deadline writes `timeout N ...` into the script -- the only place that
+	// knows what the right deadline is.
 
 	id, idErr := m.cfg.NewID()
 	if idErr != nil {
-		return api.TerminalOutput{ResultMeta: failMeta(api.CodeInternal, "failed to generate process id", false)}, nil
+		return api.BashOutput{ResultMeta: failMeta(api.CodeInternal, "failed to generate process id", false)}, nil
 	}
 
 	// Create the cgroup leaf (if any) before spawning so the shell and every
 	// child it forks are born inside it.
 	leaf, cgFD, cerr := m.beginCgroup(id)
 	if cerr != nil {
-		return api.TerminalOutput{ResultMeta: failMeta(api.CodeInternal, "sandbox unavailable", false)}, nil
+		return api.BashOutput{ResultMeta: failMeta(api.CodeInternal, "sandbox unavailable", false)}, nil
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -775,15 +783,15 @@ func (m *Manager) Terminal(ctx context.Context, in api.TerminalInput) (api.Termi
 	// backgrounded grandchild holding stdout would hang the call until the
 	// timeout. With explicit *os.File ends, cmd.Wait returns when the shell
 	// exits; the reader goroutines are joined only after teardown.
-	outCap := &capWriter{limit: streamCap}
-	errCap := &capWriter{limit: streamCap}
+	outCap := &capWriter{} // zero limit == unbounded
+	errCap := &capWriter{}
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		if cgFD != nil {
 			_ = cgFD.Close()
 		}
 		_ = leaf.remove()
-		return api.TerminalOutput{ResultMeta: failMeta(api.CodeInternal, "failed to start command", false)}, nil
+		return api.BashOutput{ResultMeta: failMeta(api.CodeInternal, "failed to start command", false)}, nil
 	}
 	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
@@ -793,7 +801,7 @@ func (m *Manager) Terminal(ctx context.Context, in api.TerminalInput) (api.Termi
 			_ = cgFD.Close()
 		}
 		_ = leaf.remove()
-		return api.TerminalOutput{ResultMeta: failMeta(api.CodeInternal, "failed to start command", false)}, nil
+		return api.BashOutput{ResultMeta: failMeta(api.CodeInternal, "failed to start command", false)}, nil
 	}
 	cmd.Stdout = stdoutW
 	cmd.Stderr = stderrW
@@ -808,7 +816,7 @@ func (m *Manager) Terminal(ctx context.Context, in api.TerminalInput) (api.Termi
 		stderrR.Close()
 		stderrW.Close()
 		_ = leaf.remove()
-		return api.TerminalOutput{ResultMeta: failMeta(api.CodeInternal, "failed to start command", false)}, nil
+		return api.BashOutput{ResultMeta: failMeta(api.CodeInternal, "failed to start command", false)}, nil
 	}
 	// Close our copies of the child-side write ends so the read ends see EOF
 	// once every writer (the shell and any survivor) is gone.
@@ -833,13 +841,14 @@ func (m *Manager) Terminal(ctx context.Context, in api.TerminalInput) (api.Termi
 		close(t.done)
 	}()
 
-	timedOut := false
+	// Two ways out: the command finishes, or the CONTEXT is cancelled. There is
+	// no timer -- unbounded duration is the point. ctx still applies, so an
+	// emergency pause or a shutdown still cuts the call short.
+	cancelled := false
 	select {
 	case <-t.done:
-	case <-m.clock.After(timeout):
-		timedOut = true
 	case <-ctx.Done():
-		timedOut = true
+		cancelled = true
 	}
 
 	// Always tear down the tracked tree so grandchildren cannot survive.
@@ -856,19 +865,15 @@ func (m *Manager) Terminal(ctx context.Context, in api.TerminalInput) (api.Termi
 
 	// t.done is closed (reap waited for it), so waitErr is safely visible.
 	code, _ := exitCodeOf(waitErr)
-	out := api.TerminalOutput{
+	out := api.BashOutput{
 		Stdout:   outCap.String(),
 		Stderr:   errCap.String(),
 		ExitCode: code,
 	}
-	truncated := outCap.truncated || errCap.truncated
-	out.Truncated = truncated
-	switch {
-	case timedOut:
-		out.ResultMeta = failMeta(api.CodeDeadlineExceeded, "command exceeded its timeout", false)
-	case truncated:
-		out.ResultMeta = api.ResultMeta{Code: api.CodeOutputTruncated, Message: "output truncated at the size limit"}
-	default:
+	if cancelled {
+		out.ResultMeta = failMeta(api.CodeDeadlineExceeded,
+			"the call was cancelled before the command finished", false)
+	} else {
 		out.ResultMeta = okMeta()
 	}
 	return out, nil
@@ -877,25 +882,6 @@ func (m *Manager) Terminal(ctx context.Context, in api.TerminalInput) (api.Termi
 // ---------------------------------------------------------------------------
 // process
 // ---------------------------------------------------------------------------
-
-// Process dispatches a process tool call on its action.
-func (m *Manager) Process(ctx context.Context, in api.ProcessInput) (api.ProcessOutput, error) {
-	if err := in.Validate(); err != nil {
-		return api.ProcessOutput{ResultMeta: failMeta(api.CodeInvalidArgument, err.Error(), false)}, nil
-	}
-	switch in.Action {
-	case api.ProcessStart:
-		return m.processStart(in)
-	case api.ProcessPoll:
-		return m.processPoll(ctx, in)
-	case api.ProcessWrite:
-		return m.processWrite(in)
-	case api.ProcessTerminate:
-		return m.processTerminate(in)
-	default:
-		return api.ProcessOutput{ResultMeta: failMeta(api.CodeInvalidArgument, "unknown action", false)}, nil
-	}
-}
 
 func (m *Manager) lookup(id string) *procHandle {
 	m.mu.Lock()
@@ -911,67 +897,6 @@ func (m *Manager) releaseLive() {
 	m.mu.Unlock()
 }
 
-// processStart spawns and tracks a long-running process.
-func (m *Manager) processStart(in api.ProcessInput) (api.ProcessOutput, error) {
-	// Reserve a live slot atomically so the 16-process cap holds under
-	// concurrent starts.
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return api.ProcessOutput{ResultMeta: failMeta(api.CodeInternal, "manager is closed", false)}, nil
-	}
-	if m.live >= m.cfg.MaxLive {
-		m.mu.Unlock()
-		return api.ProcessOutput{ResultMeta: failMeta(api.CodeResourceExhausted, "too many live processes", true)}, nil
-	}
-	m.live++
-	m.mu.Unlock()
-
-	id, idErr := m.cfg.NewID()
-	if idErr != nil {
-		m.releaseLive()
-		return api.ProcessOutput{ResultMeta: failMeta(api.CodeInternal, "failed to generate process id", false)}, nil
-	}
-
-	// Create the leaf before spawning so the child is born inside it.
-	leaf, cgFD, cerr := m.beginCgroup(id)
-	if cerr != nil {
-		m.releaseLive()
-		return api.ProcessOutput{ResultMeta: failMeta(api.CodeInternal, "sandbox unavailable", false)}, nil
-	}
-
-	cmd := buildCommand(context.Background(), in.Command, in.Args, in.Env, in.Cwd)
-	h := &procHandle{id: id, cmd: cmd, pty: in.PTY, notify: make(chan struct{}, 1)}
-
-	if err := m.startChild(h, in.PTY, cgFD); err != nil {
-		if cgFD != nil {
-			_ = cgFD.Close()
-		}
-		_ = leaf.remove()
-		m.releaseLive()
-		return api.ProcessOutput{ResultMeta: failMeta(api.CodeInternal, "failed to start process", false)}, nil
-	}
-	if cgFD != nil {
-		_ = cgFD.Close()
-	}
-	pid := cmd.Process.Pid
-	if cgFD == nil && leaf != nil {
-		_ = leaf.placeExisting(pid)
-	}
-
-	h.tracked = &tracked{pgid: pid, leaf: leaf, done: make(chan struct{}), forceClose: h.forceCloseIO}
-	go m.waitChild(h)
-
-	m.mu.Lock()
-	m.procs[id] = h
-	m.mu.Unlock()
-
-	return api.ProcessOutput{ResultMeta: okMeta(), ProcessID: id, Running: true}, nil
-}
-
-// startChild wires up stdio and starts the process, placing it in its process
-// group and (when cgFD is non-nil) in its cgroup leaf at birth. On return the
-// process is running, or an error is returned and nothing leaks.
 func (m *Manager) startChild(h *procHandle, usePTY bool, cgFD *os.File) error {
 	if usePTY {
 		h.cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
@@ -1039,115 +964,3 @@ func (m *Manager) startChild(h *procHandle, usePTY bool, cgFD *os.File) error {
 
 // waitChild joins the reader goroutines, reaps the process, records its exit
 // status, wakes any blocked poll, and signals teardown that the process is
-// gone.
-func (m *Manager) waitChild(h *procHandle) {
-	h.readersWG.Wait() // readers see EOF only after the child has exited
-	err := h.cmd.Wait()
-	code, _ := exitCodeOf(err)
-	h.mu.Lock()
-	h.exited = true
-	h.exitCode = &code
-	h.mu.Unlock()
-	m.releaseLive()
-	h.signalOutput()
-	// The subtree is gone; drop the now-empty leaf. A later terminate/Close
-	// funnels through reap, whose leaf.kill/remove are idempotent no-ops on an
-	// already-removed leaf.
-	_ = h.tracked.leaf.remove()
-	close(h.tracked.done)
-}
-
-// processPoll returns output produced since the previous poll and the current
-// run/exit state, optionally blocking up to timeout_ms for new output.
-func (m *Manager) processPoll(ctx context.Context, in api.ProcessInput) (api.ProcessOutput, error) {
-	h := m.lookup(in.ProcessID)
-	if h == nil {
-		return api.ProcessOutput{ResultMeta: failMeta(api.CodeNotFound, "unknown process id", false)}, nil
-	}
-	timeout := clampTimeout(in.TimeoutMs, 0, m.cfg.MaxTimeout)
-	var timer <-chan time.Time
-	if timeout > 0 {
-		timer = m.clock.After(timeout)
-	}
-
-	timedOut := false
-	for {
-		h.mu.Lock()
-		outData, outNext, outLost := h.stdout.readFrom(h.outCursor)
-		h.outCursor = outNext
-		var errData []byte
-		var errLost bool
-		if h.stderr != nil {
-			errData, h.errCursor, errLost = h.stderr.readFrom(h.errCursor)
-		}
-		exited := h.exited
-		var code *int
-		if h.exitCode != nil {
-			c := *h.exitCode
-			code = &c
-		}
-		h.mu.Unlock()
-
-		if len(outData) > 0 || len(errData) > 0 || exited || timeout == 0 || timedOut {
-			out := api.ProcessOutput{
-				ProcessID: h.id,
-				Running:   !exited,
-				ExitCode:  code,
-				Stdout:    string(outData),
-				Stderr:    string(errData),
-			}
-			if outLost || errLost {
-				out.Truncated = true
-				out.ResultMeta = api.ResultMeta{Code: api.CodeOutputTruncated, Message: "output buffer overran; some bytes were dropped"}
-			} else {
-				out.ResultMeta = okMeta()
-			}
-			return out, nil
-		}
-
-		select {
-		case <-h.notify:
-		case <-timer:
-			timedOut = true
-		case <-ctx.Done():
-			timedOut = true
-		}
-	}
-}
-
-// processWrite sends bytes to the process's stdin.
-func (m *Manager) processWrite(in api.ProcessInput) (api.ProcessOutput, error) {
-	h := m.lookup(in.ProcessID)
-	if h == nil {
-		return api.ProcessOutput{ResultMeta: failMeta(api.CodeNotFound, "unknown process id", false)}, nil
-	}
-	if exited, _ := h.snapshotExit(); exited {
-		return api.ProcessOutput{ProcessID: h.id, Running: false, ResultMeta: failMeta(api.CodeInvalidArgument, "cannot write to an exited process", false)}, nil
-	}
-	if h.stdin == nil {
-		return api.ProcessOutput{ProcessID: h.id, Running: true, ResultMeta: failMeta(api.CodeInternal, "process has no stdin", false)}, nil
-	}
-	if _, err := io.WriteString(h.stdin, in.Input); err != nil {
-		return api.ProcessOutput{ProcessID: h.id, Running: true, ResultMeta: failMeta(api.CodeInternal, "failed to write to process", true)}, nil
-	}
-	return api.ProcessOutput{ProcessID: h.id, Running: true, ResultMeta: okMeta()}, nil
-}
-
-// processTerminate tears the process (and its subtree) down and returns its
-// final state.
-func (m *Manager) processTerminate(in api.ProcessInput) (api.ProcessOutput, error) {
-	h := m.lookup(in.ProcessID)
-	if h == nil {
-		return api.ProcessOutput{ResultMeta: failMeta(api.CodeNotFound, "unknown process id", false)}, nil
-	}
-	m.reap(h.tracked, resolveSignal(in.Signal))
-	h.readersWG.Wait()
-	h.closeIO()
-	exited, code := h.snapshotExit()
-	return api.ProcessOutput{
-		ProcessID:  h.id,
-		Running:    !exited,
-		ExitCode:   code,
-		ResultMeta: okMeta(),
-	}, nil
-}

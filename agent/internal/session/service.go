@@ -1,6 +1,6 @@
 // Package session implements the UNPRIVILEGED session broker: the component
 // that composes the four Phase-2 executors (files, process, the Cua adapter,
-// and a control/pause state) into one object that serves the eight public MCP
+// and a control/pause state) into one object that serves the seven public MCP
 // tools defined by package api, under the identity of the process it runs in.
 //
 // It owns four cross-cutting behaviors the individual executors do not:
@@ -67,11 +67,10 @@ type FileService interface {
 	Patch(ctx context.Context, in api.PatchInput) api.PatchOutput
 }
 
-// ProcessManager is the broker's view of the process/terminal executor.
+// ProcessManager is the broker's view of the shell executor.
 // *process.Manager satisfies it.
 type ProcessManager interface {
-	Terminal(ctx context.Context, in api.TerminalInput) (api.TerminalOutput, error)
-	Process(ctx context.Context, in api.ProcessInput) (api.ProcessOutput, error)
+	Bash(ctx context.Context, in api.BashInput) (api.BashOutput, error)
 	// Close terminates every tracked process group; used on broker shutdown.
 	Close() error
 }
@@ -159,11 +158,10 @@ type Broker struct {
 	base       context.Context
 	baseCancel context.CancelFunc
 
-	mu      sync.Mutex // guards everything below
-	paused  bool
-	closed  bool
-	gen     *generation
-	procIDs map[string]struct{} // long-running processes started via this broker
+	mu     sync.Mutex // guards everything below
+	paused bool
+	closed bool
+	gen    *generation
 }
 
 // New builds a Broker from cfg.
@@ -184,7 +182,6 @@ func New(cfg Config) *Broker {
 		base:       base,
 		baseCancel: baseCancel,
 		gen:        newGeneration(base),
-		procIDs:    make(map[string]struct{}),
 	}
 }
 
@@ -221,21 +218,11 @@ func (b *Broker) Pause(_ context.Context) error {
 	}
 	b.paused = true
 	b.gen.cancel() // cancels every in-flight call's execution context
-	ids := make([]string, 0, len(b.procIDs))
-	for id := range b.procIDs {
-		ids = append(ids, id)
-	}
 	b.mu.Unlock()
 
-	// Terminate long-running process groups. One-shot terminal calls are torn
-	// down by the generation cancellation above (their own teardown reaps the
-	// group); only detached, tracked processes need an explicit terminate.
-	for _, id := range ids {
-		_, _ = b.process.Process(context.Background(), api.ProcessInput{
-			Action:    api.ProcessTerminate,
-			ProcessID: id,
-		})
-	}
+	// Nothing else to terminate: without the process tool every call is a
+	// one-shot bash invocation whose process group the generation cancellation
+	// above already reaps. There are no detached, tracked processes left.
 	return nil
 }
 
@@ -433,29 +420,16 @@ func (b *Broker) Browser(ctx context.Context, in api.BrowserInput) (api.BrowserO
 		}), nil
 }
 
-// Terminal serves the terminal tool.
-func (b *Broker) Terminal(ctx context.Context, in api.TerminalInput) (api.TerminalOutput, error) {
+// Bash serves the bash tool.
+func (b *Broker) Bash(ctx context.Context, in api.BashInput) (api.BashOutput, error) {
 	return guard(b, ctx, true,
-		func(o *api.TerminalOutput) *api.ResultMeta { return &o.ResultMeta },
-		func(mctx context.Context) api.TerminalOutput {
-			out, _ := b.process.Terminal(mctx, in)
+		func(o *api.BashOutput) *api.ResultMeta { return &o.ResultMeta },
+		func(mctx context.Context) api.BashOutput {
+			out, _ := b.process.Bash(mctx, in)
 			return out
 		}), nil
 }
 
-// Process serves the process tool, tracking the ids of long-running processes
-// it starts so a later pause can terminate their groups.
-func (b *Broker) Process(ctx context.Context, in api.ProcessInput) (api.ProcessOutput, error) {
-	return guard(b, ctx, true,
-		func(o *api.ProcessOutput) *api.ResultMeta { return &o.ResultMeta },
-		func(mctx context.Context) api.ProcessOutput {
-			out, _ := b.process.Process(mctx, in)
-			b.trackProcess(in, out)
-			return out
-		}), nil
-}
-
-// ReadFile serves the read_file tool.
 func (b *Broker) ReadFile(ctx context.Context, in api.ReadFileInput) (api.ReadFileOutput, error) {
 	return guard(b, ctx, true,
 		func(o *api.ReadFileOutput) *api.ResultMeta { return &o.ResultMeta },
@@ -491,39 +465,6 @@ func (b *Broker) Patch(ctx context.Context, in api.PatchInput) (api.PatchOutput,
 		}), nil
 }
 
-// trackProcess records or forgets a long-running process id as start/terminate
-// calls succeed. A process that starts while (or exactly as) the broker pauses
-// is terminated immediately so it cannot outlive the pause: because both this
-// check and Pause's snapshot run under b.mu, a new process is either captured
-// by Pause's snapshot or sees paused==true here and self-terminates.
-func (b *Broker) trackProcess(in api.ProcessInput, out api.ProcessOutput) {
-	if in.Action == api.ProcessStart {
-		if out.ResultMeta.Code != "" || out.ProcessID == "" {
-			return
-		}
-		b.mu.Lock()
-		paused := b.paused || b.closed
-		if !paused {
-			b.procIDs[out.ProcessID] = struct{}{}
-		}
-		b.mu.Unlock()
-		if paused {
-			_, _ = b.process.Process(context.Background(), api.ProcessInput{
-				Action:    api.ProcessTerminate,
-				ProcessID: out.ProcessID,
-			})
-		}
-		return
-	}
-	// For poll/write/terminate: once a process is observed exited (or gone),
-	// forget it so the tracked set stays bounded to still-live processes.
-	if out.ProcessID != "" && !out.Running {
-		b.mu.Lock()
-		delete(b.procIDs, out.ProcessID)
-		b.mu.Unlock()
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Call dispatch (fits rpc.Handler.Call: tool name + raw JSON args -> result)
 // ---------------------------------------------------------------------------
@@ -540,14 +481,9 @@ func (b *Broker) Call(ctx context.Context, tool string, args json.RawMessage) (*
 			out, _ := b.ComputerUse(ctx, in)
 			return out
 		})
-	case api.ToolTerminal:
-		return dispatchCall(args, func(in api.TerminalInput) any {
-			out, _ := b.Terminal(ctx, in)
-			return out
-		})
-	case api.ToolProcess:
-		return dispatchCall(args, func(in api.ProcessInput) any {
-			out, _ := b.Process(ctx, in)
+	case api.ToolBash:
+		return dispatchCall(args, func(in api.BashInput) any {
+			out, _ := b.Bash(ctx, in)
 			return out
 		})
 	case api.ToolReadFile:

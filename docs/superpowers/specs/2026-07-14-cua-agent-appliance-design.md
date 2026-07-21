@@ -40,9 +40,9 @@ The design was checked against:
    session on the real seat.
 3. Expose a standard MCP Streamable HTTP endpoint on a private/LAN interface,
    protected by HTTPS and bearer-token authentication.
-4. Expose exactly eight public tools:
-   `computer_use`, `terminal`, `process`, `read_file`, `search_files`,
-   `write_file`, `patch`, and `browser`. (`browser` was added by the
+4. Expose exactly seven public tools:
+   `computer_use`, `bash`, `read_file`, `search_files`, `write_file`,
+   `patch`, and `browser`. (`browser` was added by the
    2026-07-20 amendment; see `specs/2026-07-20-browser-tool-amendment.md`.)
 5. Execute normal shell and filesystem operations as the same unprivileged
    `agent` user that owns the desktop session.
@@ -139,7 +139,7 @@ launcher imports `DISPLAY`, `XAUTHORITY`, and `DBUS_SESSION_BUS_ADDRESS` into
 the user manager and starts or refreshes the broker. The broker then spawns Cua
 Driver over stdio and owns that child connection.
 
-The broker implements the eight public tool semantics for the ordinary bearer:
+The broker implements the seven public tool semantics for the ordinary bearer:
 
 - `computer_use` maps the unified Hadron action schema to the smaller set of
   Cua Driver calls needed for capture, accessibility, application focus, and
@@ -239,15 +239,14 @@ The gateway advertises exactly these tools:
 | Tool | Contract |
 |---|---|
 | `computer_use` | Unified capture, accessibility/SOM, click, drag, scroll, type, key, wait, list-applications, and focus-application actions. |
-| `terminal` | Execute a bounded shell command and return stdout, stderr, exit status, duration, and truncation metadata. |
-| `process` | Start, inspect, write to, poll, and terminate a long-running or interactive process. |
+| `bash` | Execute a shell script to completion. No timeout and no output cap; write your own `timeout` into the script if you need one. |
 | `read_file` | Read file content or metadata with explicit offset and size limits. |
 | `search_files` | Search file names or contents below a supplied path with bounded results. |
 | `write_file` | Create or replace file content. |
 | `patch` | Apply a structured patch to one or more existing files. |
 | `browser` | Drive web content by ref from the page's own accessibility information: navigate, snapshot, click, type, press, scroll, back, text. |
 
-The same eight names are visible for both credential classes. Credential scope
+The same seven names are visible for both credential classes. Credential scope
 determines the OS identity used for terminal, process, and filesystem tools.
 `computer_use` and `browser` are the exceptions: both always execute in the
 unprivileged session broker, so an administrator bearer never obtains a
@@ -450,7 +449,7 @@ or silently reduce the accepted tool contract.
 
 Contract tests verify:
 
-- The server advertises exactly eight tools and stable schemas, with every
+- The server advertises exactly seven tools and stable schemas, with every
   closed value set published as a JSON Schema enum.
 - Missing and invalid bearers are rejected.
 - The ordinary bearer runs all OS operations as `agent`.
@@ -468,7 +467,7 @@ Contract tests verify:
 
 A clean QEMU disk plus provisioning seed must install without interaction,
 reboot from disk, auto-login to the visible XLibre/i3 session, become ready on
-the forwarded MCP port, execute all eight tools, and retain configuration after
+the forwarded MCP port, execute all seven tools, and retain configuration after
 another reboot.
 
 The generic ISO is separately booted without a seed to prove that it does not
@@ -530,7 +529,7 @@ The feature is complete when all of the following are true:
    foreground session automatically.
 3. QEMU VNC/noVNC and Cua observe and control the same session.
 4. A client can connect to the documented HTTPS MCP URL with an ordinary bearer
-   and use exactly the eight approved tools.
+   and use exactly the seven approved tools.
 5. Ordinary operations run as a non-admin, non-Docker `agent` user.
 6. Privileged operations are unavailable unless a separate administrator
    credential is provisioned and independently validated by the root helper.

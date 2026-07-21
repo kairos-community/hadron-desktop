@@ -1,5 +1,5 @@
 // Package api freezes the public MCP contract exposed by the hadron-agent
-// service binary: the eight authenticated tool names, their typed
+// service binary: the seven authenticated tool names, their typed
 // input/output schemas (inferred by the MCP SDK from the Go types below),
 // and the stable error codes every tool result may carry.
 //
@@ -18,13 +18,12 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Tool names. The sorted set of these eight values is the entire public
+// Tool names. The sorted set of these seven values is the entire public
 // surface of hadron-agent; no eighth tool may be added without a deliberate,
 // reviewed contract change.
 const (
 	ToolComputerUse = "computer_use"
-	ToolTerminal    = "terminal"
-	ToolProcess     = "process"
+	ToolBash        = "bash"
 	ToolReadFile    = "read_file"
 	ToolSearchFiles = "search_files"
 	ToolWriteFile   = "write_file"
@@ -32,12 +31,11 @@ const (
 	ToolBrowser     = "browser"
 )
 
-// ToolNames returns the sorted list of the eight public tool names.
+// ToolNames returns the sorted list of the seven public tool names.
 func ToolNames() []string {
 	names := []string{
 		ToolComputerUse,
-		ToolTerminal,
-		ToolProcess,
+		ToolBash,
 		ToolReadFile,
 		ToolSearchFiles,
 		ToolWriteFile,
@@ -533,111 +531,42 @@ type ComputerUseOutput struct {
 }
 
 // ---------------------------------------------------------------------------
-// terminal
+// bash
 // ---------------------------------------------------------------------------
 
-// TerminalInput runs a single command to completion (subject to timeout and
-// output limits).
-type TerminalInput struct {
-	Command        string   `json:"command" jsonschema:"shell command line to execute"`
-	Cwd            string   `json:"cwd,omitempty" jsonschema:"working directory"`
-	Env            []string `json:"env,omitempty" jsonschema:"additional KEY=VALUE environment entries"`
-	TimeoutMs      *int     `json:"timeout_ms,omitempty" jsonschema:"maximum time to wait, in milliseconds"`
-	MaxOutputBytes *int     `json:"max_output_bytes,omitempty" jsonschema:"maximum combined stdout+stderr bytes to return"`
+// BashInput runs a shell script to completion.
+//
+// There is deliberately no timeout and no output limit. The appliance exists to
+// let a remote agent do real work -- installing packages, building things,
+// waiting on a download -- and every bound this tool could impose is a bound
+// the agent cannot lift when it turns out to be wrong. A caller that wants a
+// deadline can write one into the script (`timeout 60 ...`), which is the only
+// place that knows what the right deadline is.
+//
+// The command runs under `/bin/sh -lc`, so it is a SCRIPT, not an argv: pipes,
+// redirections, `&&`, loops and here-documents all work, and multi-line input is
+// expected rather than tolerated.
+type BashInput struct {
+	Command string   `json:"command" jsonschema:"shell script to execute; may be multiple lines"`
+	Cwd     string   `json:"cwd,omitempty" jsonschema:"working directory"`
+	Env     []string `json:"env,omitempty" jsonschema:"additional KEY=VALUE environment entries"`
 }
 
-// Validate checks TerminalInput's required fields.
-func (in TerminalInput) Validate() error {
+// Validate checks BashInput's required fields.
+func (in BashInput) Validate() error {
 	if in.Command == "" {
 		return fmt.Errorf("command is required")
 	}
 	return nil
 }
 
-// TerminalOutput is the result of a terminal call.
-type TerminalOutput struct {
+// BashOutput is the result of a bash call.
+type BashOutput struct {
 	ResultMeta
 
-	Stdout    string `json:"stdout,omitempty"`
-	Stderr    string `json:"stderr,omitempty"`
-	ExitCode  int    `json:"exit_code,omitempty"`
-	Truncated bool   `json:"truncated,omitempty"`
-}
-
-// ---------------------------------------------------------------------------
-// process
-// ---------------------------------------------------------------------------
-
-// ProcessAction selects the operation the process tool performs.
-type ProcessAction string
-
-const (
-	ProcessStart     ProcessAction = "start"
-	ProcessPoll      ProcessAction = "poll"
-	ProcessWrite     ProcessAction = "write"
-	ProcessTerminate ProcessAction = "terminate"
-)
-
-var validProcessActions = validSet(ProcessActions)
-
-// ProcessInput manages a long-running background process. ProcessID
-// identifies an existing process for poll/write/terminate; it is assigned by
-// the server on start and must be echoed back by the caller.
-type ProcessInput struct {
-	Action    ProcessAction `json:"action" jsonschema:"start, poll, write, or terminate"`
-	ProcessID string        `json:"process_id,omitempty" jsonschema:"server-assigned handle of an existing process"`
-
-	// Command, Args, Cwd, Env, and PTY configure a start action.
-	Command string   `json:"command,omitempty" jsonschema:"executable to run"`
-	Args    []string `json:"args,omitempty" jsonschema:"arguments to the executable"`
-	Cwd     string   `json:"cwd,omitempty" jsonschema:"working directory"`
-	Env     []string `json:"env,omitempty" jsonschema:"additional KEY=VALUE environment entries"`
-	PTY     bool     `json:"pty,omitempty" jsonschema:"allocate a pseudo-terminal for the process"`
-
-	// Input carries the bytes a write action sends to the process's stdin.
-	Input string `json:"input,omitempty" jsonschema:"data to write to the process's stdin"`
-
-	// TimeoutMs bounds how long a poll waits for new output.
-	TimeoutMs *int `json:"timeout_ms,omitempty" jsonschema:"maximum time to wait, in milliseconds"`
-	// Signal names the signal a terminate action sends (default SIGTERM).
-	Signal string `json:"signal,omitempty" jsonschema:"signal to send on terminate, e.g. SIGTERM, SIGKILL"`
-}
-
-// Validate checks that ProcessInput carries the fields its Action requires.
-func (in ProcessInput) Validate() error {
-	if !validProcessActions[in.Action] {
-		return fmt.Errorf("unknown action %q", in.Action)
-	}
-	switch in.Action {
-	case ProcessStart:
-		if in.Command == "" {
-			return fmt.Errorf("action %q requires command", in.Action)
-		}
-		if in.ProcessID != "" {
-			return fmt.Errorf("action %q does not accept process_id", in.Action)
-		}
-	case ProcessPoll, ProcessWrite, ProcessTerminate:
-		if in.ProcessID == "" {
-			return fmt.Errorf("action %q requires process_id", in.Action)
-		}
-		if in.Action == ProcessWrite && in.Input == "" {
-			return fmt.Errorf("action %q requires input", in.Action)
-		}
-	}
-	return nil
-}
-
-// ProcessOutput is the result of a process call.
-type ProcessOutput struct {
-	ResultMeta
-
-	ProcessID string `json:"process_id,omitempty"`
-	PID       int    `json:"pid,omitempty"`
-	Running   bool   `json:"running,omitempty"`
-	ExitCode  *int   `json:"exit_code,omitempty"`
-	Stdout    string `json:"stdout,omitempty"`
-	Stderr    string `json:"stderr,omitempty"`
-	Truncated bool   `json:"truncated,omitempty"`
+	Stdout   string `json:"stdout,omitempty"`
+	Stderr   string `json:"stderr,omitempty"`
+	ExitCode int    `json:"exit_code,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -828,20 +757,18 @@ type PatchOutput struct {
 // Registration
 // ---------------------------------------------------------------------------
 
-// RegisterAll registers all eight public tools on s. Each tool's input schema
+// RegisterAll registers all seven public tools on s. Each tool's input schema
 // comes from ToolFor, which infers it from the Go types above and then
 // publishes their closed value sets as JSON Schema enums; output schemas are
 // still inferred by the SDK. Every
 // handler here is a stub: it validates its input where this package defines
 // a Validate method, and otherwise reports CodeInternal "not implemented".
 // Later Phase-2 tasks replace these stubs with real behavior; this function
-// exists so the eight-tool contract is registrable and testable today.
+// exists so the seven-tool contract is registrable and testable today.
 func RegisterAll(s *mcp.Server) {
 	mcp.AddTool(s, ToolFor[ComputerUseInput](ToolComputerUse, "Drive the desktop: capture, accessibility, click, double_click, drag, scroll, type, key, wait, list_applications, focus_application."), stubComputerUse)
 
-	mcp.AddTool(s, ToolFor[TerminalInput](ToolTerminal, "Run a single shell command to completion."), stubTerminal)
-
-	mcp.AddTool(s, ToolFor[ProcessInput](ToolProcess, "Start, poll, write to, or terminate a long-running background process."), stubProcess)
+	mcp.AddTool(s, ToolFor[BashInput](ToolBash, BashToolDescription), stubBash)
 
 	mcp.AddTool(s, ToolFor[ReadFileInput](ToolReadFile, "Read all or part of a file."), stubReadFile)
 
@@ -861,18 +788,11 @@ func stubComputerUse(_ context.Context, _ *mcp.CallToolRequest, in ComputerUseIn
 	return nil, ComputerUseOutput{ResultMeta: notImplementedMeta(ToolComputerUse)}, nil
 }
 
-func stubTerminal(_ context.Context, _ *mcp.CallToolRequest, in TerminalInput) (*mcp.CallToolResult, TerminalOutput, error) {
+func stubBash(_ context.Context, _ *mcp.CallToolRequest, in BashInput) (*mcp.CallToolResult, BashOutput, error) {
 	if err := in.Validate(); err != nil {
-		return nil, TerminalOutput{ResultMeta: errorMeta(CodeInvalidArgument, err.Error(), false)}, nil
+		return nil, BashOutput{ResultMeta: errorMeta(CodeInvalidArgument, err.Error(), false)}, nil
 	}
-	return nil, TerminalOutput{ResultMeta: notImplementedMeta(ToolTerminal)}, nil
-}
-
-func stubProcess(_ context.Context, _ *mcp.CallToolRequest, in ProcessInput) (*mcp.CallToolResult, ProcessOutput, error) {
-	if err := in.Validate(); err != nil {
-		return nil, ProcessOutput{ResultMeta: errorMeta(CodeInvalidArgument, err.Error(), false)}, nil
-	}
-	return nil, ProcessOutput{ResultMeta: notImplementedMeta(ToolProcess)}, nil
+	return nil, BashOutput{ResultMeta: notImplementedMeta(ToolBash)}, nil
 }
 
 func stubReadFile(_ context.Context, _ *mcp.CallToolRequest, in ReadFileInput) (*mcp.CallToolResult, ReadFileOutput, error) {
