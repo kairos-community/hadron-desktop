@@ -137,6 +137,61 @@ func (s *Suite) RunPersistVerify(ctx context.Context, marker string) Report {
 	} else {
 		r.Checks = append(r.Checks, pass("persist_agent_locked", "the agent account remains locked after reboot"))
 	}
+
+	// The whole point of the appliance is remote control of the desktop and the
+	// browser. Proving that files and identities survived a reboot says nothing
+	// about whether it can still DO anything, and the two capabilities are
+	// exactly what a reboot was most likely to break: the desktop session has to
+	// come back on the real seat, and the computer-use backend has to start
+	// again underneath it.
+	//
+	// Both are retried while the lazily-started backend comes up, because the
+	// appliance advertises SESSION_UNAVAILABLE as retryable and a gate should
+	// not assert a stricter contract than the one it is testing.
+	var cu api.ComputerUseOutput
+	cuMeta := s.retryWhileUnavailable(ctx, func() api.ResultMeta {
+		cu = api.ComputerUseOutput{}
+		if err := s.callInto(ctx, userSess, api.ToolComputerUse,
+			api.ComputerUseInput{Action: api.ActionCapture}, &cu); err != nil {
+			return api.ResultMeta{Code: api.CodeInternal, Message: err.Error()}
+		}
+		return cu.ResultMeta
+	})
+	switch {
+	case cuMeta.Code != "":
+		r.Checks = append(r.Checks, failAssert("persist_computer_use",
+			fmt.Sprintf("computer_use reported %s after reboot", cuMeta.Code)))
+	case cu.ImageBase64 == "":
+		r.Checks = append(r.Checks, failAssert("persist_computer_use",
+			"computer_use returned no image after reboot"))
+	default:
+		r.Checks = append(r.Checks, pass("persist_computer_use",
+			fmt.Sprintf("the desktop is controllable after reboot (%d-byte capture)", len(cu.ImageBase64))))
+	}
+
+	var br api.BrowserOutput
+	brMeta := s.retryWhileUnavailable(ctx, func() api.ResultMeta {
+		br = api.BrowserOutput{}
+		if err := s.callInto(ctx, userSess, api.ToolBrowser,
+			api.BrowserInput{Action: api.BrowserSnapshot}, &br); err != nil {
+			return api.ResultMeta{Code: api.CodeInternal, Message: err.Error()}
+		}
+		return br.ResultMeta
+	})
+	switch brMeta.Code {
+	case "":
+		r.Checks = append(r.Checks, pass("persist_browser",
+			fmt.Sprintf("the browser tool is usable after reboot (%d elements from %s)", len(br.Elements), br.URL)))
+	case api.CodeBrowserUnavailable:
+		// No browser is running on a freshly rebooted appliance, and starting
+		// one is not this check's job. Reaching the resolve path proves the tool
+		// is wired end to end after the reboot, which is what is being asserted.
+		r.Checks = append(r.Checks, pass("persist_browser",
+			"the browser tool is reachable after reboot and reports no browser window open"))
+	default:
+		r.Checks = append(r.Checks, failAssert("persist_browser",
+			fmt.Sprintf("browser reported %s after reboot", brMeta.Code)))
+	}
 	return r
 }
 
