@@ -52,12 +52,20 @@ import (
 // reached the application, not merely that computer_use returned success.
 const gtkStatePath = "/run/user/1000/hadron-cua-gtk-state.json"
 
-// Window titles the fixtures set. list_applications is matched against these
-// rather than against a process name because the same binary name could be
-// running twice; the title is what a human (and the model) actually sees.
+// Application names list_applications reports for the two fixtures.
+//
+// These are NOT the window titles. list_applications groups windows by the
+// application name Cua derives from WM_CLASS, so matching a page or window
+// title against it never succeeds: Chromium reports "Chromium" whatever the
+// document is called, and the GTK fixture reports the program name GTK turns
+// into its WM_CLASS. Verified on a live appliance, where the fixture appears as
+// {"name": "Hadron-cua-gtk"} -- GTK capitalises the first letter of prgname.
+//
+// The match is a case-insensitive substring so the capitalisation GTK applies,
+// and any suffix Chromium appends, cannot break it.
 const (
-	gtkWindowTitle      = "Hadron Cua GTK Fixture"
-	chromiumWindowTitle = "Hadron Cua Chromium Fixture"
+	gtkWindowTitle      = "hadron-cua-gtk"
+	chromiumWindowTitle = "chromium"
 )
 
 // Accessible names both fixtures pin on their controls. They are identical
@@ -648,10 +656,11 @@ func (s *Suite) chromiumGesture(
 // Tool helpers
 // ---------------------------------------------------------------------------
 
-// locateApp finds a running application whose reported name contains title.
-// Chromium appends its serialized state to the document title, so the match is
-// a substring rather than an equality test; the fixture titles are distinctive
-// enough that a substring cannot collide with an unrelated window.
+// locateApp finds a running application whose reported name contains name.
+// The comparison is a case-insensitive substring: Cua reports the application
+// name from WM_CLASS, GTK capitalises what it derives from prgname, and
+// Chromium may append to its own. The fixture names are distinctive enough that
+// a substring cannot collide with an unrelated window.
 func (s *Suite) locateApp(ctx context.Context, sess *mcp.ClientSession, title string) (api.ApplicationInfo, *terminalFail) {
 	var out api.ComputerUseOutput
 	if err := s.callInto(ctx, sess, api.ToolComputerUse, api.ComputerUseInput{
@@ -663,12 +672,12 @@ func (s *Suite) locateApp(ctx context.Context, sess *mcp.ClientSession, title st
 		return api.ApplicationInfo{}, &terminalFail{detail: fmt.Sprintf("list_applications reported %s", out.Code)}
 	}
 	for _, app := range out.Applications {
-		if strings.Contains(app.Name, title) {
+		if strings.Contains(strings.ToLower(app.Name), strings.ToLower(title)) {
 			return app, nil
 		}
 	}
 	return api.ApplicationInfo{}, &terminalFail{detail: fmt.Sprintf(
-		"no window titled %q among the %d listed applications; the fixture is not running",
+		"no application named %q among the %d listed applications; the fixture is not running",
 		title, len(out.Applications))}
 }
 

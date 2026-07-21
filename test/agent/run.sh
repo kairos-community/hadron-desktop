@@ -1485,10 +1485,20 @@ cmd_ui() {
   # 5. Launch the GTK fixture on the REAL seat. DISPLAY/XAUTHORITY come from
   #    the session the broker already lives in, so this lands on the visible
   #    desktop rather than on a hidden server.
-  finfo "Launching the GTK fixture"
-  _ui_exec "$smoke" "$descriptor" "$admin_token" user \
-    'nohup /home/agent/e2e/bin/hadron-cua-gtk >/home/agent/e2e/gtk.log 2>&1 & sleep 3; echo started' \
-    >/dev/null 2>&1 || true
+  # A GUI fixture must be held open by its own call. bash tears its cgroup leaf
+  # down when the call RETURNS -- that is the containment guarantee the
+  # emergency pause depends on -- so `nohup app &` is killed the moment the
+  # launch call finishes. Verified on a live appliance: backgrounded, the window
+  # never appears; run in the foreground it stays up and list_applications shows
+  # it. So the launcher runs in the FOREGROUND and the call is backgrounded on
+  # the HOST side, where its lifetime is the fixture's lifetime.
+  finfo "Launching the GTK fixture (held open by its own call)"
+  setsid "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
+    --mode exec --call-timeout "${UI_FIXTURE_LIFETIME:-30m}" \
+    --command 'cd /home/agent/e2e && exec ./bin/hadron-cua-gtk' \
+    </dev/null >"$art/gtk-launch.log" 2>&1 &
+  hdn_agent_track_pid $! 2>/dev/null || true
+  sleep 8
 
   # 5. Chromium at the pinned commit. The commit is asserted, not assumed: a
   #    Flathub update between runs would otherwise silently change what the
@@ -1524,15 +1534,18 @@ cmd_ui() {
   fi
   finfo "Chromium commit verified: ${got_commit:0:12}"
 
-  finfo "Launching Chromium on the fixture page"
-  _ui_exec "$smoke" "$descriptor" "$admin_token" user \
-    'nohup flatpak run --socket=x11 --socket=session-bus \
+  finfo "Launching Chromium on the fixture page (held open by its own call)"
+  setsid "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
+    --mode exec --call-timeout "${UI_FIXTURE_LIFETIME:-30m}" \
+    --command 'exec flatpak run --socket=x11 --socket=session-bus \
        --env=DISPLAY="$DISPLAY" --env=XAUTHORITY="$XAUTHORITY" --filesystem="$XAUTHORITY" \
        --filesystem=/home/agent/e2e \
        org.chromium.Chromium --ozone-platform=x11 --no-sandbox --disable-gpu \
        --disable-dev-shm-usage --no-first-run --force-renderer-accessibility \
-       file:///home/agent/e2e/web/index.html >/home/agent/e2e/chromium.log 2>&1 &
-     sleep 20; echo launched' >/dev/null 2>&1 || true
+       file:///home/agent/e2e/web/index.html' \
+    </dev/null >"$art/chromium-launch.log" 2>&1 &
+  hdn_agent_track_pid $! 2>/dev/null || true
+  sleep 25
 
   _agent_screenshot "$qmp" "$art/10-fixtures-up.ppm"
 

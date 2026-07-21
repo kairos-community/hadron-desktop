@@ -315,6 +315,13 @@ int main(int argc, char **argv)
         {"text/plain", 0, 0},
     };
 
+    /* Set the program name BEFORE gtk_init: GTK derives the window's WM_CLASS
+     * from it, and Cua's window enumeration reports that class as the
+     * application name. Without it the fixture ran happily with a mapped
+     * window that list_applications never showed -- the gate then reported
+     * "the fixture is not running" about a process that was perfectly alive. */
+    g_set_prgname("hadron-cua-gtk");
+
     gtk_init(&argc, &argv);
 
     window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
