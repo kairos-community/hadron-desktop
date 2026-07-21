@@ -1542,6 +1542,7 @@ cmd_ui() {
        --filesystem=/home/agent/e2e \
        org.chromium.Chromium --ozone-platform=x11 --no-sandbox --disable-gpu \
        --disable-dev-shm-usage --no-first-run --force-renderer-accessibility \
+       --remote-debugging-port=9222 \
        file:///home/agent/e2e/web/index.html' \
     </dev/null >"$art/chromium-launch.log" 2>&1 &
   hdn_agent_track_pid $! 2>/dev/null || true

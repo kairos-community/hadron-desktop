@@ -28,8 +28,9 @@ package smoke
 // carried it. Asserting on a tool's own return value would prove nothing.
 //
 // GTK coordinates come from the fixture's own fixed layout (gtk_fixed_put with
-// explicit positions), offset by the window's screen origin. That is
-// deterministic without asking the toolkit anything.
+// explicit positions) and stay WINDOW-RELATIVE, because naming a window makes
+// the driver interpret them inside it. That is deterministic without asking the
+// toolkit anything.
 //
 // This file assumes the fixtures are already installed and RUNNING in the
 // visible session; test/agent/run.sh uploads them, holds each one open with its
@@ -135,22 +136,20 @@ func (s *Suite) runGTK(ctx context.Context, sess *mcp.ClientSession) []CheckResu
 	if fail != nil {
 		return expandFailure(fail, present, gtkDependents...)
 	}
-	origin, fail := s.windowOrigin(ctx, sess, app.PID)
-	if fail != nil {
-		return expandFailure(fail, present, gtkDependents...)
-	}
 	if f := s.focus(ctx, sess, app.PID); f != nil {
 		return expandFailure(f, present, gtkDependents...)
 	}
 
 	pid := app.PID
-	checks := []CheckResult{pass(present,
-		fmt.Sprintf("found the GTK fixture window (pid %d) with its origin at %d,%d", pid, origin.x, origin.y))}
+	checks := []CheckResult{pass(present, fmt.Sprintf("found the GTK fixture window (pid %d)", pid))}
 
-	at := func(r uiRect) (int, int) {
-		x, y := r.center()
-		return origin.x + x, origin.y + y
-	}
+	// Coordinates stay WINDOW-RELATIVE. Naming a window makes the driver
+	// interpret x,y inside it -- its own error for the untargeted case says so:
+	// "x,y given with no pid/window_id ... screen-absolute clicks require
+	// desktop scope". Adding a screen origin on top of that double-offsets
+	// every gesture, which lands the pointer outside the window and records
+	// nothing, while the keyboard (which needs no coordinate) still works.
+	at := func(r uiRect) (int, int) { return r.center() }
 
 	checks = append(checks, s.gtkGesture(ctx, sess, "gtk_click",
 		func() *terminalFail {
@@ -448,39 +447,6 @@ func decodeFixtureState(text, what string) (fixtureState, *terminalFail) {
 		return fixtureState{}, &terminalFail{detail: what + " is not valid JSON"}
 	}
 	return state, nil
-}
-
-type uiPoint struct{ x, y int }
-
-// windowOrigin returns an application window's screen position, so the
-// fixture's own layout coordinates become screen coordinates.
-//
-// get_window_state reports frames in SCREEN space, and the outermost of them is
-// the window itself. This is the one thing the gate asks the accessibility
-// layer for, and it asks only for geometry -- not for state, and not for any
-// individual widget -- which is exactly the part that works on this appliance.
-func (s *Suite) windowOrigin(ctx context.Context, sess *mcp.ClientSession, pid int) (uiPoint, *terminalFail) {
-	var out api.ComputerUseOutput
-	if err := s.callInto(ctx, sess, api.ToolComputerUse, api.ComputerUseInput{
-		Action: api.ActionAccessibility, Scope: api.ScopeWindow, PID: &pid,
-	}, &out); err != nil {
-		return uiPoint{}, &terminalFail{transport: true, detail: "could not read the window geometry"}
-	}
-	if out.Code != "" {
-		return uiPoint{}, &terminalFail{
-			detail: fmt.Sprintf("window geometry reported %s: %s", out.Code, out.Message)}
-	}
-	best, area := uiPoint{}, -1
-	for _, el := range out.Elements {
-		if el.Width*el.Height > area {
-			area = el.Width * el.Height
-			best = uiPoint{el.X, el.Y}
-		}
-	}
-	if area <= 0 {
-		return uiPoint{}, &terminalFail{detail: "the window reported no usable geometry"}
-	}
-	return best, nil
 }
 
 // locateApp finds a running application whose reported name contains name,
