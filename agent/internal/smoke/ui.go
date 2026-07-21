@@ -669,7 +669,7 @@ func (s *Suite) locateApp(ctx context.Context, sess *mcp.ClientSession, title st
 		return api.ApplicationInfo{}, &terminalFail{transport: true, detail: "computer_use list_applications call failed"}
 	}
 	if out.Code != "" {
-		return api.ApplicationInfo{}, &terminalFail{detail: fmt.Sprintf("list_applications reported %s", out.Code)}
+		return api.ApplicationInfo{}, &terminalFail{detail: fmt.Sprintf("list_applications reported %s: %s", out.Code, out.Message)}
 	}
 	for _, app := range out.Applications {
 		if strings.Contains(strings.ToLower(app.Name), strings.ToLower(title)) {
@@ -691,7 +691,7 @@ func (s *Suite) focus(ctx context.Context, sess *mcp.ClientSession, pid int) *te
 		return &terminalFail{transport: true, detail: "computer_use focus_application call failed"}
 	}
 	if out.Code != "" {
-		return &terminalFail{detail: fmt.Sprintf("focus_application reported %s", out.Code)}
+		return &terminalFail{detail: fmt.Sprintf("focus_application reported %s: %s", out.Code, out.Message)}
 	}
 	return nil
 }
@@ -711,7 +711,7 @@ func (s *Suite) accessibility(ctx context.Context, sess *mcp.ClientSession, pid 
 		return nil, &terminalFail{transport: true, detail: "computer_use accessibility call failed"}
 	}
 	if out.Code != "" {
-		return nil, &terminalFail{detail: fmt.Sprintf("accessibility reported %s", out.Code)}
+		return nil, &terminalFail{detail: fmt.Sprintf("accessibility reported %s: %s", out.Code, out.Message)}
 	}
 	if len(out.Elements) == 0 {
 		return nil, &terminalFail{detail: "accessibility returned an empty tree for the fixture window"}
@@ -770,7 +770,7 @@ func (s *Suite) capture(ctx context.Context, sess *mcp.ClientSession, pid int) (
 		return "", &terminalFail{transport: true, detail: "computer_use capture call failed"}
 	}
 	if out.Code != "" {
-		return "", &terminalFail{detail: fmt.Sprintf("capture reported %s", out.Code)}
+		return "", &terminalFail{detail: fmt.Sprintf("capture reported %s: %s", out.Code, out.Message)}
 	}
 	if len(out.ImageBase64) < uiCaptureMinimum {
 		return "", &terminalFail{detail: fmt.Sprintf(
@@ -807,7 +807,7 @@ func (s *Suite) act(ctx context.Context, sess *mcp.ClientSession, in api.Compute
 		return &terminalFail{transport: true, detail: fmt.Sprintf("computer_use %s call failed", in.Action)}
 	}
 	if out.Code != "" {
-		return &terminalFail{detail: fmt.Sprintf("computer_use %s reported %s", in.Action, out.Code)}
+		return &terminalFail{detail: fmt.Sprintf("computer_use %s reported %s: %s", in.Action, out.Code, out.Message)}
 	}
 
 	settle := uiSettleMs
@@ -818,7 +818,7 @@ func (s *Suite) act(ctx context.Context, sess *mcp.ClientSession, in api.Compute
 		return &terminalFail{transport: true, detail: "computer_use wait call failed"}
 	}
 	if wait.Code != "" {
-		return &terminalFail{detail: fmt.Sprintf("computer_use wait reported %s", wait.Code)}
+		return &terminalFail{detail: fmt.Sprintf("computer_use wait reported %s: %s", wait.Code, wait.Message)}
 	}
 	return nil
 }
