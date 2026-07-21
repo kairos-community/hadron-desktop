@@ -504,21 +504,53 @@ func (f *terminalFail) named(name string) CheckResult {
 
 // terminalID runs `id -u; id -un; id -nG` and parses the three lines.
 // callInto performs one tool call and decodes its structured result.
+// callInto performs one tool call and decodes its structured result.
+//
+// A RETRYABLE SESSION_UNAVAILABLE is retried within a bounded budget rather
+// than surfaced. The appliance advertises that code as retryable and means it:
+// the session broker and the lazily-started computer-use backend both settle
+// after boot, and a gate firing seconds behind /readyz can legitimately arrive
+// first. Treating it as fatal made the suite assert a stricter contract than
+// the appliance publishes -- and produced install-gate failures on user-class
+// bash and file calls while every other check on the same machine passed.
+//
+// Only that one code is retried, and only when the appliance marks it
+// retryable, so a genuinely dead session still fails fast.
 func (s *Suite) callInto(ctx context.Context, sess *mcp.ClientSession, tool string, args any, out any) error {
+	deadline := time.Now().Add(s.warmupBudget())
+	for {
+		data, err := s.callRaw(ctx, sess, tool, args)
+		if err != nil {
+			return err
+		}
+		var meta struct {
+			Code      string `json:"code"`
+			Retryable bool   `json:"retryable"`
+		}
+		_ = json.Unmarshal(data, &meta)
+		if meta.Code != string(api.CodeSessionUnavailable) || !meta.Retryable || time.Now().After(deadline) {
+			return json.Unmarshal(data, out)
+		}
+		select {
+		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
+			return json.Unmarshal(data, out)
+		}
+	}
+}
+
+// callRaw performs one tool call and returns its structured result as JSON.
+func (s *Suite) callRaw(ctx context.Context, sess *mcp.ClientSession, tool string, args any) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, s.callTimeout())
 	defer cancel()
 	res, err := sess.CallTool(cctx, &mcp.CallToolParams{Name: tool, Arguments: args})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if res.StructuredContent == nil {
-		return errors.New("tool result carried no structured content")
+		return nil, errors.New("tool result carried no structured content")
 	}
-	data, err := json.Marshal(res.StructuredContent)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(data, out)
+	return json.Marshal(res.StructuredContent)
 }
 
 func (s *Suite) terminalID(ctx context.Context, sess *mcp.ClientSession) (idResult, *terminalFail) {
