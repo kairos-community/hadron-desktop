@@ -976,10 +976,15 @@ _rec_warm_cua() {
   local descriptor="$1" admin_token="$2" art="$3"
   local smoke_bin; smoke_bin="$(dirname "$descriptor")/mcp-smoke"
   [ -x "$smoke_bin" ] || return 0
-  # The contract suite's capture check is the cheapest public way to start it.
-  "$smoke_bin" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
-    --mode exec --command 'true' >/dev/null 2>&1 || true
-  _rec_note "$art" "warmed the computer-use backend"
+  # `warm` issues a real computer_use call. A terminal command will NOT start
+  # Cua -- the first version of this helper ran `exec true` and then reported
+  # that cua-driver was not running, which was a statement about the helper.
+  if "$smoke_bin" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
+       --mode warm >/dev/null 2>&1; then
+    _rec_note "$art" "computer-use backend is up"
+  else
+    _rec_note "$art" "WARNING: could not warm the computer-use backend"
+  fi
 }
 
 # cmd_recovery [IMAGE] -- RECOVERY gate. Boot an INSTALLED appliance, then kill
@@ -1086,11 +1091,9 @@ cmd_recovery() {
   # a driver that was never started matched no process, nothing degraded, and the
   # scenario reported "never observed a degraded transition" -- describing the
   # harness, not the appliance. Warm it up first so there is something to kill.
-  "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
-    --mode exec --command 'true' >/dev/null 2>&1 || true
   _rec_warm_cua "$descriptor" "$admin_token" "$art"
   if [ "$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
-        'pgrep -c -f cua-driver 2>/dev/null || echo 0' | tr -d "[:space:]")" = "0" ]; then
+        'ps -eo args= | grep -c "[c]ua-driver"' | tr -d "[:space:]")" = "0" ]; then
     err "[1/6] cua-driver is not running; cannot exercise its recovery"
     failures=$((failures+1))
   else
@@ -1155,7 +1158,7 @@ cmd_recovery() {
   # exactly one X server must remain.
   local i3_before
   i3_before="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
-    'pgrep -x i3 | head -1' | tr -d '[:space:]')"
+    'ps -eo pid=,comm= | awk "\$2==\"i3\"{print \$1; exit}"' | tr -d '[:space:]')"
   _rec_note "$art" "i3 pid before: ${i3_before:-none}"
   _rec_exec "$smoke" "$descriptor" "$admin_token" user \
     'i3-msg exit >/dev/null 2>&1 || pkill -KILL -x i3 || true' >/dev/null 2>&1 || true
@@ -1164,7 +1167,7 @@ cmd_recovery() {
   while [ "$SECONDS" -lt "$sdeadline" ]; do
     local now
     now="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
-      'pgrep -x i3 | head -1' | tr -d '[:space:]')"
+      'ps -eo pid=,comm= | awk "\$2==\"i3\"{print \$1; exit}"' | tr -d '[:space:]')"
     if [ -z "$now" ] || { [ -n "$i3_before" ] && [ "$now" != "$i3_before" ]; }; then
       i3_gone=1; _rec_note "$art" "observed: i3 went away (pid ${i3_before:-none} -> ${now:-none})"; break
     fi
@@ -1173,12 +1176,24 @@ cmd_recovery() {
 
   if [ "$i3_gone" -eq 1 ]; then
     if _rec_wait_recovered "$ca" "$mcp_port" $((SECONDS + ${RECOVERY_SESSION_TIMEOUT:-150})) "$art"; then
+      # Wait for the window manager itself, not just readiness. The next
+      # scenario presses an i3 keybinding, so continuing before i3 is back
+      # tests nothing and fails for the wrong reason.
+      local i3_back="" wdeadline=$((SECONDS + ${RECOVERY_SESSION_TIMEOUT:-150}))
+      while [ "$SECONDS" -lt "$wdeadline" ]; do
+        i3_back="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
+          'ps -eo pid=,comm= | awk "\$2==\"i3\"{print \$1; exit}"' | tr -d '[:space:]')"
+        [ -n "$i3_back" ] && { _rec_note "$art" "observed: i3 is back (pid $i3_back)"; break; }
+        sleep 3
+      done
+      [ -n "$i3_back" ] || { err "[4/6] i3 did not come back"; failures=$((failures+1)); }
+
       # The watchdog must bring the session back on the REAL seat: exactly one
       # X server, on tty1. A hidden second display would satisfy "ready" while
       # leaving the console dark, which is the failure this guards.
       local displays
       displays="$(_rec_exec "$smoke" "$descriptor" "$admin_token" admin \
-        'pgrep -c -x Xorg 2>/dev/null || pgrep -c -f "X .*:0" 2>/dev/null || echo 0' | tr -d '[:space:]')"
+        'ps -eo comm= | grep -cE "^(Xorg|X)$"' | tr -d '[:space:]')"
       _rec_note "$art" "X servers after recovery: ${displays:-0}"
       if [ "${displays:-0}" != "1" ]; then
         err "[4/6] expected exactly one X server after recovery, found ${displays:-0}"
@@ -1398,12 +1413,16 @@ cmd_ui() {
   #    gate tests.
   local want_commit; want_commit="$(cat "$SCRIPT_DIR/fixtures/chromium.commit")"
   finfo "Installing Chromium at the pinned commit ${want_commit:0:12}"
-  _ui_exec "$smoke" "$descriptor" "$admin_token" user \
+  # `run`, not `terminal`: the gateway bounds every request at 60s, so a
+  # multi-minute Flathub install through `terminal` is cut off and comes back
+  # empty -- which previously read as "the guest reports no commit".
+  "$smoke" --descriptor "$descriptor" --admin-bearer-file "$admin_token" \
+    --mode run --call-timeout "${UI_INSTALL_TIMEOUT:-25m}" --command \
     "flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1;
      flatpak install -y --user --noninteractive flathub org.chromium.Chromium >/dev/null 2>&1;
      flatpak update -y --user --commit=$want_commit org.chromium.Chromium >/dev/null 2>&1 || true;
-     flatpak info --user --show-commit org.chromium.Chromium" 1200s \
-    > "$art/chromium-commit.txt" 2>&1 || true
+     flatpak info --user --show-commit org.chromium.Chromium" \
+    > "$art/chromium-commit.txt" 2>/dev/null || true
 
   # Take the LAST line: flatpak prints progress before the commit, and a
   # partial read here would compare noise against the pinned digest.
