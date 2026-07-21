@@ -65,14 +65,25 @@ func (s *Suite) RunLongCommand(ctx context.Context, command string, admin bool, 
 			r.Checks = append(r.Checks, failTransport(name, "process poll failed"))
 			return r, ExecResult{Stdout: out.String(), ExitCode: -1}
 		}
+		// A failed poll comes back with every field zeroed, which reads as
+		// "not running, no exit code" -- and reporting that as a clean exit 0
+		// is exactly how a Flathub install that was still downloading got
+		// recorded as a six-second success with no output.
+		if poll.Code != "" {
+			r.Checks = append(r.Checks, failAssert(name,
+				fmt.Sprintf("process poll reported %s", poll.Code)))
+			return r, ExecResult{Stdout: out.String(), ExitCode: -1}
+		}
 		out.WriteString(poll.Stdout)
 		if !poll.Running {
-			// ExitCode is a pointer so an explicit 0 is distinguishable from
-			// "the process has not reported one".
-			code := 0
-			if poll.ExitCode != nil {
-				code = *poll.ExitCode
+			if poll.ExitCode == nil {
+				// Not running and no status: the handle went away without the
+				// command ever reporting how it ended. Never call that success.
+				r.Checks = append(r.Checks, failAssert(name,
+					"the process stopped without reporting an exit status"))
+				return r, ExecResult{Stdout: out.String(), ExitCode: -1}
 			}
+			code := *poll.ExitCode
 			r.Checks = append(r.Checks, pass(name,
 				fmt.Sprintf("command ran as %s and exited %d", class, code)))
 			return r, ExecResult{Stdout: out.String(), Stderr: poll.Stderr, ExitCode: code}
