@@ -290,9 +290,14 @@ func (a *Adapter) browserSnapshot(ctx context.Context, target pageTarget, in api
 // "Fullscreen" control by ref returned ok and did nothing at all.
 //
 // So: scroll the element into view, read its box, convert to screen
-// coordinates, and click there. When that conversion is not available (window
-// geometry unreadable, or the element cannot be brought on-screen) fall back to
-// el.click() rather than failing, and say which path ran.
+// coordinates, and click there. When that conversion is not available fall back
+// to a scripted click rather than failing, and say which path ran.
+//
+// The fallback is not an edge case. Converting to screen coordinates needs the
+// window's frame, which comes from AT-SPI -- and Flatpak Chromium publishes a
+// single accessible for its window with no frame at all. So for the appliance's
+// own browser the scripted path is the ONLY path, which is why it dispatches a
+// full press-and-release sequence instead of a bare el.click().
 func (a *Adapter) browserClick(ctx context.Context, target pageTarget, in api.BrowserInput) (api.BrowserOutput, error) {
 	idx, err := refIndex(in.Ref)
 	if err != nil {
@@ -330,7 +335,27 @@ return JSON.stringify({url:location.href,title:document.title,
 		}
 		method = "pointer"
 	} else {
-		clickJS := fmt.Sprintf(`(function(){%s el.click();return JSON.stringify({url:location.href,title:document.title});})()`,
+		// Deliver the whole press-and-release sequence, not just el.click().
+		// A great many pages act on mousedown/pointerdown rather than click --
+		// menus, drag handles, canvases, games -- and for those a lone click
+		// event does nothing while still reporting success. The button/buttons
+		// values follow the DOM spec: buttons is 1 while the primary button is
+		// held and 0 once released. el.click() still runs last so links and
+		// form controls keep their native activation behaviour.
+		clickJS := fmt.Sprintf(`(function(){%s
+var r=el.getBoundingClientRect();
+var cx=Math.round(r.left+r.width/2), cy=Math.round(r.top+r.height/2);
+function opts(held){return {bubbles:true,cancelable:true,view:window,clientX:cx,clientY:cy,button:0,buttons:held?1:0};}
+function fire(name,held){
+  var ev;
+  if(name.indexOf('pointer')===0&&typeof PointerEvent==='function'){ev=new PointerEvent(name,opts(held));}
+  else{ev=new MouseEvent(name.replace('pointer','mouse'),opts(held));}
+  el.dispatchEvent(ev);
+}
+fire('pointerdown',true);fire('mousedown',true);
+fire('pointerup',false);fire('mouseup',false);
+el.click();
+return JSON.stringify({url:location.href,title:document.title});})()`,
 			resolveRefJS(idx))
 		if _, m := a.pageJS(ctx, target, clickJS); m.Code != "" {
 			return api.BrowserOutput{ResultMeta: m}, nil

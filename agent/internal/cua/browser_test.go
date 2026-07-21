@@ -566,6 +566,55 @@ func TestBrowserClickFallsBackToScript(t *testing.T) {
 	}
 }
 
+// TestBrowserScriptedClickPressesAndReleases pins the scripted fallback's event
+// sequence. A bare el.click() dispatches only a click event, so a page that acts
+// on mousedown or pointerdown -- menus, drag handles, canvases, games -- sees
+// nothing at all while the call still reports success. That is not a rare shape:
+// Flatpak Chromium publishes no window frame over AT-SPI, so the appliance's own
+// browser can NEVER take the real-pointer path and always lands here.
+func TestBrowserScriptedClickPressesAndReleases(t *testing.T) {
+	var clickScript string
+	caller := &fakeCaller{handler: func(_ context.Context, name string, args map[string]any) (*mcp.CallToolResult, error) {
+		switch name {
+		case toolListWindows:
+			return browserWindows(), nil
+		case toolGetWindowState:
+			// A window with no frame: exactly what Chromium reports.
+			return &mcp.CallToolResult{StructuredContent: map[string]any{"elements": []any{}}}, nil
+		case toolClick:
+			t.Error("a pointer click must not be dispatched without a screen position")
+			return &mcp.CallToolResult{}, nil
+		case toolPage:
+			script, _ := args["javascript"].(string)
+			if strings.Contains(script, "dispatchEvent") {
+				clickScript = script
+			}
+			return jsReply(t, map[string]any{"url": "u", "title": "t",
+				"rect": map[string]any{"x": 10, "y": 10, "w": 20, "h": 20}}), nil
+		}
+		return nil, nil
+	}}
+
+	out, _ := NewAdapter(caller).Browser(context.Background(),
+		api.BrowserInput{Action: api.BrowserClick, Ref: "e1"})
+	if out.Code != "" {
+		t.Fatalf("code = %q, want success: %s", out.Code, out.Message)
+	}
+	if clickScript == "" {
+		t.Fatal("the scripted click dispatched no events at all")
+	}
+	// mousedown is the one that actually matters here, but a press with no
+	// release leaves a page believing the button is still held.
+	for _, event := range []string{"pointerdown", "mousedown", "pointerup", "mouseup"} {
+		if !strings.Contains(clickScript, event) {
+			t.Errorf("scripted click never dispatches %s", event)
+		}
+	}
+	if !strings.Contains(clickScript, "el.click()") {
+		t.Error("scripted click dropped el.click(), which links and form controls rely on")
+	}
+}
+
 // TestBrowserSnapshotReportsScreenCoordinates: the whole point of publishing
 // bounds is that a caller can hand them to computer_use. Viewport bounds alone
 // are off by the chrome height, which is how a click landed 158px high.
