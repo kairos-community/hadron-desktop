@@ -125,6 +125,11 @@ type fakeFiles struct {
 	store            map[string]string
 	allowRootRead    bool
 	rootReadNotFound bool
+
+	// dynamic, when set, answers a read before the store is consulted. The UI
+	// gate reads the fixture's state file repeatedly and must see it CHANGE, so
+	// a static map cannot model it.
+	dynamic func(path string) (string, bool)
 }
 
 func newFakeFiles() *fakeFiles { return &fakeFiles{store: map[string]string{}} }
@@ -134,6 +139,11 @@ func isRootOnlyPath(p string) bool {
 }
 
 func (f *fakeFiles) Read(_ context.Context, in api.ReadFileInput) api.ReadFileOutput {
+	if f.dynamic != nil {
+		if content, ok := f.dynamic(in.Path); ok {
+			return api.ReadFileOutput{Content: content}
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if isRootOnlyPath(in.Path) && !f.allowRootRead {
@@ -191,8 +201,9 @@ func (f *fakeFiles) Patch(_ context.Context, in api.PatchInput) api.PatchOutput 
 // answers every computer_use call instead, which is how the ui-mode tests below
 // stand in for a running desktop; contract-mode tests leave it nil.
 type fakeComputer struct {
-	image  string
-	uiHook func(api.ComputerUseInput) api.ComputerUseOutput
+	image       string
+	uiHook      func(api.ComputerUseInput) api.ComputerUseOutput
+	browserHook func(api.BrowserInput) api.BrowserOutput
 }
 
 func (c *fakeComputer) ComputerUse(_ context.Context, in api.ComputerUseInput) (api.ComputerUseOutput, error) {
@@ -201,7 +212,10 @@ func (c *fakeComputer) ComputerUse(_ context.Context, in api.ComputerUseInput) (
 	}
 	return api.ComputerUseOutput{ImageBase64: c.image}, nil
 }
-func (c *fakeComputer) Browser(context.Context, api.BrowserInput) (api.BrowserOutput, error) {
+func (c *fakeComputer) Browser(_ context.Context, in api.BrowserInput) (api.BrowserOutput, error) {
+	if c.browserHook != nil {
+		return c.browserHook(in), nil
+	}
 	return api.BrowserOutput{URL: "https://example.test/", Title: "fake page"}, nil
 }
 func (c *fakeComputer) Ready() bool  { return true }
@@ -882,230 +896,120 @@ func TestExecModeAdminUsesTheAdminBearer(t *testing.T) {
 // ---------------------------------------------------------------------------
 //
 // The UI gate's real subject is a live desktop, which no unit test can supply.
-// What IS testable here without a VM is the half that breaks silently in
-// review: the call plumbing (does RunUI reach the right tools, aim at the
-// geometry accessibility handed it, and read state back through read_file?),
-// the ordering constraints the fixtures impose, and every failure path a live
-// run would hit at 3am. The fakeDesktop below is canned, not a toolkit: it hit
-// tests fixed rectangles and mutates a counter. A test passing against it says
-// the suite issued the right calls, NOT that GTK or Chromium behaves this way.
+// What IS testable here is the half that breaks silently in review: does RunUI
+// reach the RIGHT TOOLS for each fixture, judge each gesture by the
+// application's own state, and fail cleanly when a fixture is missing?
+//
+// The fakes below are canned, not toolkits. A test passing against them says
+// the suite issued the right calls in the right order -- never that GTK or
+// Chromium behaves this way.
 
-// uiRect is one canned control rectangle on the fake desktop.
-type uiRect struct{ x, y, w, h int }
+// uiFakeDesktop drives both halves: computer_use for the GTK fixture and the
+// browser tool for Chromium, with one shared state document that gestures
+// mutate, standing in for the two applications' own state.
+type uiFakeDesktop struct {
+	mu    sync.Mutex
+	state fixtureState
 
-// uiControl pairs an accessible name with its rectangle. A slice (not a map)
-// keeps accessibility output ordered, so element indices are stable across
-// queries exactly as a real tree's would be.
-type uiControl struct {
-	name string
-	r    uiRect
+	gtkPresent      bool
+	chromiumPresent bool
+
+	sawBrowser  map[api.BrowserAction]int
+	sawComputer map[api.ComputerUseAction]int
 }
 
-var uiControls = []uiControl{
-	{nameClickCount, uiRect{40, 35, 180, 55}},
-	{nameDoubleClickCount, uiRect{40, 120, 180, 70}},
-	{nameTextInput, uiRect{40, 220, 360, 45}},
-	{nameDragSource, uiRect{40, 420, 150, 80}},
-	{nameDragTarget, uiRect{520, 420, 150, 80}},
-	{nameScrollableRows, uiRect{700, 35, 170, 540}},
-}
-
-const (
-	fakeGTKPID      = 111
-	fakeChromiumPID = 222
-	fakeFirstRowY   = 35
-)
-
-// fakeWindow is one canned fixture window's state.
-type fakeWindow struct {
-	title  string
-	gtk    bool // GTK persists to gtkStatePath and names keys the GDK way
-	state  fixtureState
-	scroll int
-}
-
-// fakeDesktop answers computer_use for the ui tests. Gestures are routed by
-// hit-testing the canned rectangles, so a suite that aimed at the wrong
-// coordinates (or ignored accessibility geometry and hard-coded a point) fails
-// here rather than quietly passing.
-type fakeDesktop struct {
-	mu           sync.Mutex
-	files        *fakeFiles
-	windows      map[int]*fakeWindow
-	focused      int
-	captureSeq   int
-	frozenPixels bool // when true every capture is byte-identical
-	hideGTK      bool
-	hideChromium bool
-}
-
-func newFakeDesktop(files *fakeFiles) *fakeDesktop {
-	d := &fakeDesktop{
-		files: files,
-		windows: map[int]*fakeWindow{
-			fakeGTKPID:      {title: gtkWindowTitle, gtk: true},
-			fakeChromiumPID: {title: chromiumWindowTitle},
-		},
+func newUIFakeDesktop() *uiFakeDesktop {
+	return &uiFakeDesktop{
+		gtkPresent: true, chromiumPresent: true,
+		sawBrowser:  map[api.BrowserAction]int{},
+		sawComputer: map[api.ComputerUseAction]int{},
 	}
-	d.persist(d.windows[fakeGTKPID])
-	return d
 }
 
-// persist mirrors the GTK window's state to the fake filesystem, standing in
-// for the fixture's own atomic write to gtkStatePath.
-func (d *fakeDesktop) persist(w *fakeWindow) {
-	if !w.gtk {
-		return
-	}
-	data, _ := json.Marshal(w.state)
-	d.files.mu.Lock()
-	d.files.store[gtkStatePath] = string(data)
-	d.files.mu.Unlock()
-}
-
-func (d *fakeDesktop) elements(w *fakeWindow) []api.AccessibilityElement {
-	var out []api.AccessibilityElement
-	add := func(name string, r uiRect) {
-		out = append(out, api.AccessibilityElement{
-			Index: len(out), Role: "control", Name: name,
-			X: r.x, Y: r.y, Width: r.w, Height: r.h,
-		})
-	}
-	for _, c := range uiControls {
-		add(c.name, c.r)
-	}
-	// The scrolled row is the geometry witness the scroll check compares.
-	add("Scrollable row 01", uiRect{700, fakeFirstRowY - w.scroll, 170, 36})
-	// Label text both fixtures surface as accessible names.
-	add(fmt.Sprintf("Clicks: %d", w.state.Clicks), uiRect{45, 40, 170, 45})
-	add(fmt.Sprintf("Double clicks: %d", w.state.DoubleClicks), uiRect{45, 125, 170, 60})
-	add("Named key: "+w.state.Key, uiRect{40, 295, 360, 55})
-	dragLabel := "Drag target: waiting"
-	if w.state.Dragged {
-		dragLabel = "Drag target: dropped"
-	}
-	add(dragLabel, uiRect{525, 425, 140, 70})
-	// The page's rendered state block, from which chromiumState reads.
-	data, _ := json.Marshal(w.state)
-	add(string(data), uiRect{24, 560, 850, 56})
-	return out
-}
-
-// hit returns the name of the control containing the point, or "".
-func hit(x, y int) string {
-	for _, c := range uiControls {
-		if x >= c.r.x && x < c.r.x+c.r.w && y >= c.r.y && y < c.r.y+c.r.h {
-			return c.name
-		}
-	}
-	return ""
-}
-
-func (d *fakeDesktop) computerUse(in api.ComputerUseInput) api.ComputerUseOutput {
+func (d *uiFakeDesktop) stateJSON() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return fmt.Sprintf(`{"clicks":%d,"double_clicks":%d,"text":%q,"key":%q,"dragged":%t,"scroll_value":%d}`,
+		d.state.Clicks, d.state.DoubleClicks, d.state.Text, d.state.Key, d.state.Dragged, d.state.ScrollValue)
+}
 
+func (d *uiFakeDesktop) computerUse(in api.ComputerUseInput) api.ComputerUseOutput {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.sawComputer[in.Action]++
 	switch in.Action {
 	case api.ActionListApplications:
 		var apps []api.ApplicationInfo
-		if !d.hideGTK {
-			apps = append(apps, api.ApplicationInfo{PID: fakeGTKPID, Name: gtkWindowTitle, WindowID: 1})
+		if d.gtkPresent {
+			apps = append(apps, api.ApplicationInfo{PID: 111, Name: "Hadron-cua-gtk", WindowID: 9001})
 		}
-		if !d.hideChromium {
-			// Chromium appends its serialized state to the document title, so
-			// the suite must match the title as a SUBSTRING, not exactly.
-			apps = append(apps, api.ApplicationInfo{
-				PID: fakeChromiumPID, Name: chromiumWindowTitle + " | {}", WindowID: 2,
-			})
+		if d.chromiumPresent {
+			apps = append(apps, api.ApplicationInfo{PID: 222, Name: "Chromium", WindowID: 9002})
 		}
 		return api.ComputerUseOutput{Applications: apps}
-
-	case api.ActionFocusApplication:
-		if in.PID == nil {
-			return api.ComputerUseOutput{ResultMeta: api.ResultMeta{Code: api.CodeInvalidArgument}}
-		}
-		w, ok := d.windows[*in.PID]
-		if !ok {
-			return api.ComputerUseOutput{ResultMeta: api.ResultMeta{Code: api.CodeNotFound}}
-		}
-		d.focused = *in.PID
-		return api.ComputerUseOutput{WindowID: int64(len(w.title))}
-
 	case api.ActionAccessibility:
-		if in.PID == nil {
-			return api.ComputerUseOutput{ResultMeta: api.ResultMeta{Code: api.CodeInvalidArgument}}
-		}
-		w, ok := d.windows[*in.PID]
-		if !ok {
-			return api.ComputerUseOutput{ResultMeta: api.ResultMeta{Code: api.CodeNotFound}}
-		}
-		return api.ComputerUseOutput{Elements: d.elements(w)}
-
-	case api.ActionCapture:
-		d.captureSeq++
-		frame := strings.Repeat("A", 80)
-		if !d.frozenPixels {
-			frame += fmt.Sprintf("%08d", d.captureSeq)
-		}
-		return api.ComputerUseOutput{ImageBase64: frame}
-
-	case api.ActionWait:
-		return api.ComputerUseOutput{}
-	}
-
-	w := d.windows[d.focused]
-	if w == nil {
-		return api.ComputerUseOutput{ResultMeta: api.ResultMeta{Code: api.CodeSessionUnavailable}}
-	}
-	switch in.Action {
+		// Geometry only -- the single thing the gate asks accessibility for.
+		return api.ComputerUseOutput{Elements: []api.AccessibilityElement{
+			{Role: "window", Name: "fixture", X: 100, Y: 50, Width: 900, Height: 640},
+		}}
 	case api.ActionClick:
-		if hit(*in.X, *in.Y) == nameClickCount {
-			w.state.Clicks++
-		}
+		d.state.Clicks++
 	case api.ActionDoubleClick:
-		if hit(*in.X, *in.Y) == nameDoubleClickCount {
-			w.state.DoubleClicks++
-		}
+		d.state.DoubleClicks++
 	case api.ActionDrag:
-		if hit(*in.FromX, *in.FromY) == nameDragSource && hit(*in.ToX, *in.ToY) == nameDragTarget {
-			w.state.Dragged = true
-		}
+		d.state.Dragged = true
 	case api.ActionScroll:
-		if hit(*in.X, *in.Y) == nameScrollableRows {
-			w.scroll += 40
-			w.state.ScrollValue += 40
-		}
+		d.state.ScrollValue += 10
 	case api.ActionType:
-		w.state.Text = in.Text
-		if in.Text != "" {
-			w.state.Key = in.Text[len(in.Text)-1:]
-		}
+		d.state.Text = in.Text
+		d.state.Key = "n"
 	case api.ActionKey:
-		// The same physical key gets a different name on each platform; the
-		// fake reproduces that so the suite's per-platform expectations are
-		// genuinely exercised rather than trivially satisfied.
-		if w.gtk {
-			w.state.Key = gtkKeyName
-		} else {
-			w.state.Key = chromiumKeyName
-		}
+		d.state.Key = in.Key
 	}
-	d.persist(w)
 	return api.ComputerUseOutput{}
 }
 
-// buildUIHarness stands up the full stack with a fake desktop wired in.
-func buildUIHarness(t *testing.T, configure func(*fakeDesktop)) (*harness, *fakeDesktop) {
+func (d *uiFakeDesktop) browser(in api.BrowserInput) api.BrowserOutput {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.sawBrowser[in.Action]++
+	switch in.Action {
+	case api.BrowserNavigate:
+		return api.BrowserOutput{URL: "file:///home/agent/e2e/web/index.html", Title: "Hadron Cua Chromium Fixture"}
+	case api.BrowserSnapshot:
+		return api.BrowserOutput{Elements: []api.BrowserElement{
+			{Ref: "e1", Role: "button", Name: "click count"},
+			{Ref: "e2", Role: "input", Name: "text input"},
+		}}
+	case api.BrowserClick:
+		d.state.Clicks++
+	case api.BrowserType:
+		d.state.Text = in.Text
+		d.state.Key = "n"
+	case api.BrowserPress:
+		d.state.Key = in.Key
+	case api.BrowserScroll:
+		d.state.ScrollValue += 10
+	case api.BrowserText:
+		return api.BrowserOutput{Text: "state " + fmt.Sprintf(`{"clicks":%d,"double_clicks":%d,"text":%q,"key":%q,"dragged":%t,"scroll_value":%d}`,
+			d.state.Clicks, d.state.DoubleClicks, d.state.Text, d.state.Key, d.state.Dragged, d.state.ScrollValue)}
+	}
+	return api.BrowserOutput{}
+}
+
+// buildUIHarness wires a desktop into the harness's fakes.
+func buildUIHarness(t *testing.T, d *uiFakeDesktop) *harness {
 	t.Helper()
-	var desktop *fakeDesktop
-	h := buildHarness(t, func(h *harness) {
-		desktop = newFakeDesktop(h.files)
-		if configure != nil {
-			configure(desktop)
+	return buildHarness(t, func(h *harness) {
+		h.computer.uiHook = func(in api.ComputerUseInput) api.ComputerUseOutput { return d.computerUse(in) }
+		h.computer.browserHook = func(in api.BrowserInput) api.BrowserOutput { return d.browser(in) }
+		h.files.dynamic = func(path string) (string, bool) {
+			if path == gtkStatePath {
+				return d.stateJSON(), true
+			}
+			return "", false
 		}
-		h.computer.uiHook = desktop.computerUse
 	})
-	return h, desktop
 }
 
 func runUI(t *testing.T, h *harness) Report {
@@ -1115,193 +1019,117 @@ func runUI(t *testing.T, h *harness) Report {
 	return h.suite().RunUI(ctx)
 }
 
-// TestUISuitePassesAgainstAFakeDesktop proves the plumbing end to end: RunUI
-// finds both windows, aims every gesture using the geometry accessibility
-// returned, and reads the results back through the public tools. It does NOT
-// prove anything about real GTK or Chromium behavior -- the desktop is canned.
-func TestUISuitePassesAgainstAFakeDesktop(t *testing.T) {
-	h, _ := buildUIHarness(t, nil)
-	r := runUI(t, h)
+// TestUIUsesPixelsForGTKAndTheBrowserToolForChromium is the shape of the gate:
+// the GTK half must never depend on the browser tool, and the Chromium half
+// must never depend on desktop accessibility -- flatpak Chromium publishes no
+// AT-SPI tree, so a gate that tried would be asserting against one node.
+func TestUIUsesPixelsForGTKAndTheBrowserToolForChromium(t *testing.T) {
+	d := newUIFakeDesktop()
+	r := runUI(t, buildUIHarness(t, d))
+
 	for _, c := range r.Checks {
 		if !c.Passed {
-			t.Errorf("check %q failed: %s (transport=%v)", c.Name, c.Detail, c.Transport)
+			t.Errorf("check %q failed: %s", c.Name, c.Detail)
 		}
 	}
-	if r.Mode != "ui" {
-		t.Fatalf("Mode = %q, want %q", r.Mode, "ui")
-	}
-	if got := r.Outcome(); got != ExitPass {
-		t.Fatalf("Outcome = %d, want %d (pass)", got, ExitPass)
-	}
-	// Six GTK gestures plus five Chromium ones, plus the two window-present
-	// checks. A change to this count is a change to the gate's coverage.
-	want := []string{
-		"gtk_window_present", "gtk_click", "gtk_double_click", "gtk_drag",
-		"gtk_scroll", "gtk_text_entry", "gtk_named_key",
-		"chromium_window_present", "chromium_click", "chromium_drag",
-		"chromium_scroll", "chromium_type", "chromium_key",
-	}
-	var got []string
-	for _, c := range r.Checks {
-		got = append(got, c.Name)
-	}
-	if !equalStrings(got, want) {
-		t.Fatalf("checks = %v, want %v", got, want)
-	}
-}
-
-// TestUIGesturesReachBothFixtures proves the gestures actually landed on the
-// canned controls rather than the suite passing on a no-op: both windows must
-// end with every counter moved. It also pins the ordering constraint the
-// fixtures impose -- text is typed before the named key, so the final `key` is
-// the key press and not the last typed character.
-func TestUIGesturesReachBothFixtures(t *testing.T) {
-	h, desktop := buildUIHarness(t, nil)
-	if r := runUI(t, h); r.Outcome() != ExitPass {
-		t.Fatalf("Outcome = %d, want pass: %+v", r.Outcome(), r.Checks)
-	}
-
-	gtk := desktop.windows[fakeGTKPID]
-	if gtk.state.Clicks != 1 || gtk.state.DoubleClicks != 1 || !gtk.state.Dragged || gtk.state.ScrollValue == 0 {
-		t.Fatalf("GTK gestures did not all land: %+v", gtk.state)
-	}
-	if gtk.state.Text != uiTypedText {
-		t.Fatalf("GTK text = %q, want %q", gtk.state.Text, uiTypedText)
-	}
-	if gtk.state.Key != gtkKeyName {
-		t.Fatalf("GTK key = %q, want %q -- the named key must be pressed after the text is typed", gtk.state.Key, gtkKeyName)
-	}
-
-	chromium := desktop.windows[fakeChromiumPID]
-	if chromium.state.Clicks != 1 || !chromium.state.Dragged || chromium.state.ScrollValue == 0 {
-		t.Fatalf("Chromium gestures did not all land: %+v", chromium.state)
-	}
-	if chromium.state.Key != chromiumKeyName {
-		t.Fatalf("Chromium key = %q, want the DOM name %q", chromium.state.Key, chromiumKeyName)
-	}
-}
-
-// TestUIMissingFixturesFailCleanly is the failure path an operator hits most
-// often: the harness never launched the apps. Every dependent check must be
-// reported as a named failure -- a run that silently drops them looks like a
-// shorter, healthy run in the artifact -- and nothing may panic on the absent
-// window.
-func TestUIMissingFixturesFailCleanly(t *testing.T) {
-	h, _ := buildUIHarness(t, func(d *fakeDesktop) {
-		d.hideGTK = true
-		d.hideChromium = true
-	})
-	r := runUI(t, h)
-
-	if got := r.Outcome(); got != ExitAssertion {
-		t.Fatalf("Outcome = %d, want %d (assertion)", got, ExitAssertion)
-	}
-	if len(r.Checks) != 13 {
-		t.Fatalf("ran %d checks, want all 13 reported even though no window exists", len(r.Checks))
-	}
-	for _, c := range r.Checks {
-		if c.Passed {
-			t.Errorf("check %q passed with no fixture window running", c.Name)
+	// GTK gestures went through computer_use.
+	for _, action := range []api.ComputerUseAction{
+		api.ActionClick, api.ActionDoubleClick, api.ActionDrag, api.ActionScroll, api.ActionType, api.ActionKey,
+	} {
+		if d.sawComputer[action] == 0 {
+			t.Errorf("computer_use %s was never dispatched for the GTK fixture", action)
 		}
 	}
-	if d := checkByName(t, r, "gtk_window_present").Detail; !strings.Contains(d, gtkWindowTitle) {
-		t.Fatalf("gtk_window_present detail does not name the missing window: %q", d)
-	}
-	if d := checkByName(t, r, "gtk_click").Detail; !strings.Contains(d, "not evaluated") {
-		t.Fatalf("dependent check detail does not say it was not evaluated: %q", d)
-	}
-}
-
-// TestUIChromiumRequiresRealRepaint is the non-vacuity proof for the pixel half
-// of the Chromium assertions. With the page's state advancing normally but the
-// compositor handing back an identical frame every time, the accessibility half
-// still passes -- so if the check rested on accessibility alone it would GREEN
-// while the visible screen was frozen. The GTK checks, which do not assert on
-// pixels, must be unaffected.
-func TestUIChromiumRequiresRealRepaint(t *testing.T) {
-	h, _ := buildUIHarness(t, func(d *fakeDesktop) { d.frozenPixels = true })
-	r := runUI(t, h)
-
-	if c := checkByName(t, r, "chromium_click"); c.Passed {
-		t.Fatal("chromium_click passed even though the window's pixels never changed")
-	}
-	if c := checkByName(t, r, "gtk_click"); !c.Passed {
-		t.Fatalf("gtk_click must not depend on the pixel comparison: %s", c.Detail)
+	// Chromium went through the browser tool.
+	for _, action := range []api.BrowserAction{
+		api.BrowserNavigate, api.BrowserSnapshot, api.BrowserClick, api.BrowserType, api.BrowserPress, api.BrowserScroll,
+	} {
+		if d.sawBrowser[action] == 0 {
+			t.Errorf("browser %s was never dispatched for the Chromium fixture", action)
+		}
 	}
 }
 
-// TestUIStateFileIsReadThroughThePublicTool proves the GTK assertions genuinely
-// depend on the application-owned JSON and not only on the accessibility tree:
-// with the state file unreadable, every GTK check must fail even though the
-// fake desktop still reports a perfectly healthy tree.
-func TestUIStateFileIsReadThroughThePublicTool(t *testing.T) {
-	h, _ := buildUIHarness(t, nil)
-	h.files.mu.Lock()
-	h.files.store[gtkStatePath] = "not json at all"
-	h.files.mu.Unlock()
-	// Keep it unreadable for the whole run by clobbering the fixture's writes
-	// after every gesture. The original hook is captured first; wrapping the
-	// field in place would recurse forever.
-	desktopHook := h.computer.uiHook
+// TestUIGesturesAreJudgedByApplicationState is the non-vacuity proof: a desktop
+// that accepts every gesture but never records one must fail every check.
+// Asserting on the tool's own return value would pass here, which is exactly
+// the failure this gate exists to catch.
+func TestUIGesturesAreJudgedByApplicationState(t *testing.T) {
+	d := newUIFakeDesktop()
+	h := buildUIHarness(t, d)
+	// Accept every gesture but record nothing: the state is reset after each
+	// call, so the tools all succeed while the applications never move.
+	orig := h.computer.uiHook
 	h.computer.uiHook = func(in api.ComputerUseInput) api.ComputerUseOutput {
-		out := desktopHook(in)
-		h.files.mu.Lock()
-		h.files.store[gtkStatePath] = "not json at all"
-		h.files.mu.Unlock()
+		out := orig(in)
+		d.mu.Lock()
+		d.state = fixtureState{} // undo whatever the gesture recorded
+		d.mu.Unlock()
+		return out
+	}
+	origB := h.computer.browserHook
+	h.computer.browserHook = func(in api.BrowserInput) api.BrowserOutput {
+		out := origB(in)
+		d.mu.Lock()
+		d.state = fixtureState{}
+		d.mu.Unlock()
 		return out
 	}
 
 	r := runUI(t, h)
-	for _, name := range []string{"gtk_click", "gtk_double_click", "gtk_drag", "gtk_scroll", "gtk_text_entry", "gtk_named_key"} {
-		if c := checkByName(t, r, name); c.Passed {
-			t.Errorf("%s passed without a readable application state file", name)
+	for _, c := range r.Checks {
+		if strings.HasSuffix(c.Name, "_window_present") || c.Name == "chromium_navigate" {
+			continue
+		}
+		if c.Passed {
+			t.Errorf("check %q passed against a desktop that recorded nothing", c.Name)
 		}
 	}
 }
 
-// TestUIPureHelpers exercises the parsing and geometry helpers directly, where
-// the interesting cases (a state document embedded in a longer title, an
-// element rectangle's centre) are cheap to state exactly.
-func TestUIPureHelpers(t *testing.T) {
-	title := chromiumWindowTitle + ` | {"clicks":3,"double_clicks":1,"text":"hi","key":"Enter","dragged":true,"scroll_value":42}`
-	state, ok := parseFixtureState(title)
-	if !ok {
-		t.Fatal("parseFixtureState failed on a state document embedded in a window title")
-	}
-	if state.Clicks != 3 || state.Key != "Enter" || !state.Dragged || state.ScrollValue != 42 {
-		t.Fatalf("parseFixtureState = %+v, want the embedded values", state)
-	}
-	if _, ok := parseFixtureState("Hadron Cua Chromium Fixture"); ok {
-		t.Fatal("parseFixtureState accepted a title with no state document")
-	}
-	if _, ok := parseFixtureState(`{"clicks":`); ok {
-		t.Fatal("parseFixtureState accepted a truncated state document")
-	}
+// TestUIMissingFixturesFailCleanly: every dependent check must be REPORTED as a
+// failure, not silently dropped -- a shorter report reads as a healthier run.
+func TestUIMissingFixturesFailCleanly(t *testing.T) {
+	d := newUIFakeDesktop()
+	d.gtkPresent = false
+	d.chromiumPresent = false
+	r := runUI(t, buildUIHarness(t, d))
 
-	elements := []api.AccessibilityElement{
-		{Index: 0, Name: "Drag target: dropped", X: 0, Y: 0, Width: 10, Height: 10},
-		{Index: 1, Name: nameDragTarget, X: 100, Y: 50, Width: 40, Height: 20},
+	if len(r.Checks) < 2+len(gtkDependents)+len(chromiumDependents) {
+		t.Fatalf("got %d checks, want the setup failures plus every dependent", len(r.Checks))
 	}
-	// The exact match must win over the earlier substring match, or "Drag
-	// target" would resolve to the label instead of the control.
-	el, found := findElement(elements, nameDragTarget)
-	if !found || el.Index != 1 {
-		t.Fatalf("findElement resolved %v (found=%v), want the exact match at index 1", el, found)
-	}
-	if x, y := center(el); x != 120 || y != 60 {
-		t.Fatalf("center = (%d,%d), want (120,60)", x, y)
-	}
-	if _, found := findElement(elements, "nothing here"); found {
-		t.Fatal("findElement matched a name that is not present")
-	}
-
-	results := expandFailure(&terminalFail{transport: true, detail: "boom"}, "setup", "a", "b")
-	if len(results) != 3 {
-		t.Fatalf("expandFailure returned %d results, want 3", len(results))
-	}
-	for _, res := range results {
-		if res.Passed || !res.Transport {
-			t.Fatalf("expandFailure result %+v must be a propagated transport failure", res)
+	for _, c := range r.Checks {
+		if c.Passed {
+			t.Errorf("check %q passed with no fixtures running", c.Name)
 		}
+	}
+	for _, want := range append(append([]string{}, gtkDependents...), chromiumDependents...) {
+		found := false
+		for _, c := range r.Checks {
+			if c.Name == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("dependent check %q vanished from the report", want)
+		}
+	}
+}
+
+// TestDecodeFixtureState covers the one pure helper both halves share: the
+// state object is EMBEDDED in surrounding text in both fixtures.
+func TestDecodeFixtureState(t *testing.T) {
+	got, fail := decodeFixtureState(`noise before {"clicks":3,"key":"Return"} noise after`, "test")
+	if fail != nil {
+		t.Fatalf("decode: %s", fail.detail)
+	}
+	if got.Clicks != 3 || got.Key != "Return" {
+		t.Fatalf("decoded %+v, want clicks=3 key=Return", got)
+	}
+	if _, fail := decodeFixtureState("no object here", "test"); fail == nil {
+		t.Error("text with no state object must fail, not decode to a zero value")
+	}
+	if _, fail := decodeFixtureState("{not json}", "test"); fail == nil {
+		t.Error("a malformed object must fail")
 	}
 }

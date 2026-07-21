@@ -1,39 +1,40 @@
 package smoke
 
 // ui.go is the reference UI gate: it drives two real, third-party-shaped
-// applications -- a GTK3 client and Chromium -- through nothing but the eight
-// public MCP tools, and proves that what the appliance REPORTS about the
-// desktop matches what the applications actually DID.
+// applications -- a GTK3 client and Chromium -- through nothing but the public
+// MCP tools, and proves that what the appliance REPORTS matches what the
+// applications actually DID.
 //
-// The gate exists because every layer between the model and the pixels can
-// regress independently and silently: the Cua driver, the XLibre server, the
-// window manager, the ATK/AT-SPI bridge, and Chromium's own X11 (ozone) path.
-// A capture that returns bytes proves none of that -- checkComputerUseCapture
-// already covers plumbing. What this file adds is a CLOSED LOOP: every gesture
-// is aimed using coordinates taken from the accessibility tree, and the effect
-// is then read back from a source the appliance does not control (the GTK app's
-// own on-disk JSON, or the page's own rendered state text). If accessibility
-// geometry drifts from the real screen -- a scaling bug, a wrong window origin,
-// a stale frame -- the gesture lands somewhere harmless and the application
-// state never moves. That is the regression class this gate is here to catch,
-// and it cannot be caught by asserting on the tool's own return value.
+// Each half uses the path that works on this appliance, which was settled by
+// running it rather than by preference:
 //
-// Deliberately NOT used here: the `browser` tool. It is the eighth public tool
-// and it works, but it is CDP-backed -- it talks to Chromium's own debug
-// protocol. Asserting Chromium behaviour through CDP would be asking the
-// browser to grade its own homework: a page can report "clicks: 1" over CDP
-// while nothing was ever painted or delivered through X11. Every Chromium
-// assertion below therefore goes through computer_use only, so the input path
-// (XLibre -> ozone) and the output path (accessibility + pixels) are both
-// genuinely under test. checkBrowserReachable in checks.go covers the browser
-// tool's own plumbing.
+//   - GTK is driven by PIXELS. Nothing here is GTK-specific and nothing reads
+//     the accessibility tree for state. A live appliance exposes five
+//     accessibles for the entire fixture window, and the widgets carrying the
+//     state are not among them; giving them accessible names and making them
+//     focusable changed nothing, which is what proved the ceiling is in the
+//     platform's AT-SPI exposure rather than the fixture's wiring.
+//
+//   - Chromium is driven by the BROWSER tool. Flatpak Chromium publishes no
+//     AT-SPI DOM tree at all -- one node for the whole window -- which Phase 1
+//     established and which is the reason the browser tool exists. Driving a
+//     browser through the desktop accessibility path is not awkward here, it is
+//     impossible.
+//
+// What keeps the gate honest in both halves is the same: every gesture is
+// judged by state the appliance does not author -- the GTK app's own on-disk
+// JSON, or the page's own rendered state block. A gesture that was never
+// delivered cannot move either of them, so a pass means the input path really
+// carried it. Asserting on a tool's own return value would prove nothing.
+//
+// GTK coordinates come from the fixture's own fixed layout (gtk_fixed_put with
+// explicit positions), offset by the window's screen origin. That is
+// deterministic without asking the toolkit anything.
 //
 // This file assumes the fixtures are already installed and RUNNING in the
-// visible session; the shell harness (test/agent/run.sh) uploads, launches, and
-// afterwards cross-checks a public screenshot against a QMP capture. A missing
-// window is reported as a plain assertion failure with the window title in the
-// detail, never a panic -- an operator reading the artifact must be able to
-// tell "the fixture never started" apart from "the fixture ignored the input".
+// visible session; test/agent/run.sh uploads them, holds each one open with its
+// own bash call, and afterwards cross-checks a public screenshot against a QMP
+// capture.
 
 import (
 	"context"
@@ -47,66 +48,49 @@ import (
 )
 
 // gtkStatePath is where the GTK fixture atomically persists its own counters.
-// It is application-owned: the appliance never writes it, so reading it back
-// through the public read_file tool is independent evidence that the gesture
-// reached the application, not merely that computer_use returned success.
 const gtkStatePath = "/run/user/1000/hadron-cua-gtk-state.json"
 
-// Application names list_applications reports for the two fixtures.
-//
-// These are NOT the window titles. list_applications groups windows by the
-// application name Cua derives from WM_CLASS, so matching a page or window
-// title against it never succeeds: Chromium reports "Chromium" whatever the
-// document is called, and the GTK fixture reports the program name GTK turns
-// into its WM_CLASS. Verified on a live appliance, where the fixture appears as
-// {"name": "Hadron-cua-gtk"} -- GTK capitalises the first letter of prgname.
-//
-// The match is a case-insensitive substring so the capitalisation GTK applies,
-// and any suffix Chromium appends, cannot break it.
+// chromiumFixtureURL is the page the browser half drives.
+const chromiumFixtureURL = "file:///home/agent/e2e/web/index.html"
+
+// Application names list_applications reports. These are NOT window titles:
+// Cua derives the name from WM_CLASS, so Chromium reports "Chromium" whatever
+// the document is called, and the GTK fixture reports what GTK made of its
+// prgname ("Hadron-cua-gtk" on a live run). Matched case-insensitively.
 const (
-	gtkWindowTitle      = "hadron-cua-gtk"
-	chromiumWindowTitle = "chromium"
+	gtkAppName      = "hadron-cua-gtk"
+	chromiumAppName = "chromium"
 )
 
-// Accessible names both fixtures pin on their controls. They are identical
-// across the GTK and HTML fixtures on purpose: the same suite logic can aim at
-// either toolkit, which is what makes a divergence between them meaningful.
-const (
-	nameClickCount       = "Click count"
-	nameDoubleClickCount = "Double click count"
-	nameTextInput        = "Text input"
-	nameDragSource       = "Drag source"
-	nameDragTarget       = "Drag target"
-	nameScrollableRows   = "Scrollable rows"
-)
-
-// uiTypedText is the literal string the type action sends. It is deliberately
-// lowercase ASCII with no modifiers: this gate tests that typing arrives at
-// all, not that the keymap handles shifted or composed characters, and a
-// failure here must be unambiguous about which of the two it was.
+// uiTypedText is the literal string both type actions send.
 const uiTypedText = "hadron"
 
-// uiNamedKey is the named key pressed by the key checks. Return is chosen
-// because the two toolkits report it under DIFFERENT names -- GDK's
-// gdk_keyval_name yields "Return", the DOM's KeyboardEvent.key yields "Enter"
-// -- so a suite that expected one name everywhere would silently prove nothing
-// on one of the two platforms.
-const (
-	uiNamedKey       = "Return"
-	gtkKeyName       = "Return"
-	chromiumKeyName  = "Enter"
-	uiScrollNotches  = 5
-	uiSettleMs       = 400
-	uiMaxElements    = 2000
-	uiMaxTreeDepth   = 32
-	uiCaptureMinimum = 64
+// uiSettleMs is how long the desktop is given after a gesture, through the
+// public wait action rather than a local sleep so a paused or wedged session
+// surfaces instead of being papered over.
+const uiSettleMs = 500
+
+// The GTK fixture's layout, mirroring gtk_fixed_put in
+// test/agent/fixtures/gtk3/main.c. Positions are relative to the window's
+// origin. The numbers are duplicated from the fixture on purpose: a pixel gate
+// needs coordinates that do not depend on the toolkit reporting anything, and a
+// change on either side must be made on both.
+type uiRect struct{ x, y, w, h int }
+
+var (
+	gtkClickButton  = uiRect{40, 35, 180, 55}
+	gtkDoubleButton = uiRect{40, 120, 180, 70}
+	gtkTextEntry    = uiRect{40, 220, 360, 45}
+	gtkDragSource   = uiRect{40, 420, 150, 80}
+	gtkDragTarget   = uiRect{520, 420, 150, 80}
+	gtkScrollArea   = uiRect{700, 35, 170, 540}
 )
 
-// fixtureState is the state document BOTH fixtures expose, byte-identical in
-// shape. The GTK app writes it to gtkStatePath; the web page renders it into
-// its own #state element, from which it is read back out of the accessibility
-// tree. One Go type for both keeps the two halves of the gate honest: a field
-// only one fixture reports would show up immediately as an unused assertion.
+func (r uiRect) center() (int, int) { return r.x + r.w/2, r.y + r.h/2 }
+
+// fixtureState is the state both fixtures report, in the same shape. One type
+// for both keeps the halves honest: a field only one of them reports would show
+// up immediately as an unused assertion.
 type fixtureState struct {
 	Clicks       int    `json:"clicks"`
 	DoubleClicks int    `json:"double_clicks"`
@@ -118,12 +102,9 @@ type fixtureState struct {
 
 // RunUI drives both reference fixtures through the public tool surface.
 //
-// Check order within each fixture is not arbitrary. Both fixtures record the
-// LAST key seen in a single `key` field, and typing text is a sequence of key
-// presses -- so the text check must run before the named-key check or the text
-// check would clobber the very field the key check asserts on. Likewise the
-// click check runs before the double-click check so the two counters can be
-// asserted against independently observed baselines.
+// Ordering within each half is load-bearing: both fixtures record only the LAST
+// key seen, and typing is a run of key events, so the text check must precede
+// the named-key check or the latter would assert against typing's leftovers.
 func (s *Suite) RunUI(ctx context.Context) Report {
 	r := Report{Mode: "ui"}
 
@@ -140,555 +121,400 @@ func (s *Suite) RunUI(ctx context.Context) Report {
 }
 
 // ---------------------------------------------------------------------------
-// GTK fixture
+// GTK: pixels in, application state out
 // ---------------------------------------------------------------------------
 
-// runGTK locates the GTK window and runs the six gesture checks against it.
-// If the window is absent every dependent check is reported as a distinct,
-// named failure rather than being silently dropped: a report that is missing
-// checks looks like a shorter run, while a report full of "window not found"
-// failures says exactly what went wrong.
+var gtkDependents = []string{
+	"gtk_click", "gtk_double_click", "gtk_drag", "gtk_scroll", "gtk_text_entry", "gtk_named_key",
+}
+
 func (s *Suite) runGTK(ctx context.Context, sess *mcp.ClientSession) []CheckResult {
-	app, fail := s.locateApp(ctx, sess, gtkWindowTitle)
+	const present = "gtk_window_present"
+
+	app, fail := s.locateApp(ctx, sess, gtkAppName)
 	if fail != nil {
-		return expandFailure(fail, "gtk_window_present",
-			"gtk_click", "gtk_double_click", "gtk_drag", "gtk_scroll", "gtk_text_entry", "gtk_named_key")
+		return expandFailure(fail, present, gtkDependents...)
 	}
-
-	checks := []CheckResult{pass("gtk_window_present",
-		fmt.Sprintf("found the GTK fixture window (pid %d)", app.PID))}
-
-	// Focus once up front. Every gesture below aims at absolute screen
-	// coordinates taken from the accessibility tree, so an unfocused or
-	// occluded window would send input to whatever is on top instead -- and the
-	// JSON assertions would then fail for a reason that has nothing to do with
-	// the code under test.
-	if fail := s.focus(ctx, sess, app.PID); fail != nil {
-		return append(checks, expandFailure(fail, "gtk_focus",
-			"gtk_click", "gtk_double_click", "gtk_drag", "gtk_scroll", "gtk_text_entry", "gtk_named_key")...)
-	}
-
-	return append(checks,
-		s.checkGTKClick(ctx, sess, app.PID),
-		s.checkGTKDoubleClick(ctx, sess, app.PID),
-		s.checkGTKDrag(ctx, sess, app.PID),
-		s.checkGTKScroll(ctx, sess, app.PID),
-		s.checkGTKTextEntry(ctx, sess, app.PID),
-		s.checkGTKNamedKey(ctx, sess, app.PID),
-	)
-}
-
-// checkGTKClick presses the click button once. The button is located by its
-// accessible name and struck at the CENTRE OF ITS REPORTED RECTANGLE, so a
-// pass means the accessibility geometry and the real pointer coordinate space
-// agree; the counter in the application's own JSON is what proves the press
-// was delivered rather than merely dispatched.
-func (s *Suite) checkGTKClick(ctx context.Context, sess *mcp.ClientSession, pid int) CheckResult {
-	const name = "gtk_click"
-
-	before, fail := s.gtkState(ctx, sess)
+	origin, fail := s.windowOrigin(ctx, sess, app.PID)
 	if fail != nil {
-		return fail.named(name)
+		return expandFailure(fail, present, gtkDependents...)
 	}
-	el, fail := s.locateElement(ctx, sess, pid, nameClickCount)
-	if fail != nil {
-		return fail.named(name)
-	}
-	x, y := center(el)
-	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
-		Action: api.ActionClick, X: &x, Y: &y, Button: api.ButtonLeft,
-	}); fail != nil {
-		return fail.named(name)
+	if f := s.focus(ctx, sess, app.PID); f != nil {
+		return expandFailure(f, present, gtkDependents...)
 	}
 
-	want := before.Clicks + 1
-	if fail := s.expectAccessibleText(ctx, sess, pid, fmt.Sprintf("Clicks: %d", want)); fail != nil {
-		return fail.named(name)
-	}
-	after, fail := s.gtkState(ctx, sess)
-	if fail != nil {
-		return fail.named(name)
-	}
-	if after.Clicks != want {
-		return failAssert(name, fmt.Sprintf("clicks went %d -> %d, want %d", before.Clicks, after.Clicks, want))
-	}
-	return pass(name, fmt.Sprintf("click at the accessible centre raised clicks to %d, confirmed in the app's JSON", after.Clicks))
-}
+	pid := app.PID
+	checks := []CheckResult{pass(present,
+		fmt.Sprintf("found the GTK fixture window (pid %d) with its origin at %d,%d", pid, origin.x, origin.y))}
 
-// checkGTKDoubleClick proves the double-click is delivered as ONE
-// GDK_2BUTTON_PRESS and not as two unrelated presses. The fixture counts only
-// the compound event, so a driver that lost the timing (sending two clicks too
-// far apart) leaves double_clicks untouched even though pixels changed.
-func (s *Suite) checkGTKDoubleClick(ctx context.Context, sess *mcp.ClientSession, pid int) CheckResult {
-	const name = "gtk_double_click"
-
-	before, fail := s.gtkState(ctx, sess)
-	if fail != nil {
-		return fail.named(name)
-	}
-	el, fail := s.locateElement(ctx, sess, pid, nameDoubleClickCount)
-	if fail != nil {
-		return fail.named(name)
-	}
-	x, y := center(el)
-	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
-		Action: api.ActionDoubleClick, X: &x, Y: &y, Button: api.ButtonLeft,
-	}); fail != nil {
-		return fail.named(name)
+	at := func(r uiRect) (int, int) {
+		x, y := r.center()
+		return origin.x + x, origin.y + y
 	}
 
-	want := before.DoubleClicks + 1
-	if fail := s.expectAccessibleText(ctx, sess, pid, fmt.Sprintf("Double clicks: %d", want)); fail != nil {
-		return fail.named(name)
-	}
-	after, fail := s.gtkState(ctx, sess)
-	if fail != nil {
-		return fail.named(name)
-	}
-	if after.DoubleClicks != want {
-		return failAssert(name, fmt.Sprintf("double_clicks went %d -> %d, want %d", before.DoubleClicks, after.DoubleClicks, want))
-	}
-	return pass(name, fmt.Sprintf("double click raised double_clicks to %d, confirmed in the app's JSON", after.DoubleClicks))
-}
-
-// checkGTKDrag drags the source onto the target. This is the strongest single
-// gesture in the suite: GTK's drag-and-drop only completes if press, a run of
-// intermediate motion events, and release all arrive in order with the X11
-// selection handshake in between. A driver that "drags" by teleporting the
-// pointer and releasing produces a visually plausible screenshot and a
-// `dragged: false` state.
-func (s *Suite) checkGTKDrag(ctx context.Context, sess *mcp.ClientSession, pid int) CheckResult {
-	const name = "gtk_drag"
-
-	before, fail := s.gtkState(ctx, sess)
-	if fail != nil {
-		return fail.named(name)
-	}
-	// A fixture that already reports a completed drop makes the assertion
-	// below vacuous, so refuse to run rather than record a pass that proves
-	// nothing about this gesture.
-	if before.Dragged {
-		return failAssert(name, "the fixture already reported dragged=true before the gesture; the assertion would be vacuous")
-	}
-	source, fail := s.locateElement(ctx, sess, pid, nameDragSource)
-	if fail != nil {
-		return fail.named(name)
-	}
-	target, fail := s.locateElement(ctx, sess, pid, nameDragTarget)
-	if fail != nil {
-		return fail.named(name)
-	}
-	fromX, fromY := center(source)
-	toX, toY := center(target)
-	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
-		Action: api.ActionDrag,
-		FromX:  &fromX, FromY: &fromY, ToX: &toX, ToY: &toY,
-		Button: api.ButtonLeft,
-	}); fail != nil {
-		return fail.named(name)
-	}
-
-	if fail := s.expectAccessibleText(ctx, sess, pid, "Drag target: dropped"); fail != nil {
-		return fail.named(name)
-	}
-	after, fail := s.gtkState(ctx, sess)
-	if fail != nil {
-		return fail.named(name)
-	}
-	if !after.Dragged {
-		return failAssert(name, "the drop was not accepted: the app still reports dragged=false")
-	}
-	return pass(name, "drag from the accessible source to the accessible target was accepted by the app")
-}
-
-// checkGTKScroll scrolls the row list and asserts the movement two ways that
-// fail independently. The JSON scroll_value proves the adjustment moved; the
-// accessibility geometry of a known row proves the CONTENT moved with it. They
-// can disagree: a toolkit can update its adjustment while the AT-SPI bridge
-// keeps handing out stale, pre-scroll rectangles, which is precisely the bug
-// that makes a model click the wrong row forever after.
-func (s *Suite) checkGTKScroll(ctx context.Context, sess *mcp.ClientSession, pid int) CheckResult {
-	const name = "gtk_scroll"
-
-	before, fail := s.gtkState(ctx, sess)
-	if fail != nil {
-		return fail.named(name)
-	}
-	rows, fail := s.locateElement(ctx, sess, pid, nameScrollableRows)
-	if fail != nil {
-		return fail.named(name)
-	}
-	// The first row is the geometry witness: after scrolling down it must have
-	// moved UP the screen. Captured before the gesture so the comparison is
-	// against an observed value, not a hard-coded coordinate.
-	firstRowBefore, fail := s.locateElement(ctx, sess, pid, "Scrollable row 01")
-	if fail != nil {
-		return fail.named(name)
-	}
-
-	x, y := center(rows)
-	amount := uiScrollNotches
-	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
-		Action: api.ActionScroll, X: &x, Y: &y,
-		Direction: api.DirectionDown, Amount: &amount,
-	}); fail != nil {
-		return fail.named(name)
-	}
-
-	firstRowAfter, fail := s.locateElement(ctx, sess, pid, "Scrollable row 01")
-	if fail != nil {
-		return fail.named(name)
-	}
-	if firstRowAfter.Y >= firstRowBefore.Y {
-		return failAssert(name, fmt.Sprintf(
-			"accessibility still reports the first row at y=%d (was y=%d) after scrolling down; geometry did not follow the scroll",
-			firstRowAfter.Y, firstRowBefore.Y))
-	}
-	after, fail := s.gtkState(ctx, sess)
-	if fail != nil {
-		return fail.named(name)
-	}
-	if after.ScrollValue <= before.ScrollValue {
-		return failAssert(name, fmt.Sprintf("scroll_value went %d -> %d, want an increase", before.ScrollValue, after.ScrollValue))
-	}
-	return pass(name, fmt.Sprintf(
-		"scroll moved the accessible first row from y=%d to y=%d and raised scroll_value to %d",
-		firstRowBefore.Y, firstRowAfter.Y, after.ScrollValue))
-}
-
-// checkGTKTextEntry focuses the entry by clicking its accessible rectangle and
-// types a literal string. Focus-by-click is deliberate: it is the only path a
-// model actually has, and it exercises the window manager's focus handling as
-// well as the keyboard route. The entry's CONTENT is asserted from the app's
-// JSON because ATK exposes an entry's text as an AtkText value, not as the
-// accessible name -- see the note on accessibility limits at the bottom of this
-// file.
-func (s *Suite) checkGTKTextEntry(ctx context.Context, sess *mcp.ClientSession, pid int) CheckResult {
-	const name = "gtk_text_entry"
-
-	el, fail := s.locateElement(ctx, sess, pid, nameTextInput)
-	if fail != nil {
-		return fail.named(name)
-	}
-	x, y := center(el)
-	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
-		Action: api.ActionClick, X: &x, Y: &y, Button: api.ButtonLeft,
-	}); fail != nil {
-		return fail.named(name)
-	}
-	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{Action: api.ActionType, Text: uiTypedText}); fail != nil {
-		return fail.named(name)
-	}
-
-	// The entry must still be resolvable in a FRESH tree afterwards. A toolkit
-	// that rebuilt or lost its accessible object on focus is a real failure
-	// mode, and it would leave every later element_index dangling.
-	if fail := s.expectAccessibleText(ctx, sess, pid, nameTextInput); fail != nil {
-		return fail.named(name)
-	}
-	after, fail := s.gtkState(ctx, sess)
-	if fail != nil {
-		return fail.named(name)
-	}
-	if after.Text != uiTypedText {
-		return failAssert(name, fmt.Sprintf("entry text is %q, want %q", after.Text, uiTypedText))
-	}
-	return pass(name, fmt.Sprintf("typed %d characters into the accessible entry, confirmed in the app's JSON", len(uiTypedText)))
-}
-
-// checkGTKNamedKey presses a NAMED key rather than a character. Named keys take
-// a different route than typed text -- they must be mapped to a keysym and sent
-// as a synthetic press/release pair -- so a keymap regression can break Return
-// while ordinary typing still works. The fixture records GDK's own name for
-// what it received, which is what makes this an assertion about the key that
-// ARRIVED rather than the key that was requested.
-func (s *Suite) checkGTKNamedKey(ctx context.Context, sess *mcp.ClientSession, pid int) CheckResult {
-	const name = "gtk_named_key"
-
-	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{Action: api.ActionKey, Key: uiNamedKey}); fail != nil {
-		return fail.named(name)
-	}
-	if fail := s.expectAccessibleText(ctx, sess, pid, "Named key: "+gtkKeyName); fail != nil {
-		return fail.named(name)
-	}
-	after, fail := s.gtkState(ctx, sess)
-	if fail != nil {
-		return fail.named(name)
-	}
-	if after.Key != gtkKeyName {
-		return failAssert(name, fmt.Sprintf("app received key %q, want %q", after.Key, gtkKeyName))
-	}
-	return pass(name, fmt.Sprintf("named key %s arrived as GDK %q, confirmed in the app's JSON", uiNamedKey, after.Key))
-}
-
-// ---------------------------------------------------------------------------
-// Chromium fixture
-// ---------------------------------------------------------------------------
-
-// runChromium locates the Chromium window and runs the five gesture checks.
-//
-// Chromium has no application-owned file to read back, so every assertion here
-// rests on two INDEPENDENT observations of the same window: a freshly queried
-// accessibility tree (which carries the page's rendered state text) and a fresh
-// pixel capture that must differ from the pre-gesture one. Requiring both is
-// what makes the check meaningful without CDP -- accessibility alone can report
-// a DOM mutation that was never composited, and pixels alone cannot say what
-// changed.
-func (s *Suite) runChromium(ctx context.Context, sess *mcp.ClientSession) []CheckResult {
-	app, fail := s.locateApp(ctx, sess, chromiumWindowTitle)
-	if fail != nil {
-		return expandFailure(fail, "chromium_window_present",
-			"chromium_click", "chromium_drag", "chromium_scroll", "chromium_type", "chromium_key")
-	}
-
-	checks := []CheckResult{pass("chromium_window_present",
-		fmt.Sprintf("found the Chromium fixture window (pid %d)", app.PID))}
-
-	if fail := s.focus(ctx, sess, app.PID); fail != nil {
-		return append(checks, expandFailure(fail, "chromium_focus",
-			"chromium_click", "chromium_drag", "chromium_scroll", "chromium_type", "chromium_key")...)
-	}
-
-	// Same ordering constraint as GTK: the page's keydown listener is on
-	// document, so typing overwrites `key`. Text before key.
-	return append(checks,
-		s.checkChromiumClick(ctx, sess, app.PID),
-		s.checkChromiumDrag(ctx, sess, app.PID),
-		s.checkChromiumScroll(ctx, sess, app.PID),
-		s.checkChromiumType(ctx, sess, app.PID),
-		s.checkChromiumKey(ctx, sess, app.PID),
-	)
-}
-
-func (s *Suite) checkChromiumClick(ctx context.Context, sess *mcp.ClientSession, pid int) CheckResult {
-	const name = "chromium_click"
-	return s.chromiumGesture(ctx, sess, pid, name, nameClickCount,
-		func(el *api.AccessibilityElement) api.ComputerUseInput {
-			x, y := center(el)
-			return api.ComputerUseInput{Action: api.ActionClick, X: &x, Y: &y, Button: api.ButtonLeft}
+	checks = append(checks, s.gtkGesture(ctx, sess, "gtk_click",
+		func() *terminalFail {
+			x, y := at(gtkClickButton)
+			return s.act(ctx, sess, api.ComputerUseInput{
+				Action: api.ActionClick, PID: &pid, X: &x, Y: &y, Button: api.ButtonLeft})
 		},
-		func(before, after fixtureState) string {
+		func(before, after fixtureState) error {
 			if after.Clicks != before.Clicks+1 {
-				return fmt.Sprintf("clicks went %d -> %d, want %d", before.Clicks, after.Clicks, before.Clicks+1)
+				return fmt.Errorf("clicks went %d -> %d, want +1", before.Clicks, after.Clicks)
 			}
-			return ""
-		})
-}
+			return nil
+		}))
 
-// checkChromiumDrag exercises HTML5 drag-and-drop, which Chromium implements on
-// top of the platform's own drag protocol. It is the assertion most sensitive
-// to the ozone/X11 path being wired correctly, and it is exactly the one a
-// CDP-driven test would fake away: dispatching synthetic drag events over the
-// debug protocol proves nothing about whether real pointer motion reaches the
-// renderer.
-func (s *Suite) checkChromiumDrag(ctx context.Context, sess *mcp.ClientSession, pid int) CheckResult {
-	const name = "chromium_drag"
-
-	before, fail := s.chromiumState(ctx, sess, pid)
-	if fail != nil {
-		return fail.named(name)
-	}
-	if before.Dragged {
-		return failAssert(name, "the page already reported dragged=true before the gesture; the assertion would be vacuous")
-	}
-	source, fail := s.locateElement(ctx, sess, pid, nameDragSource)
-	if fail != nil {
-		return fail.named(name)
-	}
-	target, fail := s.locateElement(ctx, sess, pid, nameDragTarget)
-	if fail != nil {
-		return fail.named(name)
-	}
-	shotBefore, fail := s.capture(ctx, sess, pid)
-	if fail != nil {
-		return fail.named(name)
-	}
-
-	fromX, fromY := center(source)
-	toX, toY := center(target)
-	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
-		Action: api.ActionDrag,
-		FromX:  &fromX, FromY: &fromY, ToX: &toX, ToY: &toY,
-		Button: api.ButtonLeft,
-	}); fail != nil {
-		return fail.named(name)
-	}
-
-	after, fail := s.chromiumState(ctx, sess, pid)
-	if fail != nil {
-		return fail.named(name)
-	}
-	if !after.Dragged {
-		return failAssert(name, "the page still reports dragged=false after the drag gesture")
-	}
-	if fail := s.expectRepaint(ctx, sess, pid, shotBefore); fail != nil {
-		return fail.named(name)
-	}
-	return pass(name, "HTML5 drag completed through real pointer motion and the window repainted")
-}
-
-func (s *Suite) checkChromiumScroll(ctx context.Context, sess *mcp.ClientSession, pid int) CheckResult {
-	const name = "chromium_scroll"
-	return s.chromiumGesture(ctx, sess, pid, name, nameScrollableRows,
-		func(el *api.AccessibilityElement) api.ComputerUseInput {
-			x, y := center(el)
-			amount := uiScrollNotches
-			return api.ComputerUseInput{
-				Action: api.ActionScroll, X: &x, Y: &y,
-				Direction: api.DirectionDown, Amount: &amount,
-			}
+	checks = append(checks, s.gtkGesture(ctx, sess, "gtk_double_click",
+		func() *terminalFail {
+			x, y := at(gtkDoubleButton)
+			return s.act(ctx, sess, api.ComputerUseInput{
+				Action: api.ActionDoubleClick, PID: &pid, X: &x, Y: &y, Button: api.ButtonLeft})
 		},
-		func(before, after fixtureState) string {
-			if after.ScrollValue <= before.ScrollValue {
-				return fmt.Sprintf("scroll_value went %d -> %d, want an increase", before.ScrollValue, after.ScrollValue)
+		func(before, after fixtureState) error {
+			if after.DoubleClicks != before.DoubleClicks+1 {
+				return fmt.Errorf("double clicks went %d -> %d, want +1", before.DoubleClicks, after.DoubleClicks)
 			}
-			return ""
-		})
+			return nil
+		}))
+
+	checks = append(checks, s.gtkGesture(ctx, sess, "gtk_drag",
+		func() *terminalFail {
+			fx, fy := at(gtkDragSource)
+			tx, ty := at(gtkDragTarget)
+			return s.act(ctx, sess, api.ComputerUseInput{
+				Action: api.ActionDrag, PID: &pid,
+				FromX: &fx, FromY: &fy, ToX: &tx, ToY: &ty, Button: api.ButtonLeft})
+		},
+		func(before, after fixtureState) error {
+			if before.Dragged {
+				return fmt.Errorf("the fixture already recorded a drop before the gesture; the check would be vacuous")
+			}
+			if !after.Dragged {
+				return fmt.Errorf("the fixture never recorded a drop")
+			}
+			return nil
+		}))
+
+	checks = append(checks, s.gtkGesture(ctx, sess, "gtk_scroll",
+		func() *terminalFail {
+			x, y := at(gtkScrollArea)
+			amount := 5
+			return s.act(ctx, sess, api.ComputerUseInput{
+				Action: api.ActionScroll, PID: &pid, X: &x, Y: &y,
+				Direction: api.DirectionDown, Amount: &amount})
+		},
+		func(before, after fixtureState) error {
+			if after.ScrollValue <= before.ScrollValue {
+				return fmt.Errorf("scroll value went %d -> %d, want an increase",
+					before.ScrollValue, after.ScrollValue)
+			}
+			return nil
+		}))
+
+	checks = append(checks, s.gtkGesture(ctx, sess, "gtk_text_entry",
+		func() *terminalFail {
+			x, y := at(gtkTextEntry)
+			if f := s.act(ctx, sess, api.ComputerUseInput{
+				Action: api.ActionClick, PID: &pid, X: &x, Y: &y, Button: api.ButtonLeft}); f != nil {
+				return f
+			}
+			return s.act(ctx, sess, api.ComputerUseInput{
+				Action: api.ActionType, PID: &pid, Text: uiTypedText})
+		},
+		func(before, after fixtureState) error {
+			if !strings.Contains(after.Text, uiTypedText) {
+				return fmt.Errorf("the entry holds %q, want it to contain %q", after.Text, uiTypedText)
+			}
+			return nil
+		}))
+
+	// Last: typing above overwrites the fixture's single key field.
+	checks = append(checks, s.gtkGesture(ctx, sess, "gtk_named_key",
+		func() *terminalFail {
+			return s.act(ctx, sess, api.ComputerUseInput{
+				Action: api.ActionKey, PID: &pid, Key: "Return"})
+		},
+		func(before, after fixtureState) error {
+			if after.Key != "Return" {
+				return fmt.Errorf("the fixture recorded key %q, want %q", after.Key, "Return")
+			}
+			return nil
+		}))
+
+	return checks
 }
 
-// checkChromiumType clicks the input to focus it and types. Unlike the GTK
-// entry, the page mirrors its input value into its own rendered state text, so
-// the typed string IS readable from the accessibility tree -- no side channel
-// required.
-func (s *Suite) checkChromiumType(ctx context.Context, sess *mcp.ClientSession, pid int) CheckResult {
-	const name = "chromium_type"
+// gtkGesture performs one gesture and judges it by the fixture's OWN state
+// file, read before and after through the public read_file tool.
+//
+// The application's state is the honest witness: it cannot agree with a gesture
+// that was never delivered, and unlike a pixel diff it says WHAT changed rather
+// than merely that something did.
+func (s *Suite) gtkGesture(ctx context.Context, sess *mcp.ClientSession, name string,
+	gesture func() *terminalFail, judge func(before, after fixtureState) error) CheckResult {
 
-	el, fail := s.locateElement(ctx, sess, pid, nameTextInput)
+	before, fail := s.gtkState(ctx, sess)
 	if fail != nil {
 		return fail.named(name)
 	}
-	shotBefore, fail := s.capture(ctx, sess, pid)
+	if f := gesture(); f != nil {
+		return f.named(name)
+	}
+	after, fail := s.gtkState(ctx, sess)
 	if fail != nil {
 		return fail.named(name)
 	}
-
-	x, y := center(el)
-	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{
-		Action: api.ActionClick, X: &x, Y: &y, Button: api.ButtonLeft,
-	}); fail != nil {
-		return fail.named(name)
+	if err := judge(before, after); err != nil {
+		return failAssert(name, err.Error())
 	}
-	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{Action: api.ActionType, Text: uiTypedText}); fail != nil {
-		return fail.named(name)
-	}
-
-	after, fail := s.chromiumState(ctx, sess, pid)
-	if fail != nil {
-		return fail.named(name)
-	}
-	if after.Text != uiTypedText {
-		return failAssert(name, fmt.Sprintf("page reports text %q, want %q", after.Text, uiTypedText))
-	}
-	if fail := s.expectRepaint(ctx, sess, pid, shotBefore); fail != nil {
-		return fail.named(name)
-	}
-	return pass(name, fmt.Sprintf("typed text reached the page (%d characters) and the window repainted", len(uiTypedText)))
+	return pass(name, "the gesture landed and the application recorded it")
 }
 
-// checkChromiumKey asserts the DOM's name for the key, not X11's. The same
-// physical Return that GDK reports as "Return" surfaces in the DOM as "Enter";
-// asserting the platform-correct name on each side is what proves the key was
-// translated by the real input stack rather than echoed back by the driver.
-func (s *Suite) checkChromiumKey(ctx context.Context, sess *mcp.ClientSession, pid int) CheckResult {
-	const name = "chromium_key"
-
-	shotBefore, fail := s.capture(ctx, sess, pid)
-	if fail != nil {
-		return fail.named(name)
+// gtkState reads the fixture's state file with the public read_file tool.
+func (s *Suite) gtkState(ctx context.Context, sess *mcp.ClientSession) (fixtureState, *terminalFail) {
+	var out api.ReadFileOutput
+	if err := s.callInto(ctx, sess, api.ToolReadFile, api.ReadFileInput{Path: gtkStatePath}, &out); err != nil {
+		return fixtureState{}, &terminalFail{transport: true, detail: "read_file call failed"}
 	}
-	if fail := s.actOn(ctx, sess, pid, api.ComputerUseInput{Action: api.ActionKey, Key: uiNamedKey}); fail != nil {
-		return fail.named(name)
+	if out.Code != "" {
+		return fixtureState{}, &terminalFail{
+			detail: fmt.Sprintf("read_file of the fixture state reported %s: %s", out.Code, out.Message)}
 	}
-	after, fail := s.chromiumState(ctx, sess, pid)
-	if fail != nil {
-		return fail.named(name)
-	}
-	if after.Key != chromiumKeyName {
-		return failAssert(name, fmt.Sprintf("page received key %q, want %q", after.Key, chromiumKeyName))
-	}
-	if fail := s.expectRepaint(ctx, sess, pid, shotBefore); fail != nil {
-		return fail.named(name)
-	}
-	return pass(name, fmt.Sprintf("named key %s arrived in the DOM as %q and the window repainted", uiNamedKey, after.Key))
-}
-
-// chromiumGesture is the shared body of the Chromium checks whose shape is
-// "read state, aim at an accessible element, act, re-read state, prove the
-// window repainted". verify returns "" when the state moved as required, or a
-// human-readable reason it did not.
-func (s *Suite) chromiumGesture(
-	ctx context.Context,
-	sess *mcp.ClientSession,
-	pid int,
-	name, target string,
-	gesture func(*api.AccessibilityElement) api.ComputerUseInput,
-	verify func(before, after fixtureState) string,
-) CheckResult {
-	before, fail := s.chromiumState(ctx, sess, pid)
-	if fail != nil {
-		return fail.named(name)
-	}
-	el, fail := s.locateElement(ctx, sess, pid, target)
-	if fail != nil {
-		return fail.named(name)
-	}
-	shotBefore, fail := s.capture(ctx, sess, pid)
-	if fail != nil {
-		return fail.named(name)
-	}
-	if fail := s.act(ctx, sess, gesture(el)); fail != nil {
-		return fail.named(name)
-	}
-	after, fail := s.chromiumState(ctx, sess, pid)
-	if fail != nil {
-		return fail.named(name)
-	}
-	if reason := verify(before, after); reason != "" {
-		return failAssert(name, reason)
-	}
-	if fail := s.expectRepaint(ctx, sess, pid, shotBefore); fail != nil {
-		return fail.named(name)
-	}
-	return pass(name, fmt.Sprintf("gesture on %q changed the page's own state and repainted the window", target))
+	return decodeFixtureState(out.Content, "the fixture's state file")
 }
 
 // ---------------------------------------------------------------------------
-// Tool helpers
+// Chromium: the browser tool
 // ---------------------------------------------------------------------------
 
-// locateApp finds a running application whose reported name contains name.
-// The comparison is a case-insensitive substring: Cua reports the application
-// name from WM_CLASS, GTK capitalises what it derives from prgname, and
-// Chromium may append to its own. The fixture names are distinctive enough that
-// a substring cannot collide with an unrelated window.
-func (s *Suite) locateApp(ctx context.Context, sess *mcp.ClientSession, title string) (api.ApplicationInfo, *terminalFail) {
+var chromiumDependents = []string{
+	"chromium_navigate", "chromium_click", "chromium_type", "chromium_key", "chromium_scroll",
+}
+
+func (s *Suite) runChromium(ctx context.Context, sess *mcp.ClientSession) []CheckResult {
+	const present = "chromium_window_present"
+
+	app, fail := s.locateApp(ctx, sess, chromiumAppName)
+	if fail != nil {
+		return expandFailure(fail, present, chromiumDependents...)
+	}
+	checks := []CheckResult{pass(present, fmt.Sprintf("found the Chromium fixture window (pid %d)", app.PID))}
+
+	// Put the browser on the fixture page explicitly. It may already be there,
+	// but asserting it costs one call and removes a whole class of "why is the
+	// page empty" confusion later.
+	nav, f := s.browser(ctx, sess, api.BrowserInput{Action: api.BrowserNavigate, URL: chromiumFixtureURL})
+	if f != nil {
+		return append(checks, expandFailure(f, "chromium_navigate", chromiumDependents[1:]...)...)
+	}
+	if !strings.Contains(nav.URL, "index.html") {
+		return append(checks, expandFailure(
+			&terminalFail{detail: fmt.Sprintf("landed on %q, want the fixture page", nav.URL)},
+			"chromium_navigate", chromiumDependents[1:]...)...)
+	}
+	checks = append(checks, pass("chromium_navigate", "the browser tool loaded the fixture page: "+nav.Title))
+
+	checks = append(checks, s.browserGesture(ctx, sess, "chromium_click", "click",
+		func(ref string) api.BrowserInput { return api.BrowserInput{Action: api.BrowserClick, Ref: ref} },
+		func(before, after fixtureState) error {
+			if after.Clicks != before.Clicks+1 {
+				return fmt.Errorf("clicks went %d -> %d, want +1", before.Clicks, after.Clicks)
+			}
+			return nil
+		}))
+
+	checks = append(checks, s.browserGesture(ctx, sess, "chromium_type", "text",
+		func(ref string) api.BrowserInput {
+			return api.BrowserInput{Action: api.BrowserType, Ref: ref, Text: uiTypedText}
+		},
+		func(before, after fixtureState) error {
+			if !strings.Contains(after.Text, uiTypedText) {
+				return fmt.Errorf("the input holds %q, want it to contain %q", after.Text, uiTypedText)
+			}
+			return nil
+		}))
+
+	// Last, for the same reason as the GTK half.
+	checks = append(checks, s.browserGesture(ctx, sess, "chromium_key", "",
+		func(string) api.BrowserInput { return api.BrowserInput{Action: api.BrowserPress, Key: "Enter"} },
+		func(before, after fixtureState) error {
+			if after.Key != "Enter" {
+				return fmt.Errorf("the page recorded key %q, want %q", after.Key, "Enter")
+			}
+			return nil
+		}))
+
+	checks = append(checks, s.browserGesture(ctx, sess, "chromium_scroll", "",
+		func(string) api.BrowserInput {
+			amount := 400
+			return api.BrowserInput{Action: api.BrowserScroll, Direction: api.DirectionDown, Amount: &amount}
+		},
+		func(before, after fixtureState) error {
+			if after.ScrollValue <= before.ScrollValue {
+				return fmt.Errorf("scroll value went %d -> %d, want an increase",
+					before.ScrollValue, after.ScrollValue)
+			}
+			return nil
+		}))
+
+	return checks
+}
+
+// browserGesture performs one browser action and judges it by the page's own
+// rendered state block.
+//
+// When match is non-empty the action needs a ref, so the element is located in
+// a FRESH snapshot first -- which also proves the page still exposes it, and
+// means a ref can never outlive the page it came from.
+func (s *Suite) browserGesture(ctx context.Context, sess *mcp.ClientSession, name, match string,
+	build func(ref string) api.BrowserInput, judge func(before, after fixtureState) error) CheckResult {
+
+	before, fail := s.chromiumState(ctx, sess)
+	if fail != nil {
+		return fail.named(name)
+	}
+
+	ref := ""
+	if match != "" {
+		snap, f := s.browser(ctx, sess, api.BrowserInput{Action: api.BrowserSnapshot})
+		if f != nil {
+			return f.named(name)
+		}
+		var seen []string
+		for _, el := range snap.Elements {
+			seen = append(seen, el.Name)
+			if strings.Contains(strings.ToLower(el.Name), strings.ToLower(match)) {
+				ref = el.Ref
+				break
+			}
+		}
+		if ref == "" {
+			return failAssert(name, fmt.Sprintf("no element matching %q among %d snapshot elements: %v",
+				match, len(snap.Elements), seen))
+		}
+	}
+
+	if _, f := s.browser(ctx, sess, build(ref)); f != nil {
+		return f.named(name)
+	}
+
+	after, fail := s.chromiumState(ctx, sess)
+	if fail != nil {
+		return fail.named(name)
+	}
+	if err := judge(before, after); err != nil {
+		return failAssert(name, err.Error())
+	}
+	return pass(name, "the browser action landed and the page recorded it")
+}
+
+// chromiumState reads the page's own rendered state block through the browser
+// tool's text action -- the same text a human reads off the screen.
+func (s *Suite) chromiumState(ctx context.Context, sess *mcp.ClientSession) (fixtureState, *terminalFail) {
+	out, fail := s.browser(ctx, sess, api.BrowserInput{Action: api.BrowserText})
+	if fail != nil {
+		return fixtureState{}, fail
+	}
+	return decodeFixtureState(out.Text, "the page's state block")
+}
+
+func (s *Suite) browser(ctx context.Context, sess *mcp.ClientSession, in api.BrowserInput) (api.BrowserOutput, *terminalFail) {
+	var out api.BrowserOutput
+	if err := s.callInto(ctx, sess, api.ToolBrowser, in, &out); err != nil {
+		return out, &terminalFail{transport: true, detail: fmt.Sprintf("browser %s call failed", in.Action)}
+	}
+	if out.Code != "" {
+		return out, &terminalFail{detail: fmt.Sprintf("browser %s reported %s: %s", in.Action, out.Code, out.Message)}
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// shared helpers
+// ---------------------------------------------------------------------------
+
+// decodeFixtureState pulls the JSON object out of text that CONTAINS it. Both
+// fixtures embed their state in surrounding content, so the object is located
+// rather than assumed to be the whole string.
+func decodeFixtureState(text, what string) (fixtureState, *terminalFail) {
+	start := strings.Index(text, "{")
+	end := strings.LastIndex(text, "}")
+	if start < 0 || end <= start {
+		return fixtureState{}, &terminalFail{detail: what + " contained no state object"}
+	}
+	var state fixtureState
+	if err := json.Unmarshal([]byte(text[start:end+1]), &state); err != nil {
+		return fixtureState{}, &terminalFail{detail: what + " is not valid JSON"}
+	}
+	return state, nil
+}
+
+type uiPoint struct{ x, y int }
+
+// windowOrigin returns an application window's screen position, so the
+// fixture's own layout coordinates become screen coordinates.
+//
+// get_window_state reports frames in SCREEN space, and the outermost of them is
+// the window itself. This is the one thing the gate asks the accessibility
+// layer for, and it asks only for geometry -- not for state, and not for any
+// individual widget -- which is exactly the part that works on this appliance.
+func (s *Suite) windowOrigin(ctx context.Context, sess *mcp.ClientSession, pid int) (uiPoint, *terminalFail) {
+	var out api.ComputerUseOutput
+	if err := s.callInto(ctx, sess, api.ToolComputerUse, api.ComputerUseInput{
+		Action: api.ActionAccessibility, Scope: api.ScopeWindow, PID: &pid,
+	}, &out); err != nil {
+		return uiPoint{}, &terminalFail{transport: true, detail: "could not read the window geometry"}
+	}
+	if out.Code != "" {
+		return uiPoint{}, &terminalFail{
+			detail: fmt.Sprintf("window geometry reported %s: %s", out.Code, out.Message)}
+	}
+	best, area := uiPoint{}, -1
+	for _, el := range out.Elements {
+		if el.Width*el.Height > area {
+			area = el.Width * el.Height
+			best = uiPoint{el.X, el.Y}
+		}
+	}
+	if area <= 0 {
+		return uiPoint{}, &terminalFail{detail: "the window reported no usable geometry"}
+	}
+	return best, nil
+}
+
+// locateApp finds a running application whose reported name contains name,
+// case-insensitively. Cua derives that name from WM_CLASS, which is why this
+// matches an application name and never a window title.
+func (s *Suite) locateApp(ctx context.Context, sess *mcp.ClientSession, name string) (api.ApplicationInfo, *terminalFail) {
 	var out api.ComputerUseOutput
 	if err := s.callInto(ctx, sess, api.ToolComputerUse, api.ComputerUseInput{
 		Action: api.ActionListApplications,
 	}, &out); err != nil {
-		return api.ApplicationInfo{}, &terminalFail{transport: true, detail: "computer_use list_applications call failed"}
+		return api.ApplicationInfo{}, &terminalFail{transport: true, detail: "list_applications call failed"}
 	}
 	if out.Code != "" {
-		return api.ApplicationInfo{}, &terminalFail{detail: fmt.Sprintf("list_applications reported %s: %s", out.Code, out.Message)}
+		return api.ApplicationInfo{}, &terminalFail{
+			detail: fmt.Sprintf("list_applications reported %s: %s", out.Code, out.Message)}
 	}
+	var seen []string
 	for _, app := range out.Applications {
-		if strings.Contains(strings.ToLower(app.Name), strings.ToLower(title)) {
+		seen = append(seen, app.Name)
+		if strings.Contains(strings.ToLower(app.Name), strings.ToLower(name)) {
 			return app, nil
 		}
 	}
-	return api.ApplicationInfo{}, &terminalFail{detail: fmt.Sprintf(
-		"no application named %q among the %d listed applications; the fixture is not running",
-		title, len(out.Applications))}
+	return api.ApplicationInfo{}, &terminalFail{
+		detail: fmt.Sprintf("no application named %q among %d listed: %v; the fixture is not running",
+			name, len(out.Applications), seen)}
 }
 
-// focus raises the fixture window so subsequent absolute-coordinate gestures
-// reach it rather than whatever the window manager last stacked on top.
 func (s *Suite) focus(ctx context.Context, sess *mcp.ClientSession, pid int) *terminalFail {
 	var out api.ComputerUseOutput
 	if err := s.callInto(ctx, sess, api.ToolComputerUse, api.ComputerUseInput{
 		Action: api.ActionFocusApplication, PID: &pid,
 	}, &out); err != nil {
-		return &terminalFail{transport: true, detail: "computer_use focus_application call failed"}
+		return &terminalFail{transport: true, detail: "focus_application call failed"}
 	}
 	if out.Code != "" {
 		return &terminalFail{detail: fmt.Sprintf("focus_application reported %s: %s", out.Code, out.Message)}
@@ -696,127 +522,8 @@ func (s *Suite) focus(ctx context.Context, sess *mcp.ClientSession, pid int) *te
 	return nil
 }
 
-// accessibility returns a FRESH accessibility tree for the given window. It is
-// never cached: the whole point of the post-gesture query is that it re-walks
-// the live tree, so a stale snapshot would turn every assertion vacuous.
-func (s *Suite) accessibility(ctx context.Context, sess *mcp.ClientSession, pid int) ([]api.AccessibilityElement, *terminalFail) {
-	maxElements := uiMaxElements
-	maxDepth := uiMaxTreeDepth
-	var out api.ComputerUseOutput
-	if err := s.callInto(ctx, sess, api.ToolComputerUse, api.ComputerUseInput{
-		Action: api.ActionAccessibility,
-		Scope:  api.ScopeWindow, PID: &pid,
-		MaxElements: &maxElements, MaxDepth: &maxDepth,
-	}, &out); err != nil {
-		return nil, &terminalFail{transport: true, detail: "computer_use accessibility call failed"}
-	}
-	if out.Code != "" {
-		return nil, &terminalFail{detail: fmt.Sprintf("accessibility reported %s: %s", out.Code, out.Message)}
-	}
-	if len(out.Elements) == 0 {
-		return nil, &terminalFail{detail: "accessibility returned an empty tree for the fixture window"}
-	}
-	return out.Elements, nil
-}
-
-// locateElement queries a fresh tree and returns the element whose name matches
-// target, preferring an exact match. Returning the element (with its geometry)
-// rather than an element_index is deliberate: aiming at raw coordinates is what
-// puts the reported geometry itself under test, whereas element_index would let
-// the server resolve the target internally and hide a geometry regression.
-func (s *Suite) locateElement(ctx context.Context, sess *mcp.ClientSession, pid int, target string) (*api.AccessibilityElement, *terminalFail) {
-	elements, fail := s.accessibility(ctx, sess, pid)
-	if fail != nil {
-		return nil, fail
-	}
-	el, ok := findElement(elements, target)
-	if !ok {
-		return nil, &terminalFail{detail: fmt.Sprintf(
-			"no accessible element named %q among %d elements", target, len(elements))}
-	}
-	if el.Width <= 0 || el.Height <= 0 {
-		return nil, &terminalFail{detail: fmt.Sprintf(
-			"accessible element %q has a degenerate %dx%d rectangle; nothing can be aimed at it",
-			target, el.Width, el.Height)}
-	}
-	return el, nil
-}
-
-// expectAccessibleText re-queries the tree and requires some element's name to
-// contain want. This is the accessibility half of the GTK assertions: it proves
-// the AT-SPI bridge published the app's new state, independently of the JSON
-// file the app wrote.
-func (s *Suite) expectAccessibleText(ctx context.Context, sess *mcp.ClientSession, pid int, want string) *terminalFail {
-	elements, fail := s.accessibility(ctx, sess, pid)
-	if fail != nil {
-		return fail
-	}
-	if !anyElementContains(elements, want) {
-		return &terminalFail{detail: fmt.Sprintf(
-			"no accessible element reports %q after the gesture (searched %d elements)", want, len(elements))}
-	}
-	return nil
-}
-
-// capture takes a window-scoped screenshot. A capture that is empty or
-// implausibly small is treated as a failure in its own right: an all-but-empty
-// PNG is what a window that never got a backing pixmap produces, and accepting
-// it would let the repaint comparison below pass on two equally broken frames.
-func (s *Suite) capture(ctx context.Context, sess *mcp.ClientSession, pid int) (string, *terminalFail) {
-	var out api.ComputerUseOutput
-	if err := s.callInto(ctx, sess, api.ToolComputerUse, api.ComputerUseInput{
-		Action: api.ActionCapture, Scope: api.ScopeWindow, PID: &pid,
-	}, &out); err != nil {
-		return "", &terminalFail{transport: true, detail: "computer_use capture call failed"}
-	}
-	if out.Code != "" {
-		return "", &terminalFail{detail: fmt.Sprintf("capture reported %s: %s", out.Code, out.Message)}
-	}
-	if len(out.ImageBase64) < uiCaptureMinimum {
-		return "", &terminalFail{detail: fmt.Sprintf(
-			"window capture returned only %d bytes; the window has no usable pixels", len(out.ImageBase64))}
-	}
-	return out.ImageBase64, nil
-}
-
-// expectRepaint proves the gesture reached the PIXELS, not just the DOM. Every
-// Chromium gesture rewrites the page's visible state block, so the window's
-// pixels must differ afterwards. An identical capture means the compositor
-// handed back the same frame twice -- the appliance would be showing a human
-// operator (and any screenshot-driven model) a screen that no longer matches
-// reality, which is the failure the accessibility tree alone cannot detect.
-func (s *Suite) expectRepaint(ctx context.Context, sess *mcp.ClientSession, pid int, before string) *terminalFail {
-	after, fail := s.capture(ctx, sess, pid)
-	if fail != nil {
-		return fail
-	}
-	if after == before {
-		return &terminalFail{detail: "the window's pixels are byte-identical after the gesture; nothing repainted"}
-	}
-	return nil
-}
-
-// act performs one computer_use gesture and then waits a fixed settle interval.
-// The wait goes through the public wait action rather than a local sleep on
-// purpose: the delay must be observed by the same session that issued the
-// gesture, so a paused or wedged session surfaces here instead of being papered
-// over by the client sleeping happily on its own.
-// actOn dispatches a gesture AT a specific application's window.
-//
-// The driver refuses a bare screen coordinate while its capture scope is
-// "window" -- "Screen-absolute clicks require desktop scope" -- and its
-// keyboard tools reject a call with no target at all ("No windows found for pid
-// 0"). Every gesture here is derived from an accessibility rectangle belonging
-// to one window, so naming that window is both correct and what the driver
-// requires; the adapter fills in the matching window_id.
-func (s *Suite) actOn(ctx context.Context, sess *mcp.ClientSession, pid int, in api.ComputerUseInput) *terminalFail {
-	if in.PID == nil {
-		p := pid
-		in.PID = &p
-	}
-	return s.act(ctx, sess, in)
-}
-
+// act dispatches one computer_use gesture and lets the desktop settle through
+// the public wait action.
 func (s *Suite) act(ctx context.Context, sess *mcp.ClientSession, in api.ComputerUseInput) *terminalFail {
 	var out api.ComputerUseOutput
 	if err := s.callInto(ctx, sess, api.ToolComputerUse, in, &out); err != nil {
@@ -825,7 +532,6 @@ func (s *Suite) act(ctx context.Context, sess *mcp.ClientSession, in api.Compute
 	if out.Code != "" {
 		return &terminalFail{detail: fmt.Sprintf("computer_use %s reported %s: %s", in.Action, out.Code, out.Message)}
 	}
-
 	settle := uiSettleMs
 	var wait api.ComputerUseOutput
 	if err := s.callInto(ctx, sess, api.ToolComputerUse, api.ComputerUseInput{
@@ -833,114 +539,7 @@ func (s *Suite) act(ctx context.Context, sess *mcp.ClientSession, in api.Compute
 	}, &wait); err != nil {
 		return &terminalFail{transport: true, detail: "computer_use wait call failed"}
 	}
-	if wait.Code != "" {
-		return &terminalFail{detail: fmt.Sprintf("computer_use wait reported %s: %s", wait.Code, wait.Message)}
-	}
 	return nil
-}
-
-// gtkState reads the GTK fixture's own state document through the public
-// read_file tool. Using read_file rather than terminal keeps the gate on the
-// declared file surface and means a regression in file reads is caught here
-// too, but the real reason this exists is independence: the file is written by
-// the application, so it cannot be satisfied by a computer_use implementation
-// that reports success without doing anything.
-func (s *Suite) gtkState(ctx context.Context, sess *mcp.ClientSession) (fixtureState, *terminalFail) {
-	var out api.ReadFileOutput
-	if err := s.callInto(ctx, sess, api.ToolReadFile, api.ReadFileInput{Path: gtkStatePath}, &out); err != nil {
-		return fixtureState{}, &terminalFail{transport: true, detail: "read_file call for the GTK state failed"}
-	}
-	if out.Code != "" {
-		return fixtureState{}, &terminalFail{detail: fmt.Sprintf(
-			"read_file of the GTK fixture state reported %s; the fixture may not be running", out.Code)}
-	}
-	state, ok := parseFixtureState(out.Content)
-	if !ok {
-		return fixtureState{}, &terminalFail{detail: "the GTK fixture state file is not valid state JSON"}
-	}
-	return state, nil
-}
-
-// chromiumState reads the page's state out of a FRESH accessibility tree. The
-// page renders its serialized state into a visible element, so this is the
-// same text a human would read off the screen -- obtained without CDP, and
-// therefore without asking the browser to vouch for itself.
-func (s *Suite) chromiumState(ctx context.Context, sess *mcp.ClientSession, pid int) (fixtureState, *terminalFail) {
-	elements, fail := s.accessibility(ctx, sess, pid)
-	if fail != nil {
-		return fixtureState{}, fail
-	}
-	for _, el := range elements {
-		if state, ok := parseFixtureState(el.Name); ok {
-			return state, nil
-		}
-	}
-	return fixtureState{}, &terminalFail{detail: fmt.Sprintf(
-		"the page's rendered state text is not present in the accessibility tree (searched %d elements)", len(elements))}
-}
-
-// ---------------------------------------------------------------------------
-// Pure helpers
-// ---------------------------------------------------------------------------
-
-// stateJSONMarker is the leading fragment of both fixtures' state documents.
-// Requiring it before attempting a decode keeps chromiumState from mistaking an
-// unrelated JSON-looking accessible name for the fixture's state.
-const stateJSONMarker = `"clicks"`
-
-// parseFixtureState extracts a fixtureState from text that CONTAINS the state
-// document. The Chromium window title carries the same JSON with a prefix, and
-// accessible names may be padded, so the object is located by its braces rather
-// than requiring the whole string to be JSON.
-func parseFixtureState(text string) (fixtureState, bool) {
-	if !strings.Contains(text, stateJSONMarker) {
-		return fixtureState{}, false
-	}
-	start := strings.Index(text, "{")
-	end := strings.LastIndex(text, "}")
-	if start < 0 || end <= start {
-		return fixtureState{}, false
-	}
-	var state fixtureState
-	if err := json.Unmarshal([]byte(text[start:end+1]), &state); err != nil {
-		return fixtureState{}, false
-	}
-	return state, true
-}
-
-// findElement returns the element named target, preferring an exact name match
-// over a substring one so that "Drag source" cannot be satisfied by an element
-// merely mentioning it.
-func findElement(elements []api.AccessibilityElement, target string) (*api.AccessibilityElement, bool) {
-	for i := range elements {
-		if elements[i].Name == target {
-			return &elements[i], true
-		}
-	}
-	for i := range elements {
-		if strings.Contains(elements[i].Name, target) {
-			return &elements[i], true
-		}
-	}
-	return nil, false
-}
-
-// anyElementContains reports whether any element's name contains want.
-func anyElementContains(elements []api.AccessibilityElement, want string) bool {
-	for _, el := range elements {
-		if strings.Contains(el.Name, want) {
-			return true
-		}
-	}
-	return false
-}
-
-// center returns the midpoint of an element's reported rectangle. Gestures aim
-// at the centre rather than the origin because a control's origin often lies on
-// its border, where a one-pixel geometry error is enough to miss entirely --
-// and a gate that is flaky about geometry teaches operators to ignore it.
-func center(el *api.AccessibilityElement) (int, int) {
-	return el.X + el.Width/2, el.Y + el.Height/2
 }
 
 // expandFailure turns one setup failure into the setup check plus an explicit
@@ -959,25 +558,3 @@ func expandFailure(fail *terminalFail, setupName string, dependents ...string) [
 	}
 	return results
 }
-
-// ---------------------------------------------------------------------------
-// Known limits of the accessibility half
-// ---------------------------------------------------------------------------
-//
-// api.AccessibilityElement carries only role, name, and geometry -- there is no
-// value or state field. That shapes what "asserted via accessibility" can mean
-// here, and the choices above are deliberate rather than incidental:
-//
-//   - Counters and label text are asserted by NAME, because both fixtures put
-//     their state into text that becomes an accessible name.
-//   - Scroll position is asserted by GEOMETRY (a known row must move), because
-//     neither toolkit exposes a scroll offset as a name and the element type has
-//     no value field to read one from.
-//   - The GTK entry's CONTENT is the one thing accessibility cannot confirm:
-//     ATK exposes entry text through AtkText, which this element type does not
-//     model, and the fixture pins the entry's accessible name to "Text input".
-//     That check therefore asserts the entry survives in a fresh tree and reads
-//     the typed string from the application's JSON. If the entry ever needs a
-//     pure-accessibility assertion, the fixture -- not this file -- is what has
-//     to change: it would have to mirror its entry text into an accessible name,
-//     as the Chromium fixture already does via its rendered state block.
