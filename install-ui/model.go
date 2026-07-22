@@ -177,7 +177,10 @@ func (m model) view() string {
 	}
 	if m.failed {
 		return haltRed.Render("  install halted") + "\n" + m.vp.View() +
-			"\n  " + tnDim.Render("press 's' for a rescue shell")
+			// ctrl+c is advertised alongside 's' because it exists for the case
+			// where 's' does not arrive — a real VT that swallows the keypress.
+			// A user who cannot discover the alternative cannot use it.
+			"\n  " + tnDim.Render("press 's' for a rescue shell · ctrl+c to exit")
 	}
 	if m.showLogs {
 		return m.vp.View() + "\n  " + tnDim.Render("press 'l' to hide logs")

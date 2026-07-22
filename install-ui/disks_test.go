@@ -59,6 +59,27 @@ func TestListDisksSkipsZeroSized(t *testing.T) {
 	}
 }
 
+// TestInstallableDisksTreatsUnreadableAsEmpty: an unreadable /sys/block and an
+// empty one are the same fact to the user — nothing to install onto — and the
+// wizard already has a clear screen for that. Surfacing the raw syscall error
+// instead would abort the installer with "open /sys/block: no such file or
+// directory" printed over the branded UI.
+func TestInstallableDisksTreatsUnreadableAsEmpty(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	if _, err := ListDisks(missing); err == nil {
+		t.Fatal("ListDisks should still report the error to its other callers")
+	}
+	if got := installableDisks(missing); len(got) != 0 {
+		t.Errorf("installableDisks = %+v, want none", got)
+	}
+	// ...and it must still return real disks when the tree is readable, or the
+	// "same as empty" behaviour would be indistinguishable from always-empty.
+	root := fakeSysBlock(t, map[string]string{"vda": "41943040"})
+	if got := installableDisks(root); len(got) != 1 || got[0].Path != "/dev/vda" {
+		t.Errorf("installableDisks = %+v, want /dev/vda", got)
+	}
+}
+
 func TestListDisksEmpty(t *testing.T) {
 	got, err := ListDisks(fakeSysBlock(t, map[string]string{}))
 	if err != nil {

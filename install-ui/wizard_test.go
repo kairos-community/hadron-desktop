@@ -96,6 +96,93 @@ func TestChoiceFromEnvRejectsInvalidUsername(t *testing.T) {
 	}
 }
 
+// topLevelStages counts unindented `stages:` keys in a rendered cloud-config.
+// A second one is the signature of a successful injection.
+func topLevelStages(cfg string) int {
+	var n int
+	for _, line := range strings.Split(cfg, "\n") {
+		if line == "stages:" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestChoiceFromEnvRejectsInjectedGithub guards the worse half of the same
+// defect: Github goes into an *unquoted* YAML scalar, so this payload does not
+// corrupt the document, it extends it — the rendered config ends up with two
+// top-level `stages:` keys and the injected one displaces /etc/ly/save.ini.
+// Valid YAML, wrong machine, disk already wiped.
+func TestChoiceFromEnvRejectsInjectedGithub(t *testing.T) {
+	t.Setenv("HADRON_INSTALL_NONINTERACTIVE", "1")
+	t.Setenv("HADRON_USER", "ada")
+	t.Setenv("HADRON_PASS", "hunter2")
+	t.Setenv("HADRON_DISK", "/dev/vda")
+	t.Setenv("HADRON_GITHUB", "ada\nstages:\n  network:\n    - name: pwn")
+
+	_, _, err := choiceFromEnv()
+	if err == nil {
+		t.Fatal("expected an error for a HADRON_GITHUB containing a newline")
+	}
+	if !strings.Contains(err.Error(), "HADRON_GITHUB") {
+		t.Errorf("error %q does not name the offending variable", err)
+	}
+}
+
+// TestChoiceFromEnvGithubValidity pins both edges at once: a rejection-only
+// test would pass with the field hardwired to always fail, and an
+// acceptance-only test would pass with no validation at all. The empty case is
+// load-bearing — HADRON_GITHUB is optional and must stay skippable.
+func TestChoiceFromEnvGithubValidity(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		ok    bool
+	}{
+		{"ordinary handle", "adalovelace", true},
+		{"hyphen and digits", "ada-l0velace", true},
+		{"empty stays optional", "", true},
+		{"39 chars", strings.Repeat("a", 39), true},
+		{"newline injects a stages block", "ada\nstages:\n  network:\n    - name: pwn", false},
+		{"leading hyphen", "-ada", false},
+		{"trailing hyphen", "ada-", false},
+		{"space", "ada lovelace", false},
+		{"underscore", "ada_lovelace", false},
+		{"colon", "ada:x", false},
+		{"40 chars", strings.Repeat("a", 40), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HADRON_INSTALL_NONINTERACTIVE", "1")
+			t.Setenv("HADRON_USER", "ada")
+			t.Setenv("HADRON_PASS", "hunter2")
+			t.Setenv("HADRON_DISK", "/dev/vda")
+			t.Setenv("HADRON_GITHUB", tc.value)
+
+			c, _, err := choiceFromEnv()
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("HADRON_GITHUB=%q rejected: %v", tc.value, err)
+				}
+				if c.Github != tc.value {
+					t.Errorf("Github = %q, want %q", c.Github, tc.value)
+				}
+				// The point of the check is the rendered document: whatever
+				// survives validation must still yield exactly one top-level
+				// `stages:` key, i.e. the one the installer wrote.
+				if n := topLevelStages(RenderCloudConfig(c, "$6$fake")); n != 1 {
+					t.Errorf("rendered config has %d top-level stages: keys, want 1", n)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("HADRON_GITHUB=%q accepted, rendered config:\n%s",
+					tc.value, RenderCloudConfig(c, "$6$fake"))
+			}
+		})
+	}
+}
+
 func TestWriteChoiceProducesReadableConfig(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "99_hadron-user.yaml")
@@ -348,6 +435,84 @@ func TestWizardGithubIsOptional(t *testing.T) {
 	}
 	if m.choice.Github != "" {
 		t.Errorf("Github = %q, want empty", m.choice.Github)
+	}
+}
+
+// TestWizardGithubPayloadIsRejectedAtTheFunction pins the raw payload against
+// validateGithub directly, because the interactive test below cannot: bubbles'
+// textinput rewrites newlines to spaces before commitField ever sees the value
+// (measured — "ada\nstages:..." arrives as "ada stages:..."). So the widget's
+// sanitisation, not our check, is what stops a *typed* newline today, and that
+// is a third-party implementation detail we do not control. This asserts the
+// check would hold on its own if textinput ever stopped scrubbing.
+func TestWizardGithubPayloadIsRejectedAtTheFunction(t *testing.T) {
+	if err := validateGithub("ada\nstages:\n  network:\n    - name: pwn"); err == nil {
+		t.Fatal("validateGithub accepted a newline-injected handle")
+	}
+	if err := validateGithub(""); err != nil {
+		t.Errorf("validateGithub rejected the empty (optional) value: %v", err)
+	}
+	if err := validateGithub("adalovelace"); err != nil {
+		t.Errorf("validateGithub rejected an ordinary handle: %v", err)
+	}
+}
+
+// TestWizardGithubValidation is the interactive half of the injection fix.
+// HADRON_GITHUB is not the only way a handle reaches the renderer — anything
+// typed here does too, and this step used to store its value unchecked.
+func TestWizardGithubValidation(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		ok    bool
+	}{
+		{"ordinary handle", "adalovelace", true},
+		{"hyphen and digits", "ada-l0velace", true},
+		{"empty stays optional", "", true},
+		{"39 chars", strings.Repeat("a", 39), true},
+		// textinput flattens the newlines to spaces, so what commitField is
+		// actually asked to accept here is the flattened payload — still an
+		// injection attempt, still rejected, and rejected by our check rather
+		// than by the widget's incidental scrubbing.
+		{"flattened injection payload", "ada stages:   network:     - name: pwn", false},
+		{"leading hyphen", "-ada", false},
+		{"trailing hyphen", "ada-", false},
+		{"space", "ada lovelace", false},
+		{"underscore", "ada_lovelace", false},
+		{"40 chars", strings.Repeat("a", 40), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := clear(t, newWizard(testDisks()), "")
+			m = keys(t, m, "enter", "ada", "enter", "pw", "enter")
+			if m.step != stepGithub {
+				t.Fatalf("step = %v, want stepGithub", m.step)
+			}
+			m = clear(t, m, tc.input)
+			m = keys(t, m, "enter")
+
+			if tc.ok {
+				if m.step != stepDisk {
+					t.Fatalf("step = %v, want stepDisk (input %q rejected: %q)", m.step, tc.input, m.err)
+				}
+				if m.choice.Github != tc.input {
+					t.Errorf("Github = %q, want %q", m.choice.Github, tc.input)
+				}
+				return
+			}
+			if m.step != stepGithub {
+				t.Fatalf("step = %v, want to stay on stepGithub for input %q", m.step, tc.input)
+			}
+			if m.err == "" {
+				t.Errorf("no on-screen error shown for invalid github handle %q", tc.input)
+			}
+			if m.choice.Github != "" {
+				t.Errorf("invalid github handle %q was stored anyway", m.choice.Github)
+			}
+			if !strings.Contains(m.View(), m.err) {
+				t.Errorf("error %q is not rendered in the view:\n%s", m.err, m.View())
+			}
+		})
 	}
 }
 

@@ -43,6 +43,37 @@ func validateUsername(v string) error {
 	return nil
 }
 
+// githubHandle is GitHub's own account-name shape: ASCII alphanumerics and
+// hyphens, never leading or trailing, 39 characters at most.
+//
+// This matters more than the username check, not less. Github is the one field
+// RenderCloudConfig writes into a *plain* YAML scalar with no quoting:
+//
+//   - github:<value>
+//
+// A newline there does not break the document, it extends it. The value
+// "ada\nstages:\n  network:\n    - name: pwn" renders a cloud-config with two
+// top-level `stages:` keys — still valid YAML, in which the injected block
+// displaces the /etc/ly/save.ini stage and the machine boots to a login screen
+// that was never configured. An invalid username fails loudly; this fails
+// silently, and both happen after the disk has been wiped. RenderCloudConfig
+// returns no error and so cannot refuse, so the check lives here at the input.
+var githubHandle = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`)
+
+const githubRule = "github username must be 1-39 chars: letters, digits or hyphens, not starting or ending with a hyphen"
+
+// validateGithub accepts the empty string: importing SSH keys is optional and
+// skipping the step is the documented way to decline.
+func validateGithub(v string) error {
+	if v == "" {
+		return nil
+	}
+	if !githubHandle.MatchString(v) {
+		return errors.New(githubRule)
+	}
+	return nil
+}
+
 // choiceFromEnv reads the non-interactive configuration. The second return value
 // reports whether non-interactive mode is active at all. These variable names are
 // a stable contract with existing tests and automation.
@@ -77,6 +108,11 @@ func choiceFromEnv() (Choice, bool, error) {
 	// a username can reach RenderCloudConfig, so it is checked here too.
 	if err := validateUsername(c.Username); err != nil {
 		return c, true, fmt.Errorf("HADRON_USER: %w", err)
+	}
+	// Same reasoning for the GitHub handle, which reaches an unquoted scalar.
+	// Empty stays valid here: HADRON_GITHUB is genuinely optional.
+	if err := validateGithub(c.Github); err != nil {
+		return c, true, fmt.Errorf("HADRON_GITHUB: %w", err)
 	}
 	return c, true, nil
 }
@@ -159,6 +195,19 @@ func (m *wizardModel) enter(s wizardStep) {
 	m.in.CursorEnd()
 }
 
+// installableDisks is ListDisks for the wizard's purposes. An unreadable
+// sysBlock and an empty one mean the same thing to the user — there is nothing
+// to install onto — and the wizard already has a clear screen for that case, so
+// the error becomes an empty list rather than a bare syscall message printed
+// over the branded UI.
+func installableDisks(sysBlock string) []Disk {
+	disks, err := ListDisks(sysBlock)
+	if err != nil {
+		return nil
+	}
+	return disks
+}
+
 func orDefault(v, def string) string {
 	if v == "" {
 		return def
@@ -222,7 +271,13 @@ func (m wizardModel) commitField() (tea.Model, tea.Cmd) {
 		m.choice.Password = v
 		m.enter(stepGithub)
 	case stepGithub:
-		m.choice.Github = v // optional
+		// Optional, but not arbitrary: an empty value skips key import, a
+		// non-empty one must be a real handle before it can reach the renderer.
+		if err := validateGithub(v); err != nil {
+			m.err = err.Error()
+			return m, nil
+		}
+		m.choice.Github = v
 		if len(m.disks) == 0 {
 			m.err = "no installable disk found"
 			return m, nil
@@ -342,11 +397,7 @@ func runWizard() error {
 	}
 
 	if !nonInteractive {
-		disks, err := ListDisks("/sys/block")
-		if err != nil {
-			return err
-		}
-		final, err := tea.NewProgram(newWizard(disks), tea.WithAltScreen()).Run()
+		final, err := tea.NewProgram(newWizard(installableDisks("/sys/block")), tea.WithAltScreen()).Run()
 		if err != nil {
 			return err
 		}

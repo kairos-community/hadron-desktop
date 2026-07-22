@@ -122,6 +122,23 @@ func TestFailureScreenHasASecondExit(t *testing.T) {
 	}
 }
 
+// TestFailureScreenAdvertisesBothExits: the second exit above only helps a user
+// who knows it is there. ctrl+c exists precisely for the case where 's' does not
+// get through on a real VT, so the screen that appears in that case has to name
+// it — an undiscoverable escape hatch is the same as no escape hatch.
+func TestFailureScreenAdvertisesBothExits(t *testing.T) {
+	var m tea.Model = newModel()
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 25})
+	m, _ = m.Update(doneMsg{err: errFake})
+
+	view := m.(model).view()
+	for _, want := range []string{"'s'", "rescue shell", "ctrl+c"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("failure screen does not mention %q:\n%s", want, view)
+		}
+	}
+}
+
 // TestNoQuitKeyWhileInstalling is the other half: the disk is being written, so
 // no key may end the program before the install does.
 func TestNoQuitKeyWhileInstalling(t *testing.T) {
