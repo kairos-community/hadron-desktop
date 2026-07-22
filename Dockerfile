@@ -2617,6 +2617,38 @@ FROM ${DESKTOP}-rootfs AS desktop-rootfs
 FROM ${DESKTOP}-config AS desktop-config
 
 
+# ---------------------------------------------------------------------------
+# Installer TUI. A static CGO_ENABLED=0 Go binary, so it runs on musl without
+# any runtime linkage. Replaces the POSIX-sh wizard: it collects the same
+# answers, writes the same cloud-config, then runs `kairos-agent install` as a
+# subprocess and renders a branded progress screen instead of raw log spew.
+#
+# Must be declared before `default` (the stage that COPYies it in), not merely
+# before `kairos`: BuildKit resolves --from against stages defined ABOVE the
+# consuming stage.
+#
+# Deliberately NOT in the Makefile's --no-cache-filter list. That list exists
+# because the kairos stage's `dracut -f` bakes the splash into the initramfs
+# behind BuildKit's back. Here the cache key is honest: `COPY install-ui/ ./` is
+# content-addressed, so any source change invalidates the build, and the output
+# is COPYied straight into the image rather than swallowed by a later step. Busting
+# it every build would re-run `go mod download` (network) for no correctness gain.
+# ---------------------------------------------------------------------------
+FROM golang:1.25.0-alpine3.22 AS install-ui-build
+WORKDIR /src
+COPY install-ui/go.mod install-ui/go.sum ./
+RUN go mod download
+COPY install-ui/ ./
+# The trailing check is a smoke test: the binary must run and reject an unknown
+# flag with exit 2, so a binary that segfaults on startup fails the build here
+# rather than on tty1 during an install. Braced so a FAILED `go build` still
+# fails the RUN -- written as `... && bin --nonsense; [ $? -eq 2 ]` the RUN's
+# status would be the test's alone, and a build that happened to exit 2 would
+# "pass" having produced no binary at all.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/hadron-install-ui . \
+    && { /out/hadron-install-ui --nonsense 2>/dev/null; [ $? -eq 2 ]; }
+
+
 FROM ${BASE_IMAGE} AS default
 # Built desktop stack
 COPY --from=desktop-rootfs / /
@@ -2679,9 +2711,10 @@ RUN chmod 1777 /tmp; \
     # The selected session launcher lives in /usr/bin (NOT /usr/local): Kairos mounts /usr/local
     # from the persistent partition on the installed system, which shadows
     # anything baked into the image there — ly would exec a missing launcher and
-    # bounce straight back to the login screen. hadron-install stays in
-    # /usr/local/bin since it only runs at install time (live, /usr/local intact).
-    chmod +x /usr/bin/start-desktop /usr/bin/hadron-* /usr/local/bin/hadron-install; \
+    # bounce straight back to the login screen. The installer TUI lives in
+    # /usr/bin for the same reason (it is COPYied in after this block, already
+    # executable, so the glob below deliberately does not have to reach it).
+    chmod +x /usr/bin/start-desktop /usr/bin/hadron-*; \
     # ly runs on tty1 via the ly@tty1 instance of the ly@.service template (ly
     # 1.3.x dropped the plain ly.service and the config `tty` option — the tty is
     # the systemd instance). It authenticates the cloud-config user and launches
@@ -2751,6 +2784,12 @@ RUN chmod 1777 /tmp; \
     chmod +x /usr/bin/hadron-user-setup; \
     systemctl enable hadron-user-setup.service 2>/dev/null || true; \
     ln -sf /usr/lib/systemd/system/hadron-user-setup.service /etc/systemd/system/multi-user.target.wants/hadron-user-setup.service
+
+# Installer TUI. /usr/bin, not /usr/local/bin: /usr/local is shadowed by an empty
+# overlay at runtime on Kairos, so a binary there is invisible to the installed
+# system. (The shell installer it replaces lived in /usr/local/bin and only
+# worked because the installer runs in the live environment.)
+COPY --from=install-ui-build /out/hadron-install-ui /usr/bin/hadron-install-ui
 
 
 # ===========================================================================

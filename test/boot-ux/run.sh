@@ -18,6 +18,7 @@ fail=0
 "$SCRIPT_DIR/check-splash.sh"    "$IMAGE" || fail=1
 "$SCRIPT_DIR/check-initramfs.sh" "$IMAGE" || fail=1
 "$SCRIPT_DIR/check-branding.sh"  "$IMAGE" "$SUBTITLE" || fail=1
+"$SCRIPT_DIR/check-installer.sh" "$IMAGE" || fail=1
 
 STAGE_ONLY=1 auroraboot/build.sh "$IMAGE" "$OVERLAY_PARENT" >/dev/null
 "$SCRIPT_DIR/check-iso-overlay.sh" "$OVERLAY_PARENT/iso-overlay" "$SUBTITLE" || fail=1

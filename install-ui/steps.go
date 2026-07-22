@@ -27,7 +27,13 @@ var Steps = []Step{
 	{"Partitioning disk", "Partitioning device"},
 	{"Running before-install", "Running stage: before-install"},
 	{"Installing active system", "Creating file system image"},
-	{"Configuring bootloader", "Installing GRUB"},
+	// kairos-agent v2.29.2 logs "Generating grub files for efi on /dev/..." at
+	// this phase; it emits no "Installing GRUB" line (an earlier revision of this
+	// table guessed that and the step silently never fired). Verified against a
+	// live install log: /var/log/kairos/agent.log on a real install, this is the
+	// only bootloader-install marker between "Creating file system image" and the
+	// recovery-image copy. Retune here if kairos-agent rewords it again.
+	{"Configuring bootloader", "Generating grub files"},
 	// Anchored on the full "Copying %s source to %s" line emitted by
 	// kairos-agent pkg/elemental/elemental.go. The bare "recovery.img" /
 	// "passive.img" filenames are also plain constants in

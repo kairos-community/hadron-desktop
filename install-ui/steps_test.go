@@ -10,7 +10,7 @@ func TestAdvanceStepMatchesKnownPhases(t *testing.T) {
 		{"Partitioning device /dev/vda", 1},
 		{"Running stage: before-install", 2},
 		{"Creating file system image active.img", 3},
-		{"Installing GRUB to /dev/vda", 4},
+		{"Generating grub files for efi on /dev/vda", 4},
 		{"Copying /run/cos/state/cOS/active.img source to /run/cos/recovery/cOS/recovery.img", 5},
 		{"Copying /run/cos/state/cOS/active.img source to /run/cos/state/cOS/passive.img", 6},
 		{"Running stage: after-install", 7},
@@ -80,7 +80,7 @@ func TestAdvanceStepIgnoresUnrelatedLines(t *testing.T) {
 
 func TestAdvanceStepPrefersHighestMatch(t *testing.T) {
 	// A single line containing two markers must land on the later phase.
-	line := "Running stage: before-install and Installing GRUB"
+	line := "Running stage: before-install and Generating grub files"
 	if got := AdvanceStep(line, 0); got != 4 {
 		t.Errorf("AdvanceStep(%q, 0) = %d, want 4", line, got)
 	}

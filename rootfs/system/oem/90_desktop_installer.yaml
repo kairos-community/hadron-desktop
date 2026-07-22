@@ -3,11 +3,11 @@
 # kairos-init bakes /system/oem/...installer.yaml which generates a
 # kairos-installer.service running `kairos-agent install` on tty1 in
 # install-mode. This stage (90, same initramfs stage, same install-mode guard)
-# drops a systemd override so that service runs /usr/local/bin/hadron-install
-# instead — a small wizard that collects user/password/disk/hostname, writes a
-# cloud-config to /oem, then hands off to `kairos-agent install`. If a
-# cloud-config with a user/install block was already provided, the wizard skips
-# the prompts and runs the normal unattended install.
+# drops a systemd override so that service runs /usr/bin/hadron-install-ui
+# instead — a Go TUI that collects user/password/disk/hostname, writes a
+# cloud-config to /oem, then runs `kairos-agent install` as a subprocess behind a
+# branded progress screen. If a cloud-config with a user/install block was already
+# provided, it skips the prompts and runs the normal unattended install.
 name: "Hadron desktop installer UI"
 stages:
   initramfs:
@@ -21,6 +21,6 @@ stages:
           content: |
             [Service]
             ExecStart=
-            ExecStart=/usr/local/bin/hadron-install
+            ExecStart=/usr/bin/hadron-install-ui
       commands:
         - systemctl daemon-reload
