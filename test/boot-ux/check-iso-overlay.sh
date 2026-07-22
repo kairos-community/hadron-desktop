@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Assert the ISO overlay directory is staged correctly.
 #
-#   test/boot-ux/check-iso-overlay.sh [OVERLAY_DIR]
+#   test/boot-ux/check-iso-overlay.sh [OVERLAY_DIR] [EXPECTED_SUBTITLE]
+#
+# e.g. check-iso-overlay.sh build/sway-desktop/iso/iso-overlay  'sway · wayland · kairos'
+#      check-iso-overlay.sh build/i3-desktop/iso/iso-overlay    'i3 · xlibre · kairos'
+#      check-iso-overlay.sh build/agent-desktop/iso/iso-overlay 'i3 · xlibre · kairos'
 #
 # Run after auroraboot/build.sh has staged the overlay (STAGE_ONLY=1 stages and
 # exits without building an ISO). The placeholder check is the important one:
@@ -15,7 +19,9 @@
 # unstaged grub.cfg fail these checks instead of silently passing them.
 set -euo pipefail
 DIR="${1:-build/sway-desktop/iso/iso-overlay}"
+EXPECTED_SUBTITLE="${2:-sway · wayland · kairos}"
 CFG="$DIR/boot/grub2/grub.cfg"
+THEME="$DIR/boot/grub2/themes/hadron/theme.txt"
 QUIET='quiet splash loglevel=3 udev.log_level=3 systemd.show_status=false rd.systemd.show_status=false'
 fail=0
 check() {
@@ -33,7 +39,12 @@ check "background staged"               "test -f '$DIR/boot/grub2/themes/hadron/
 check "no unrendered placeholders in grub.cfg" \
     "test -f '$CFG' && ! grep -q '{{' '$CFG'"
 check "no unrendered placeholder in theme.txt" \
-    "test -f '$DIR/boot/grub2/themes/hadron/theme.txt' && ! grep -q '@VARIANT_SUBTITLE@' '$DIR/boot/grub2/themes/hadron/theme.txt'"
+    "test -f '$THEME' && ! grep -q '@VARIANT_SUBTITLE@' '$THEME'"
+# Absence of the placeholder is not enough: a WRONG subtitle also has no
+# placeholder. This asserts the substituted VALUE, which is what caught the live
+# menu claiming "agent · xlibre · kairos" while the installed system said i3.
+check "theme subtitle is '$EXPECTED_SUBTITLE'" \
+    "test -f '$THEME' && grep -qF '$EXPECTED_SUBTITLE' '$THEME'"
 check "menu is retitled to hadron"      "grep -q 'menuentry \"hadron-desktop\"' '$CFG'"
 check "no stale Kairos titles"          "test -f '$CFG' && ! grep -q 'menuentry \"Kairos' '$CFG'"
 check "default entry carries install-mode" \

@@ -59,14 +59,37 @@ cp "$THEME_SRC/theme.txt" "$THEME_SRC/unicode.pf2" "$THEME_SRC/background.tga" \
 # theme.txt carries an @VARIANT_SUBTITLE@ placeholder that the Dockerfile
 # substitutes inside the image. The copy we ship on the ISO comes from the repo
 # working tree, so substitute it here too — an unrendered placeholder would be
-# drawn literally on the boot menu. Default to the sway wording unless the image
-# tag says otherwise.
-case "$IMAGE" in
-  i3-*|*/i3-*)   SUBTITLE="i3 · xlibre · kairos" ;;
-  agent-*|*/agent-*) SUBTITLE="agent · xlibre · kairos" ;;
-  *)             SUBTITLE="sway · wayland · kairos" ;;
-esac
+# drawn literally on the boot menu.
+#
+# Ask the IMAGE, don't guess from its tag. /etc/hadron-desktop/session is the
+# same source of truth the Dockerfile uses for the installed system's theme, so
+# reading it here keeps the live menu and the installed menu in agreement. A
+# tag-shaped heuristic cannot: the agent variant is tagged `agent-*` but runs i3,
+# so guessing gave it "agent · xlibre · kairos" live and "i3 · xlibre · kairos"
+# once installed. Same lowercasing as the Dockerfile.
+#
+# The `|| true` matters: under `set -e -o pipefail` a failing docker run (no
+# session file, image won't start) makes the assignment itself nonzero and the
+# script dies right here with no diagnostic. Swallowing it lets the explicit
+# check below report WHY the build stopped.
+SUBTITLE="$(docker run --rm --entrypoint sh "$IMAGE" -c \
+  '. /etc/hadron-desktop/session && printf "%s · %s · kairos" "$DESKTOP_NAME" "$DISPLAY_NAME"' \
+  2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+# Hard failure, unlike the best-effort GRUB assets below: a theme with an empty
+# or literal-placeholder subtitle draws that on the boot menu of every install.
+# The pattern also rejects "$SUBTITLE" with an empty DESKTOP_NAME/DISPLAY_NAME,
+# which a bare -z test would let through as " ·  · kairos".
+if [[ ! "$SUBTITLE" =~ ^[^[:space:]]+\ ·\ [^[:space:]]+\ ·\ kairos$ ]]; then
+  echo "!! could not read a subtitle from /etc/hadron-desktop/session in $IMAGE" \
+       "(got: '$SUBTITLE')" >&2
+  exit 1
+fi
+echo "==> live menu subtitle: $SUBTITLE"
 sed -i "s|@VARIANT_SUBTITLE@|${SUBTITLE}|" "$OVERLAY_DIR/boot/grub2/themes/hadron/theme.txt"
+if grep -q '@VARIANT_SUBTITLE@' "$OVERLAY_DIR/boot/grub2/themes/hadron/theme.txt"; then
+  echo "!! @VARIANT_SUBTITLE@ survived substitution" >&2
+  exit 1
+fi
 
 # --- GRUB modules the themed menu needs ------------------------------------
 # The ISO's GRUB core image carries only its built-in modules, and gfxmenu --
@@ -79,27 +102,40 @@ sed -i "s|@VARIANT_SUBTITLE@|${SUBTITLE}|" "$OVERLAY_DIR/boot/grub2/themes/hadro
 # then configfile's our grub.cfg), so dropping the matching module tree at
 # /boot/grub2/<platform>/ is all it takes for insmod/gfxmenu to resolve.
 #
-# The modules come from the SAME image the ISO is built from, so their GRUB
-# version can never drift from the core image that loads them. i386-pc is
-# staged too so a legacy-BIOS boot of the same ISO gets the theme as well.
-# Best-effort, like every other asset here: if the image ships no module tree
-# we warn and carry on, and the `if [ -f theme.txt ]` guard in grub.cfg leaves
-# GRUB on the plain text menu rather than blocking boot.
+# GRUB refuses to load a module built by a different GRUB version than the core
+# image loading it, so each platform's modules must come from whichever image
+# actually produced that platform's core:
+#
+#   *-efi   -> $IMAGE. AuroraBoot copies the build image's own
+#              /usr/lib/grub/x86_64-efi/grubx64.efi onto the ISO, so the EFI core
+#              and these modules are the same GRUB build by construction.
+#   i386-pc -> $AURORA_IMAGE. AuroraBoot builds the eltorito BIOS core itself,
+#              inside its own container, with its own grub2-mkimage. That is a
+#              DIFFERENT GRUB than the build image's: today AuroraBoot
+#              v0.21.0-alpha.4 is GRUB 2.12 while the desktop image is 2.14, and
+#              gfxmenu.mod differs between them. Staging $IMAGE's i386-pc tree
+#              here would hand a 2.12 core a set of 2.14 modules.
+#
+# Best-effort, like every other asset here: if a source tree is absent we warn
+# and carry on, and the `if [ -f theme.txt ]` guard in grub.cfg leaves GRUB on
+# the plain text menu rather than blocking boot.
 case "$ARCH" in
-  amd64|x86_64)  GRUB_PLATFORMS="x86_64-efi i386-pc" ;;
-  arm64|aarch64) GRUB_PLATFORMS="arm64-efi" ;;
+  amd64|x86_64)  GRUB_PLATFORMS="x86_64-efi:$IMAGE i386-pc:$AURORA_IMAGE" ;;
+  arm64|aarch64) GRUB_PLATFORMS="arm64-efi:$IMAGE" ;;
   *)             GRUB_PLATFORMS="" ;;
 esac
-for platform in $GRUB_PLATFORMS; do
+for spec in $GRUB_PLATFORMS; do
+  platform="${spec%%:*}"
+  src="${spec#*:}"
   mkdir -p "$OVERLAY_DIR/boot/grub2/$platform"
   # *.mod are the modules; *.lst (moddep.lst above all) is the dependency and
   # command index GRUB needs to resolve an insmod to a file.
-  if docker run --rm --entrypoint sh "$IMAGE" -c \
+  if docker run --rm --entrypoint sh "$src" -c \
        "cd /usr/lib/grub/$platform 2>/dev/null && tar cf - *.mod *.lst" \
        2>/dev/null | tar xf - -C "$OVERLAY_DIR/boot/grub2/$platform" 2>/dev/null; then
-    echo "==> staged $(ls "$OVERLAY_DIR/boot/grub2/$platform"/*.mod | wc -l) $platform GRUB modules"
+    echo "==> staged $(ls "$OVERLAY_DIR/boot/grub2/$platform"/*.mod | wc -l) $platform GRUB modules from $src"
   else
-    echo "!! no $platform GRUB modules in $IMAGE; live menu will fall back to text" >&2
+    echo "!! no $platform GRUB modules in $src; live menu will fall back to text" >&2
     rmdir "$OVERLAY_DIR/boot/grub2/$platform" 2>/dev/null || true
   fi
 done
