@@ -1,0 +1,102 @@
+# hadron-desktop LiveCD GRUB menu — overrides AuroraBoot's hardcoded "Kairos" menu.
+#
+# AuroraBoot embeds pkg/constants/grub_live_bios.cfg and writes it to the ISO at
+# /boot/grub2/grub.cfg — but ONLY if that path does not already exist. We ship our
+# own via `--overlay-iso` (auroraboot/build.sh), so AuroraBoot keeps this one and
+# the live boot menu reads "hadron-desktop" rather than "Kairos". `--override-name`
+# only renames the output .iso file, not the menu.
+#
+# This is a snapshot of upstream grub_live_bios.cfg with three changes:
+#   1. menuentry titles "Kairos*" -> "hadron-desktop*"
+#   2. the Tokyo Night gfxterm theme loaded from the ISO
+#   3. the quiet cmdline added to the normal boot paths (recovery/debug kept verbose)
+# Keep `CDLABEL=COS_LIVE`, the ($root)/boot/kernel + initrd paths, and the
+# {{NOMODESET}}/{{EXTEND_CMDLINE}} placeholders intact. AuroraBoot does NOT expand
+# those placeholders for an overlaid file (it only substitutes its own default), so
+# build.sh renders them per-arch before handing this to AuroraBoot. Re-sync from
+# https://github.com/kairos-io/AuroraBoot/blob/main/pkg/constants/grub_live_bios.cfg
+# if upstream changes the entries or live cmdline.
+search --file --set=root /boot/kernel
+set default=0
+set timeout=10
+set timeout_style=menu
+
+set font=($root)/boot/${grub_cpu}/loader/grub2/fonts/unicode.pf2
+if [ -f ${font} ];then
+    loadfont ${font}
+fi
+
+# Tokyo Night theme (gfxterm). We load the theme's own vendored unicode.pf2 (the
+# name theme.txt references, "Unifont Regular 16") plus the TGA background, so the
+# live and installed menus look identical. The background is TGA because GRUB's
+# png.mod rejects valid PNGs with "unsupported format". Best-effort: if video, font
+# or theme aren't available GRUB keeps the plain text menu, so a failure here can
+# never block boot.
+insmod all_video
+insmod gfxterm
+insmod tga
+if [ -f ($root)/boot/grub2/themes/hadron/theme.txt ]; then
+    loadfont ($root)/boot/grub2/themes/hadron/unicode.pf2
+    set gfxmode=auto
+    terminal_output gfxterm
+    set theme=($root)/boot/grub2/themes/hadron/theme.txt
+fi
+
+# Get model
+smbios --type 4 --get-string 5 --set model
+# For Thor we need to set the ignored clk and pd, otherwise devices will die during boot
+if test $model == "Thor"; then
+  echo "Thor device detected, setting ignored clocks and power domains and proper console output"
+  set thor_options="pd_ignore_unused clk_ignore_unused console=ttyUTC0,115200 earlycon=tegra_utc,mmio32,0xc5a0000"
+fi
+
+# Add nomodeset only on x86/amd64-class arches.
+# Template placeholders: {{NOMODESET}} and {{EXTEND_CMDLINE}} are replaced at build time.
+menuentry "hadron-desktop" --class os --unrestricted {
+    echo Loading kernel...
+    linux ($root)/boot/kernel cdroot root=live:CDLABEL=COS_LIVE rd.live.dir=/ rd.live.squashimg=rootfs.squashfs net.ifnames=1 console=ttyS0 console=tty1 rd.cos.disable vga=795{{NOMODESET}} install-mode selinux=0 $thor_options rd.live.overlay.overlayfs quiet splash loglevel=3 udev.log_level=3 systemd.show_status=false rd.systemd.show_status=false{{EXTEND_CMDLINE}}
+    echo Loading initrd...
+    initrd ($root)/boot/initrd
+}
+
+menuentry "hadron-desktop (manual)" --class os --unrestricted {
+    echo Loading kernel...
+    linux ($root)/boot/kernel cdroot root=live:CDLABEL=COS_LIVE rd.live.dir=/ rd.live.squashimg=rootfs.squashfs net.ifnames=1 console=ttyS0 console=tty1 rd.cos.disable vga=795{{NOMODESET}} selinux=0 $thor_options rd.live.overlay.overlayfs quiet splash loglevel=3 udev.log_level=3 systemd.show_status=false rd.systemd.show_status=false{{EXTEND_CMDLINE}}
+    echo Loading initrd...
+    initrd ($root)/boot/initrd
+}
+
+menuentry "hadron-desktop (interactive install)" --class os --unrestricted {
+    echo Loading kernel...
+    linux ($root)/boot/kernel cdroot root=live:CDLABEL=COS_LIVE rd.live.dir=/ rd.live.squashimg=rootfs.squashfs net.ifnames=1 console=ttyS0 console=tty1 rd.cos.disable vga=795{{NOMODESET}} install-mode-interactive selinux=0 $thor_options rd.live.overlay.overlayfs quiet splash loglevel=3 udev.log_level=3 systemd.show_status=false rd.systemd.show_status=false{{EXTEND_CMDLINE}}
+    echo Loading initrd...
+    initrd ($root)/boot/initrd
+}
+
+menuentry "hadron-desktop (remote recovery mode)" --class os --unrestricted {
+    echo Loading kernel...
+    linux ($root)/boot/kernel cdroot root=live:CDLABEL=COS_LIVE rd.live.dir=/ rd.live.squashimg=rootfs.squashfs net.ifnames=1 console=ttyS0 console=tty1 rd.cos.disable vga=795{{NOMODESET}} kairos.remote_recovery_mode selinux=0 $thor_options rd.live.overlay.overlayfs{{EXTEND_CMDLINE}}
+    echo Loading initrd...
+    initrd ($root)/boot/initrd
+}
+
+menuentry "hadron-desktop (boot local node from livecd)" --class os --unrestricted {
+    echo Loading kernel...
+    linux ($root)/boot/kernel cdroot root=live:CDLABEL=COS_LIVE rd.live.dir=/ rd.live.squashimg=rootfs.squashfs net.ifnames=1 console=ttyS0 console=tty1 kairos.boot_live_mode vga=795{{NOMODESET}} selinux=0 $thor_options rd.live.overlay.overlayfs quiet splash loglevel=3 udev.log_level=3 systemd.show_status=false rd.systemd.show_status=false{{EXTEND_CMDLINE}}
+    echo Loading initrd...
+    initrd ($root)/boot/initrd
+}
+
+menuentry "hadron-desktop (debug)" --class os --unrestricted {
+    echo Loading kernel...
+    linux ($root)/boot/kernel cdroot root=live:CDLABEL=COS_LIVE rd.live.dir=/ rd.live.squashimg=rootfs.squashfs net.ifnames=1 console=tty0 rd.debug rd.shell rd.cos.disable rd.immucore.debug vga=795{{NOMODESET}} selinux=0 $thor_options rd.live.overlay.overlayfs{{EXTEND_CMDLINE}}
+    echo Loading initrd...
+    initrd ($root)/boot/initrd
+}
+
+if [ "${grub_platform}" = "efi" ]; then
+    hiddenentry "Text mode" --hotkey "t" {
+        set textmode=true
+        terminal_output console
+    }
+fi

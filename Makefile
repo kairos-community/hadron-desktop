@@ -76,24 +76,15 @@ agent-image:
 	  -t $(AGENT_IMAGE) .
 
 agent-iso: agent-image
-	mkdir -p $(AGENT_ISO_DIR)
-	rm -f $(AGENT_ISO_DIR)/*.iso
-	docker run --rm --privileged \
-	  -v /var/run/docker.sock:/var/run/docker.sock \
-	  -v $(CURDIR)/$(AGENT_ISO_DIR):/output \
-	  $(AURORA_IMAGE) build-iso --output /output/ docker:$(AGENT_IMAGE)
-	@echo "ISO: $$(ls -t $(AGENT_ISO_DIR)/*.iso | head -1)"
+	AURORA_IMAGE=$(AURORA_IMAGE) auroraboot/build.sh $(AGENT_IMAGE) $(AGENT_ISO_DIR)
 
-# Build the installer ISO with AuroraBoot straight from the image (it reads the
-# local image over the Docker socket).
+# Build the installer ISO with AuroraBoot via auroraboot/build.sh, which stages
+# an --overlay-iso dir carrying our own live GRUB menu (branded, themed, quiet
+# cmdline) so AuroraBoot keeps ours instead of writing its default Kairos menu.
+# build.sh also creates the output dir and clears stale ISOs, which these
+# targets used to do inline.
 iso: image
-	mkdir -p $(ISO_DIR)
-	rm -f $(ISO_DIR)/*.iso
-	docker run --rm --privileged \
-	  -v /var/run/docker.sock:/var/run/docker.sock \
-	  -v $(CURDIR)/$(ISO_DIR):/output \
-	  $(AURORA_IMAGE) build-iso --output /output/ docker:$(IMAGE)
-	@echo "ISO: $$(ls -t $(ISO_DIR)/*.iso | head -1)"
+	AURORA_IMAGE=$(AURORA_IMAGE) auroraboot/build.sh $(IMAGE) $(ISO_DIR)
 
 # Run the image in QEMU with the correct flags (UEFI + virtio-gpu, NOT the
 # default VGA which renders the boot console as garbled static). See tools/vm.sh
