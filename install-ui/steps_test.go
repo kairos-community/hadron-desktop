@@ -11,15 +11,56 @@ func TestAdvanceStepMatchesKnownPhases(t *testing.T) {
 		{"Running stage: before-install", 2},
 		{"Creating file system image active.img", 3},
 		{"Installing GRUB to /dev/vda", 4},
-		{"Copying recovery.img", 5},
-		{"Copying passive.img", 6},
-		{"Running after-install hook", 7},
+		{"Copying /run/cos/state/cOS/active.img source to /run/cos/recovery/cOS/recovery.img", 5},
+		{"Copying /run/cos/state/cOS/active.img source to /run/cos/state/cOS/passive.img", 6},
+		{"Running stage: after-install", 7},
 		{"Finish Lifecycle hook", 8},
 	}
 	for _, c := range cases {
 		if got := AdvanceStep(c.line, 0); got != c.want {
 			t.Errorf("AdvanceStep(%q, 0) = %d, want %d", c.line, got, c.want)
 		}
+	}
+}
+
+// TestAdvanceStepIgnoresIncidentalImageMentions pins the anchoring of steps 5
+// and 6. "recovery.img" and "passive.img" are plain filename constants in
+// kairos-agent and appear in messages unrelated to the actual copy. With
+// unanchored matches, a single such line jumped step 0 -> 6 (75%) immediately
+// and, because AdvanceStep never regresses, every genuine earlier phase was
+// then ignored forever.
+func TestAdvanceStepIgnoresIncidentalImageMentions(t *testing.T) {
+	incidental := "Deploying image, will create recovery.img and passive.img later"
+	if got := AdvanceStep(incidental, 0); got != 0 {
+		t.Fatalf("AdvanceStep(%q, 0) = %d, want 0 (incidental mention must not advance)", incidental, got)
+	}
+
+	// The genuine phase lines must still be recognised.
+	recovery := "Copying /run/cos/state/cOS/active.img source to /run/cos/recovery/cOS/recovery.img"
+	if got := AdvanceStep(recovery, 0); got != 5 {
+		t.Errorf("AdvanceStep(recovery copy, 0) = %d, want 5", got)
+	}
+	passive := "Copying /run/cos/state/cOS/active.img source to /run/cos/state/cOS/passive.img"
+	if got := AdvanceStep(passive, 0); got != 6 {
+		t.Errorf("AdvanceStep(passive copy, 0) = %d, want 6", got)
+	}
+
+	// End-to-end: the incidental line must not eat the real partitioning phase
+	// that follows it.
+	step := 0
+	for _, line := range []string{incidental, "Partitioning device /dev/vda"} {
+		step = AdvanceStep(line, step)
+	}
+	if step != 1 {
+		t.Errorf("after incidental line then partitioning, step = %d, want 1", step)
+	}
+}
+
+// TestAdvanceStepAfterInstallUsesYipStage guards against reintroducing
+// "Running after-install hook", a string kairos-agent never emits.
+func TestAdvanceStepAfterInstallUsesYipStage(t *testing.T) {
+	if got := AdvanceStep("Running stage: after-install", 0); got != 7 {
+		t.Errorf("AdvanceStep(yip after-install stage, 0) = %d, want 7", got)
 	}
 }
 

@@ -21,11 +21,31 @@ var Steps = []Step{
 	{"Running before-install", "Running stage: before-install"},
 	{"Installing active system", "Creating file system image"},
 	{"Configuring bootloader", "Installing GRUB"},
-	{"Creating recovery image", "recovery.img"},
-	{"Creating passive image", "passive.img"},
-	{"Running after-install", "Running after-install hook"},
+	// Anchored on the full "Copying %s source to %s" line emitted by
+	// kairos-agent pkg/elemental/elemental.go. The bare "recovery.img" /
+	// "passive.img" filenames are also plain constants in
+	// kairos-agent/pkg/constants/constants.go and so appear in unrelated
+	// messages; since AdvanceStep never regresses, one incidental early mention
+	// would permanently skip steps 1-4.
+	{"Creating recovery image", "Copying /run/cos/state/cOS/active.img source to /run/cos/recovery/cOS/recovery.img"},
+	{"Creating passive image", "Copying /run/cos/state/cOS/active.img source to /run/cos/state/cOS/passive.img"},
+	// The after-install *stage* is emitted by yip's executor as
+	// "Running stage: %s" — kairos-agent itself never logs an
+	// "after-install hook" line.
+	{"Running after-install", "Running stage: after-install"},
 	{"Complete", "Finish Lifecycle hook"},
 }
+
+// NOTE: the parser alone cannot reliably reach the final step, so the caller
+// must also set the last step index on a successful process exit — do not
+// remove that exit-code handling believing this table covers completion.
+//
+// Two reasons:
+//   - "Finish Lifecycle hook" is logged at *Debug* level only
+//     (kairos-agent internal/agent/hooks/lifecycle.go), so it is absent at the
+//     default log level.
+//   - It sits *after* the reboot/poweroff branches in that same hook, so on a
+//     rebooting install the process is torn down before ever reaching it.
 
 // AdvanceStep returns the step index after observing line, never regressing below
 // current. It picks the highest-indexed step (beyond current) whose Match is in

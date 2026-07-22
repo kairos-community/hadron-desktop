@@ -27,6 +27,19 @@ func TestRingUnderCapacity(t *testing.T) {
 	}
 }
 
+// TestRingTextJoinsWithNewlines pins the separator. text() feeds the log
+// viewport, so joining with anything but "\n" renders the whole install log on
+// a single line. Needs >= 2 lines to be observable at all.
+func TestRingTextJoinsWithNewlines(t *testing.T) {
+	r := newRing(10)
+	for _, s := range []string{"first", "second", "third"} {
+		r.add(s)
+	}
+	if got, want := r.text(), "first\nsecond\nthird"; got != want {
+		t.Errorf("text() = %q, want %q", got, want)
+	}
+}
+
 func TestRingEmpty(t *testing.T) {
 	r := newRing(10)
 	if got := r.text(); got != "" {
