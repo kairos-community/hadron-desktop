@@ -2793,6 +2793,23 @@ RUN sed -i '/^loadfont unicode/a set color_normal=light-gray/black\nset color_hi
 # and the grub module tree on STATE so gfxmenu/tga/the theme all resolve there.
 # (hadron-theme/ isn't written by kairos-init, so its COPY at line ~1982 survives.)
 COPY rootfs/etc/kairos/branding/grubmenu.cfg /etc/kairos/branding/grubmenu.cfg
+# Console font. kairos-init may regenerate /etc/vconsole.conf, so re-apply ours
+# after it — same treatment as /etc/issue and /etc/motd below.
+COPY rootfs/etc/vconsole.conf /etc/vconsole.conf
+# Per-variant GRUB theme subtitle. theme.txt ships in the COMMON overlay with an
+# @VARIANT_SUBTITLE@ placeholder; the variant overlay supplies DESKTOP_NAME and
+# DISPLAY_NAME via /etc/hadron-desktop/session. Lowercased to match the theme's
+# typographic style ("i3 · xlibre · kairos").
+#
+# The chain is a single && list ending in `! grep`, so ANY link failing (missing
+# session file, empty names, sed error) or the placeholder surviving fails the
+# build: a theme with a literal @VARIANT_SUBTITLE@ would render that text on the
+# boot menu.
+RUN . /etc/hadron-desktop/session && \
+    [ -n "$DESKTOP_NAME" ] && [ -n "$DISPLAY_NAME" ] && \
+    subtitle="$(printf '%s · %s · kairos' "$DESKTOP_NAME" "$DISPLAY_NAME" | tr '[:upper:]' '[:lower:]')" && \
+    sed -i "s|@VARIANT_SUBTITLE@|${subtitle}|" /etc/kairos/branding/hadron-theme/theme.txt && \
+    ! grep -q '@VARIANT_SUBTITLE@' /etc/kairos/branding/hadron-theme/theme.txt
 # kairos-init regenerates /etc/motd (and may touch /etc/issue); re-apply the
 # branded console banners from the selected desktop overlay on top.
 COPY --from=desktop-config /etc/issue /etc/motd /etc/

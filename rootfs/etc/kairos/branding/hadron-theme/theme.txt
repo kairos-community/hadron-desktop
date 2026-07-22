@@ -6,6 +6,11 @@
 # background.tga). desktop-image is resolved relative to this file, so the bare
 # filename works once the whole hadron-theme dir lands in themes/hadron/.
 #
+# The subtitle is a build-time placeholder: this file lives in the COMMON rootfs
+# overlay but the subtitle is per-variant, so the Dockerfile substitutes
+# @VARIANT_SUBTITLE@ from /etc/hadron-desktop/session after kairos-init. Before
+# that substitution existed the i3 variant's boot menu claimed to be sway.
+#
 # Image is TGA, not PNG: GRUB's png.mod rejects valid PNGs with "unsupported
 # format", which makes gfxmenu discard the entire theme; tga.mod decodes cleanly.
 # Font: the installed EFI GRUB ships no unicode.pf2, so grubmenu.cfg loadfont's our
@@ -33,7 +38,7 @@ terminal-font: "Unifont Regular 16"
     align = "center"
     color = "#565f89"
     font  = "Unifont Regular 16"
-    text  = "sway · wayland · kairos"
+    text  = "@VARIANT_SUBTITLE@"
 }
 
 # Boot menu: foreground text dim, selected entry hot cyan.
