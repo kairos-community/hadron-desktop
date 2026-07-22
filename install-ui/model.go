@@ -99,6 +99,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.action = actionShell
 			return m, tea.Quit
 		}
+		// A second way off the failure screen. bubbletea puts the tty in raw
+		// mode, so ctrl+c arrives here as a key rather than SIGINT, and v1.3.10
+		// installs no default quit binding — without this, 's' is the only exit
+		// and a flaky VT keyboard would strand a failed install until a power
+		// cycle. m.failed stays set, so runInstall still exits non-zero.
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg) // allow scrolling the logs
 		return m, cmd
@@ -145,7 +153,25 @@ func progressBar(pct, width int) string {
 		tnDim.Render(strings.Repeat(".", width-fill)) + tnDim.Render("]")
 }
 
-func (m model) View() string {
+// clampHeight drops trailing lines so s is at most height rows. bubbletea's
+// renderer keeps the *last* height lines of whatever it is given, so an
+// over-tall view loses its top — on the failure screen that is the halt banner.
+// Truncating from the bottom instead keeps the banner and costs only a hint
+// line. height <= 0 means we have not been told the terminal size yet.
+func clampHeight(s string, height int) string {
+	if height <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= height {
+		return s
+	}
+	return strings.Join(lines[:height], "\n")
+}
+
+func (m model) View() string { return clampHeight(m.view(), m.height) }
+
+func (m model) view() string {
 	if !m.ready {
 		return "\n  " + tnDim.Render("waking the machine...")
 	}
