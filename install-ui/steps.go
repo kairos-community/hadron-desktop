@@ -4,7 +4,14 @@ import "strings"
 
 // Step is one phase of the kairos-agent install, identified by a stable substring
 // that appears in the installer's log output. Index 0 is the initial state (no
-// match). Mirrors kairos-agent internal/agent/TUIconstants.go.
+// match). Derived from kairos-installer internal/tui/TUIconstants.go.
+//
+// WARNING: do NOT blindly resync this table with upstream. Step 7 diverges on
+// purpose: upstream's AgentAfterInstallLog = "Running after-install hook" is a
+// bug — kairos-agent emits that string nowhere, so matching on it would leave
+// the progress bar stuck. We match yip's "Running stage: after-install" instead.
+// A future maintainer diffing against upstream will find exactly this one
+// mismatch; it is intentional and must stay.
 //
 // kairos-agent exposes no progress API, so scraping its stdout is the only way to
 // drive a progress bar. These substrings are best-effort and deliberately isolated
