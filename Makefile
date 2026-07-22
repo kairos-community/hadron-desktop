@@ -57,8 +57,12 @@ all: iso
 
 # The desktop image, with the Kairos init layer folded in as the final stage
 # (build `--target default` for the bare desktop image without it).
+# --no-cache-filter on hadron-splash and kairos: the kairos stage runs
+# kairos-init's `dracut -f`, which bakes the splash into /boot/initrd. BuildKit
+# happily caches that step even when splash/main.c changed, silently shipping a
+# stale initramfs splash. Busting both stages keeps the initramfs honest.
 image:
-	docker build $(BUILD_ARGS) -t $(IMAGE) .
+	docker build $(BUILD_ARGS) --no-cache-filter hadron-splash,kairos -t $(IMAGE) .
 
 images:
 	$(MAKE) DESKTOP=sway image

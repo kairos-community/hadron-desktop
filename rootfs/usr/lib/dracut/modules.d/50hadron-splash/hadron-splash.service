@@ -1,0 +1,23 @@
+[Unit]
+Description=Hadron desktop early boot splash (initramfs)
+# Run inside the initramfs with no implicit ordering deps, as early as the console
+# is usable. After udev has triggered, /dev/tty1 exists (console=tty1 is on the
+# cmdline). Start before initrd.target so the animation is already on screen while
+# immucore mounts the real root. Torn down at switch-root, where the booted
+# system's hadron-splash.service takes over.
+DefaultDependencies=no
+After=systemd-udev-trigger.service
+Before=initrd.target
+Conflicts=initrd-switch-root.target
+
+[Service]
+Type=simple
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+ExecStart=/usr/bin/hadron-splash
+# hadron-splash self-limits to ~5s and restores the terminal on SIGTERM; switch-root
+# will SIGTERM it if it is still running.
+KillSignal=SIGTERM
+TimeoutStopSec=5s
