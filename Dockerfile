@@ -25,6 +25,21 @@ ARG KAIROS_INIT=v0.14.0
 
 FROM ghcr.io/kairos-io/hadron-toolchain:main AS toolchain
 
+# ---------------------------------------------------------------------------
+# Boot splash. A vendored C99 fork of the upstream hadron splash, rebranded for
+# hadron-desktop (Tokyo Night VGA-16 ramp, ANSI-Shadow HADRON wordmark). The
+# same binary serves BOTH the initramfs copy (baked in by the 50hadron-splash
+# dracut module) and the booted system's hadron-splash.service, so there is one
+# source of truth for the animation.
+#
+# The build-time smoke test exercises the non-tty fallback path in main(), which
+# links and runs the whole program — a segfault or a missing symbol fails the
+# build here rather than at boot, where it would be invisible behind `quiet`.
+# ---------------------------------------------------------------------------
+FROM toolchain AS hadron-splash
+COPY splash/ /build/splash/
+RUN cd /build/splash && make clean && make && ./hadron-splash | grep -q HADRON
+
 # ===========================================================================
 # Wayland display stack (shared with the doom example)
 # ===========================================================================
@@ -2646,6 +2661,11 @@ COPY --from=distrobox /distrobox /
 COPY --from=firmware /firmware /
 # Shared + selected session config / launch layer
 COPY --from=desktop-config / /
+# Overwrite the base image's stock splash with our rebranded build. Must land
+# before the kairos-init stage runs `dracut -f`, so the 50hadron-splash dracut
+# module (Task 2) bakes THIS binary into the initramfs rather than the stock one.
+COPY --from=hadron-splash /build/splash/hadron-splash /usr/bin/hadron-splash
+
 # System setup. NOTE: no user is created here — the desktop user is defined at
 # install time via a Kairos cloud-config (see cloud-config.yaml) and lives on
 # the persistent /home. We only ensure the groups it will join exist, enable
