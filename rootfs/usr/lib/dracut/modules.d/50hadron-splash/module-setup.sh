@@ -29,10 +29,23 @@ depends() {
 install() {
     inst_multiple /usr/bin/hadron-splash
     inst_simple "${moddir}/hadron-splash.service" "${systemdsystemunitdir}/hadron-splash.service"
-    # Activate the unit inside the initramfs by wiring it into initrd.target, the
-    # same way 28immucore activates immucore.service.
-    mkdir -p "${initdir}/${systemdsystemunitdir}/initrd.target.requires"
-    ln_r "../hadron-splash.service" "${systemdsystemunitdir}/initrd.target.requires/hadron-splash.service"
+    # Activate the unit inside the initramfs by wiring it into initrd.target.
+    #
+    # .wants/, NOT .requires/ — deliberately unlike 28immucore. A .requires/ entry
+    # is a hard dependency: if hadron-splash.service fails to activate (most
+    # plausibly StandardInput=tty / TTYPath=/dev/tty1 failing to open on a
+    # serial-only console or a kernel without CONFIG_VT) then initrd.target never
+    # activates and the boot STALLS IN THE INITRAMFS. immucore may fail the boot —
+    # it mounts the root filesystem. A cosmetic splash must never be able to.
+    # With .wants/ activation is identical in the normal case, and a splash that
+    # cannot open the console degrades to "no animation" instead of a hang.
+    # Do not "restore parity" with 28immucore here; the risk profiles differ.
+    mkdir -p "${initdir}/${systemdsystemunitdir}/initrd.target.wants"
+    # The link ln_r writes is dangling (../../../../../../hadron-splash.service):
+    # ln_r expects two absolute paths and is given a relative one. Intentional —
+    # byte-for-byte what 28immucore produces, and systemd resolves .wants/ and
+    # .requires/ entries by filename regardless of where the link points.
+    ln_r "../hadron-splash.service" "${systemdsystemunitdir}/initrd.target.wants/hadron-splash.service"
 
     # Drop-in that takes immucore's logs off the console so they don't print over
     # the splash. 28immucore installs immucore.service into the same initdir;
