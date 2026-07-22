@@ -28,4 +28,10 @@ check "theme.txt present"            "test -f $T"
 check "theme subtitle is '$EXPECTED'" "grep -qF '$EXPECTED' $T"
 check "theme has no unsubstituted placeholder" "! grep -q '@VARIANT_SUBTITLE@' $T"
 
+G=/etc/kairos/branding/grubmenu.cfg
+check "grubmenu.cfg sets the full quiet cmdline" \
+    "grep -qF 'quiet splash loglevel=3 udev.log_level=3 systemd.show_status=false rd.systemd.show_status=false' $G"
+check "grubmenu.cfg preserves any pre-existing extra_cmdline" \
+    "grep -q 'set extra_cmdline=\"\${extra_cmdline}' $G"
+
 exit "$fail"

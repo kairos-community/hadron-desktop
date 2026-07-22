@@ -51,7 +51,7 @@ endif
 
 export DOCKER_BUILDKIT := 1
 
-.PHONY: all image images iso agent-image agent-iso vm vm-install clean
+.PHONY: all image images iso agent-image agent-iso vm vm-install check-boot-ux clean
 
 all: iso
 
@@ -93,6 +93,35 @@ vm-install:           ## fresh disk, boot the newest installer ISO
 	tools/vm.sh install
 vm:                   ## boot the already-installed disk
 	tools/vm.sh run
+
+# Boot-UX assertions (splash, initramfs, branding, ISO overlay) for every variant
+# image that is already built locally. Deliberately NOT a dependency of `all`:
+# the checks inspect a built image, so wiring them into a plain `make` would
+# either fail before the image exists or force a rebuild. Run them after
+# building: `make image && make check-boot-ux`.
+#
+# Each variant is guarded on `docker image inspect` so having built only one
+# variant checks only that one instead of erroring. The subtitle passed here is
+# the assertion, not a lookup -- note the agent variant runs i3 and so is
+# expected to say "i3 · xlibre · kairos", not "agent".
+check-boot-ux:
+	@ran=0; fail=0; \
+	for spec in "sway-desktop:dev|sway · wayland · kairos" \
+	            "i3-desktop:dev|i3 · xlibre · kairos" \
+	            "agent-desktop:dev|i3 · xlibre · kairos"; do \
+	  img="$${spec%%|*}"; subtitle="$${spec#*|}"; \
+	  if docker image inspect "$$img" >/dev/null 2>&1; then \
+	    echo "==> boot-ux: $$img ($$subtitle)"; \
+	    ran=1; \
+	    test/boot-ux/run.sh "$$img" "$$subtitle" || fail=1; \
+	  else \
+	    echo "==> boot-ux: skipping $$img (not built)"; \
+	  fi; \
+	done; \
+	if [ "$$ran" -eq 0 ]; then \
+	  echo "check-boot-ux: no variant image built; run 'make image' first" >&2; exit 1; \
+	fi; \
+	exit $$fail
 
 clean:
 	rm -rf $(WORK) $(AGENT_WORK)
