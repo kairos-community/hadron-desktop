@@ -100,11 +100,20 @@ func ConfigPresent(oemDir, outPath string) (bool, error) {
 // Go's stdlib has no crypt(3), and openssl is already in the image. Vendoring a
 // SHA-512-crypt implementation would put unaudited crypto in the one code path
 // where a mistake locks the user out of their own machine.
+// A bare exit status is not a usable diagnostic here — an operator seeing
+// "exit status 1" cannot tell a missing -6 flag (LibreSSL, old OpenSSL) from
+// anything else, and the consequence of getting this wrong is a machine nobody
+// can log into. So openssl's own stderr is attached to the returned error.
 func HashPassword(plain string) (string, error) {
 	cmd := exec.Command("openssl", "passwd", "-6", "-stdin")
 	cmd.Stdin = strings.NewReader(plain)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return "", fmt.Errorf("openssl passwd: %w: %s", err, msg)
+		}
 		return "", fmt.Errorf("openssl passwd: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
