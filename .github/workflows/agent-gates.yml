@@ -7,6 +7,11 @@ on:
       - "rootfs-agent/**"
       - "Dockerfile.agent"
       - "test/agent/**"
+      - "install-ui/**"
+      - "test/boot-ux/**"
+      - "splash/**"
+      - "auroraboot/**"
+      - "Dockerfile"
       - "Makefile"
       - ".github/workflows/agent-gates.yml"
   workflow_dispatch:
@@ -74,12 +79,42 @@ jobs:
           cd agent
           go test -race ./...
 
+      # The installer TUI lives in its own standalone module (go 1.25), which the
+      # agent go.mod (go 1.25.0) setup-go step above already provisions a
+      # new-enough toolchain for, so no second Go setup is needed.
+      - name: Check install-ui formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd install-ui
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then
+            echo "These files are not gofmt-clean:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Vet and build install-ui
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd install-ui
+          go vet ./...
+          go build ./...
+
+      - name: install-ui tests with the race detector
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd install-ui
+          go test -race ./...
+
       - name: Parse the agent harness shell sources
         shell: bash
         run: |
           set -euo pipefail
           mapfile -t scripts < <(
-            find test/agent tools -type f -name '*.sh' -print | sort
+            find test/agent test/boot-ux tools -type f -name '*.sh' -print | sort
           )
           if (( ${#scripts[@]} == 0 )); then
             echo "Expected to find agent harness shell scripts" >&2
