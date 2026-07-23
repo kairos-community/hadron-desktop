@@ -1,0 +1,50 @@
+#!/bin/sh
+# Launch Chromium for the Cua agent with the CDP debug port open.
+#
+# Run as the `agent` user by hadron-agent-browser.service (a systemd --user unit).
+# It guards on two preconditions and exits non-zero if either is unmet, so the
+# unit's Restart=always retries rather than the browser crash-looping:
+#   1. the app is installed (hadron-agent-browser-install may still be running on
+#      a first boot) -- checked via flatpak's own state, no network;
+#   2. DISPLAY is set (hadron-agent-session-ready imports it into the user manager
+#      once the desktop is up).
+#
+# Flags are taken verbatim from the proven test fixture
+# (test/agent/rootfs/etc/i3/config.d/99-cua-compat.conf and test/agent/run.sh):
+# software GL and no-sandbox suit the appliance VM; --remote-debugging-port=9222
+# is where agent/internal/cua/browser.go connects; --force-renderer-accessibility
+# exposes the a11y tree the tool relies on.
+#
+# Seams (tests only):
+#   HADRON_FLATPAK       flatpak binary (default "flatpak").
+#   HADRON_BROWSER_EXEC  if set, do not exec -- return after invoking flatpak, so
+#                        tests can assert the argv without replacing the process.
+set -eu
+
+FLATPAK="${HADRON_FLATPAK:-flatpak}"
+APP=org.chromium.Chromium
+
+if ! "$FLATPAK" info --system "$APP" >/dev/null 2>&1; then
+    echo "$APP not installed yet; will retry" >&2
+    exit 1
+fi
+if [ -z "${DISPLAY:-}" ]; then
+    echo "DISPLAY not set yet; will retry" >&2
+    exit 1
+fi
+
+set -- "$FLATPAK" run \
+    --socket=x11 --socket=session-bus \
+    --env=DISPLAY="$DISPLAY" \
+    ${XAUTHORITY:+--env=XAUTHORITY="$XAUTHORITY" --filesystem="$XAUTHORITY"} \
+    "$APP" \
+    --ozone-platform=x11 --no-sandbox --disable-gpu --disable-dev-shm-usage \
+    --no-first-run --force-renderer-accessibility \
+    --remote-debugging-port=9222 --remote-allow-origins=* \
+    --new-window about:blank
+
+if [ -n "${HADRON_BROWSER_EXEC:-}" ]; then
+    "$@"        # test path: fake flatpak records argv and returns
+else
+    exec "$@"   # production: replace this process with Chromium
+fi
