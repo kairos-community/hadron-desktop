@@ -682,19 +682,29 @@ test/agent/browser_units_test.sh agent-desktop:dev
 
 Expected: `FAIL` on the script/unit checks (not yet wired), likely `PASS` on the descriptor and flatpak checks (inherited from the base image).
 
-- [ ] **Step 4: Enable the install unit and confirm the user unit ships**
+- [ ] **Step 4: Confirm enablement and that the user unit ships**
 
-In `Dockerfile.agent`, after the `rootfs-agent/` overlay is copied, enable the install oneshot exactly as the existing agent system oneshots are enabled. If they use a committed symlink, add one; if they use `systemctl enable`, mirror that. Concretely, add near the other agent-unit enablement:
+The install unit is **already enabled** by the committed symlink
+`rootfs-agent/etc/systemd/system/multi-user.target.wants/hadron-agent-browser-install.service`
+added in Task 1 — that is how every agent system unit is enabled here (the
+overlay is a plain `COPY rootfs-agent/ /` in `Dockerfile.agent`, which never
+processes a unit's `[Install]` section, so a committed `.wants` symlink is the
+only enablement mechanism). **Do not add a `systemctl enable` or a Dockerfile
+`RUN` symlink** — that would be a redundant second mechanism. Just verify the
+symlink survives into the built image:
 
-```dockerfile
-# Enable the first-boot Chromium install (a hard no-op off the agent profile).
-# Kairos forces multi-user.target, so pull it in there directly, like the other
-# agent oneshots.
-RUN ln -sf /etc/systemd/system/hadron-agent-browser-install.service \
-      /etc/systemd/system/multi-user.target.wants/hadron-agent-browser-install.service
+```bash
+docker run --rm agent-desktop:dev test -L \
+  /etc/systemd/system/multi-user.target.wants/hadron-agent-browser-install.service && echo OK
 ```
 
-The user unit `usr/lib/systemd/user/hadron-agent-browser.service` needs no global enable — it is started explicitly by `hadron-agent-session-ready` (Task 3 Step 6) and gated `ConditionUser=agent`. If the build wants it discoverable via `WantedBy`, it is intentionally not; do not add a `--global enable`. Verify the overlay copy places it at `/usr/lib/systemd/user/`.
+The user unit `usr/lib/systemd/user/hadron-agent-browser.service` needs no global
+enable — it is started explicitly by `hadron-agent-session-ready` (Task 3 Step 6)
+and gated `ConditionUser=agent`; it is intentionally not `WantedBy` anything.
+Verify the overlay copy places it at `/usr/lib/systemd/user/` in the image (the
+`browser_units_test.sh` check covers this). No `Dockerfile.agent` change should
+be needed for enablement; the only edits this task makes to `Dockerfile.agent`
+are none unless the descriptor/flatpak checks in Step 2 reveal a genuine gap.
 
 - [ ] **Step 5: Rebuild and run the test to verify it passes**
 
