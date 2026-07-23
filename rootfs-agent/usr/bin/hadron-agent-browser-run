@@ -40,7 +40,7 @@ set -- "$FLATPAK" run \
     "$APP" \
     --ozone-platform=x11 --no-sandbox --disable-gpu --disable-dev-shm-usage \
     --no-first-run --force-renderer-accessibility \
-    --remote-debugging-port=9222 --remote-allow-origins=* \
+    --remote-debugging-port=9222 --remote-allow-origins='*' \
     --new-window about:blank
 
 if [ -n "${HADRON_BROWSER_EXEC:-}" ]; then
