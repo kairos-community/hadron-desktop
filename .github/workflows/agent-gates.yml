@@ -125,6 +125,24 @@ jobs:
             bash -n "$script"
           done
 
+      - name: Browser unit tests (hermetic)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The first-boot Chromium shell unit tests are hermetic -- they drive
+          # the install/persistence/launch logic through a fake flatpak and temp
+          # dirs, no docker or VM -- so they can gate here. (The other
+          # test/agent/*_test.sh are only bash -n parsed above: some need a
+          # built image, and two are pre-existing red on missing fixtures.
+          # browser_units_test.sh is an IMAGE check and runs in build-agent-iso,
+          # not here.)
+          for t in test/agent/browser_install_test.sh \
+                   test/agent/browser_persistence_test.sh \
+                   test/agent/browser_run_test.sh; do
+            echo "== $t"
+            bash "$t"
+          done
+
   build-agent-iso:
     name: Build agent image and ISO
     needs: checks
@@ -158,6 +176,15 @@ jobs:
         run: |
           set -euo pipefail
           make agent-iso
+
+      - name: First-boot Chromium units present in the image
+        shell: bash
+        run: |
+          set -euo pipefail
+          # make agent-iso builds agent-desktop:dev; assert the install/launch
+          # units and the signed Flathub descriptor they need shipped and are
+          # enabled in it.
+          test/agent/browser_units_test.sh agent-desktop:dev
 
       # The VM gates do not boot this ISO directly: each of them re-wraps the
       # appliance OCI image with its own freshly minted `cidata` seed. So the

@@ -34,3 +34,6 @@ expected="unix:path=/run/user/$(id -u)/bus"
 # Hand the live session to the user manager, then restart the broker onto it.
 systemctl --user import-environment DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS
 systemctl --user restart hadron-agent-session.service
+# Bring up the agent's browser on the now-live display. Guarded so a failure here
+# never blocks the session broker (the browser unit's Restart=always will retry).
+systemctl --user start hadron-agent-browser.service || true

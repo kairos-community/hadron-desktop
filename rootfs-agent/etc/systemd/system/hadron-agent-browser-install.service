@@ -1,0 +1,25 @@
+# Install Chromium on the agent appliance so the Cua browser tool has a browser
+# to drive over CDP (127.0.0.1:9222). First-boot oneshot; the script is a fast
+# local no-op once the app is installed (and /var/lib/flatpak is persisted), so
+# re-running every boot costs nothing and self-heals an inconsistent state.
+#
+# ConditionPathExists=/etc/hadron-agent/profile makes this a hard no-op on any
+# non-appliance image (the dangling wants-symlink does nothing there).
+[Unit]
+Description=Hadron agent Chromium install (system Flatpak)
+ConditionPathExists=/etc/hadron-agent/profile
+Wants=network-online.target
+# The `agent` user/group and the profile are materialized in the cos-setup boot
+# stage; order after it (and network) exactly as hadron-agent-provision does.
+After=network-online.target cos-setup-boot.service cos-setup-network.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# ~2 GB download on a first boot over a slow link: give it room, but bounded so a
+# hung mirror cannot wedge the unit forever (it retries next boot).
+TimeoutStartSec=30min
+ExecStart=/usr/bin/hadron-agent-browser-install
+
+[Install]
+WantedBy=multi-user.target

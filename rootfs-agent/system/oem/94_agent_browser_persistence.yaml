@@ -1,0 +1,35 @@
+# Persist Chromium's Flatpak install across reboots.
+#
+# Kairos does not persist /var/lib, so a system Flatpak install (/var/lib/flatpak)
+# would be wiped every boot and hadron-agent-browser-install would re-download
+# ~2 GB each time. This bind-mounts it onto the persistent partition, matching how
+# 92_docker persists /var/lib/docker and 93_agent persists /var/lib/hadron-agent.
+#
+# The append is deliberate and mirrors 93_agent_persistence.yaml: cos-setup's
+# rootfs.after stage consumes CUSTOM_BIND_MOUNTS once, so a plain `environment:`
+# block would REPLACE the value and silently un-persist Docker and the agent
+# state. This reads the current value, adds one path, and is a no-op if the path
+# is already listed. 94_ sorts after 92_/93_ so their values are present first.
+#
+# No `if:` guard, for the same reason 93_ documents: the rootfs stage runs in the
+# initramfs, where the installed /etc is not yet live, so a guard on
+# /etc/hadron-agent/profile silently skips the stage. This file ships only in the
+# agent overlay, so its presence is the profile check.
+name: "Hadron agent Chromium persistence"
+stages:
+  rootfs:
+    - name: "persist /var/lib/flatpak across reboots"
+      commands:
+        - |
+          layout=/run/cos/cos-layout.env
+          touch "$layout"
+          # shellcheck source=/dev/null
+          . "$layout" 2>/dev/null || true
+          case " ${CUSTOM_BIND_MOUNTS:-} " in
+            *" /var/lib/flatpak "*)
+              exit 0
+              ;;
+          esac
+          merged="${CUSTOM_BIND_MOUNTS:-} /var/lib/flatpak"
+          sed -i '/^CUSTOM_BIND_MOUNTS=/d' "$layout"
+          printf 'CUSTOM_BIND_MOUNTS="%s"\n' "${merged# }" >> "$layout"

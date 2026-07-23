@@ -80,12 +80,19 @@ else
   err "restart line was: '$(grep restart "$record" || true)'"
 fi
 
-# Exactly two systemctl calls, nothing else.
-calls="$(wc -l <"$record" | tr -d ' ')"
-if [ "$calls" = "2" ]; then
-  ok "issued exactly 2 systemctl calls"
+# After the broker restart it also starts the agent's browser on the live display.
+if grep -qx -- '--user start hadron-agent-browser.service' "$record"; then
+  ok "starts EXACTLY hadron-agent-browser.service"
 else
-  err "expected 2 systemctl calls, got $calls: $(cat "$record")"
+  err "browser start line was: '$(grep hadron-agent-browser "$record" || true)'"
+fi
+
+# Exactly three systemctl calls, nothing else: import-environment, restart, start.
+calls="$(wc -l <"$record" | tr -d ' ')"
+if [ "$calls" = "3" ]; then
+  ok "issued exactly 3 systemctl calls"
+else
+  err "expected 3 systemctl calls, got $calls: $(cat "$record")"
 fi
 
 # It must never scrape another process: it must not read any /proc entry.

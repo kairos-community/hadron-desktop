@@ -1,0 +1,20 @@
+# Chromium for the Cua agent, in the `agent` user's manager. Gated ConditionUser
+# =agent so it is a no-op in every other user's --user instance.
+#
+# It is started explicitly by hadron-agent-session-ready AFTER DISPLAY/XAUTHORITY
+# are imported into this manager, so the wrapper always has a display; and it is
+# PartOf the session broker, so when the display watchdog restarts the session on
+# a display change, Chromium restarts with it. Restart=always covers crashes and
+# the first-boot window where the app is still installing (the wrapper exits
+# non-zero until both the app and DISPLAY are present).
+[Unit]
+Description=Hadron agent Chromium (CDP on 127.0.0.1:9222)
+ConditionUser=agent
+After=hadron-agent-session.service
+PartOf=hadron-agent-session.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/hadron-agent-browser-run
+Restart=always
+RestartSec=3s

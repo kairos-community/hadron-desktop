@@ -1,0 +1,45 @@
+#!/bin/sh
+# Install Chromium system-wide on the agent appliance, idempotently.
+#
+# Runs as root from hadron-agent-browser-install.service (a first-boot oneshot).
+# Flatpak's own install state is the single source of truth: if the app is
+# already present (a persisted /var/lib/flatpak — see 94_agent_browser_persistence
+# .yaml), this is a fast local no-op needing no network. Otherwise it adds the
+# signed Flathub remote the image already ships and installs the stable branch.
+#
+# We track `stable` rather than pinning an OSTree commit on purpose: the appliance
+# may first-boot long after the image was built, and Flathub garbage-collects old
+# commits, so a pin can become uninstallable. The test harness keeps its own pin
+# (test/agent/fixtures/chromium.commit); production and test deliberately diverge.
+#
+# Seams (tests only):
+#   HADRON_FLATPAK         flatpak binary (default "flatpak"); tests inject a fake.
+#   HADRON_PROFILE_MARKER  profile marker path (default /etc/hadron-agent/profile).
+set -eu
+
+FLATPAK="${HADRON_FLATPAK:-flatpak}"
+MARKER="${HADRON_PROFILE_MARKER:-/etc/hadron-agent/profile}"
+REMOTE=flathub
+DESCRIPTOR=/usr/share/hadron/flathub.flatpakrepo
+APP=org.chromium.Chromium
+
+# Defence in depth: the unit already gates on the profile marker, but re-assert
+# it so a manual run on the wrong machine is a clean no-op, not a 2 GB download.
+[ -e "$MARKER" ] || { echo "not the agent appliance (no $MARKER); nothing to do"; exit 0; }
+
+# Already installed? Local check, no network.
+if "$FLATPAK" info --system "$APP" >/dev/null 2>&1; then
+    echo "$APP already installed"
+    exit 0
+fi
+
+# Add the signed remote if it is not already present. The descriptor carries the
+# URL and GPG key; we never pass --no-gpg-verify.
+if ! "$FLATPAK" remotes --system --columns=name 2>/dev/null | grep -qx "$REMOTE"; then
+    echo "adding signed Flathub remote"
+    "$FLATPAK" remote-add --system "$REMOTE" "$DESCRIPTOR"
+fi
+
+echo "installing $APP (stable) system-wide"
+"$FLATPAK" install --system --noninteractive -y "$REMOTE" "$APP"
+echo "installed $APP"
