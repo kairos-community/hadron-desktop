@@ -64,4 +64,15 @@ if HADRON_FLATPAK="$d/flatpak" HADRON_PROFILE_MARKER=/dev/null \
 else ok "install failure -> non-zero exit"; fi
 rm -rf "$d"
 
+# 5. marker absent -> clean no-op: exit 0 and flatpak never invoked at all.
+# Guards the defence that stops a manual run on a non-appliance from pulling 2 GB.
+d="$(mktemp -d)"; make_fake_flatpak "$d"
+if HADRON_FLATPAK="$d/flatpak" HADRON_PROFILE_MARKER="$d/nonexistent-marker" \
+     sh "$script" >/dev/null 2>&1; then
+  if [ -e "$d/calls" ]; then
+    err "marker absent must not invoke flatpak at all (got: $(cat "$d/calls"))"
+  else ok "marker absent -> exit 0, flatpak never called"; fi
+else err "marker absent must exit 0 (clean no-op)"; fi
+rm -rf "$d"
+
 exit "$fail"
