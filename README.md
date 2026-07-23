@@ -192,15 +192,18 @@ i3 image, `ly` starts XLibre and then launches i3.
 
 There are two ways to create that user:
 
-- **Interactive installer (default).** Boot the live ISO with nothing else and a
-  small wizard (`/usr/local/bin/hadron-install`, wired in via
-  `system/oem/90_desktop_installer.yaml`) prompts on tty1 for **hostname, username,
-  password, and target disk**, assigns the desktop groups (admin, audio, video,
-  render, input, bluetooth, seat), hashes the password (`openssl passwd -6`),
-  writes the cloud-config, and installs.
+- **Interactive installer (default).** Boot the live ISO with nothing else and
+  `hadron-install-ui` — a Go TUI at `/usr/bin/hadron-install-ui`, wired in via
+  `system/oem/90_desktop_installer.yaml` — runs on tty1. It collects **hostname,
+  username, password, optional GitHub SSH keys and target disk** behind a review
+  gate, assigns the desktop groups (admin, audio, video, render, input,
+  bluetooth, seat), hashes the password (`openssl passwd -6`), writes the
+  cloud-config, then runs `kairos-agent install` behind a branded progress
+  screen (`l` toggles the raw logs, `s` opens a rescue shell if the install
+  fails). Source lives in `install-ui/`.
 - **Unattended cloud-config.** Provide a `cloud-config.yaml` (`users:`/`install:`
   block — see the example file) via AuroraBoot `--cloud-config` or a datasource.
-  When one is present the wizard detects it and runs the normal unattended
+  When one is present the TUI detects it and runs the normal unattended
   install instead of prompting — so CI and automated installs are unaffected.
 
 The top-level build targets are:
@@ -327,6 +330,7 @@ hadron-desktop/
   Dockerfile          # multi-stage build of the whole desktop stack
   cloud-config.yaml   # example Kairos install config (creates the desktop user)
   rootfs/             # shared OS, installer and service overlay
+  install-ui/         # Go TUI installer (-> /usr/bin/hadron-install-ui)
   rootfs-sway/        # Wayland/Sway session config and native tools
   rootfs-i3/          # XLibre/i3 session config and native tools
   tools/

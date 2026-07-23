@@ -25,6 +25,21 @@ ARG KAIROS_INIT=v0.14.0
 
 FROM ghcr.io/kairos-io/hadron-toolchain:main AS toolchain
 
+# ---------------------------------------------------------------------------
+# Boot splash. A vendored C99 fork of the upstream hadron splash, rebranded for
+# hadron-desktop (Tokyo Night VGA-16 ramp, ANSI-Shadow HADRON wordmark). The
+# same binary serves BOTH the initramfs copy (baked in by the 50hadron-splash
+# dracut module) and the booted system's hadron-splash.service, so there is one
+# source of truth for the animation.
+#
+# The build-time smoke test exercises the non-tty fallback path in main(), which
+# links and runs the whole program — a segfault or a missing symbol fails the
+# build here rather than at boot, where it would be invisible behind `quiet`.
+# ---------------------------------------------------------------------------
+FROM toolchain AS hadron-splash
+COPY splash/ /build/splash/
+RUN cd /build/splash && make clean && make && ./hadron-splash | grep -q HADRON
+
 # ===========================================================================
 # Wayland display stack (shared with the doom example)
 # ===========================================================================
@@ -2602,6 +2617,38 @@ FROM ${DESKTOP}-rootfs AS desktop-rootfs
 FROM ${DESKTOP}-config AS desktop-config
 
 
+# ---------------------------------------------------------------------------
+# Installer TUI. A static CGO_ENABLED=0 Go binary, so it runs on musl without
+# any runtime linkage. Replaces the POSIX-sh wizard: it collects the same
+# answers, writes the same cloud-config, then runs `kairos-agent install` as a
+# subprocess and renders a branded progress screen instead of raw log spew.
+#
+# Must be declared before `default` (the stage that COPYies it in), not merely
+# before `kairos`: BuildKit resolves --from against stages defined ABOVE the
+# consuming stage.
+#
+# Deliberately NOT in the Makefile's --no-cache-filter list. That list exists
+# because the kairos stage's `dracut -f` bakes the splash into the initramfs
+# behind BuildKit's back. Here the cache key is honest: `COPY install-ui/ ./` is
+# content-addressed, so any source change invalidates the build, and the output
+# is COPYied straight into the image rather than swallowed by a later step. Busting
+# it every build would re-run `go mod download` (network) for no correctness gain.
+# ---------------------------------------------------------------------------
+FROM golang:1.25.0-alpine3.22 AS install-ui-build
+WORKDIR /src
+COPY install-ui/go.mod install-ui/go.sum ./
+RUN go mod download
+COPY install-ui/ ./
+# The trailing check is a smoke test: the binary must run and reject an unknown
+# flag with exit 2, so a binary that segfaults on startup fails the build here
+# rather than on tty1 during an install. Braced so a FAILED `go build` still
+# fails the RUN -- written as `... && bin --nonsense; [ $? -eq 2 ]` the RUN's
+# status would be the test's alone, and a build that happened to exit 2 would
+# "pass" having produced no binary at all.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/hadron-install-ui . \
+    && { /out/hadron-install-ui --nonsense 2>/dev/null; [ $? -eq 2 ]; }
+
+
 FROM ${BASE_IMAGE} AS default
 # Built desktop stack
 COPY --from=desktop-rootfs / /
@@ -2646,6 +2693,11 @@ COPY --from=distrobox /distrobox /
 COPY --from=firmware /firmware /
 # Shared + selected session config / launch layer
 COPY --from=desktop-config / /
+# Overwrite the base image's stock splash with our rebranded build. Must land
+# before the kairos-init stage runs `dracut -f`, so the 50hadron-splash dracut
+# module (Task 2) bakes THIS binary into the initramfs rather than the stock one.
+COPY --from=hadron-splash /build/splash/hadron-splash /usr/bin/hadron-splash
+
 # System setup. NOTE: no user is created here — the desktop user is defined at
 # install time via a Kairos cloud-config (see cloud-config.yaml) and lives on
 # the persistent /home. We only ensure the groups it will join exist, enable
@@ -2659,9 +2711,10 @@ RUN chmod 1777 /tmp; \
     # The selected session launcher lives in /usr/bin (NOT /usr/local): Kairos mounts /usr/local
     # from the persistent partition on the installed system, which shadows
     # anything baked into the image there — ly would exec a missing launcher and
-    # bounce straight back to the login screen. hadron-install stays in
-    # /usr/local/bin since it only runs at install time (live, /usr/local intact).
-    chmod +x /usr/bin/start-desktop /usr/bin/hadron-* /usr/local/bin/hadron-install; \
+    # bounce straight back to the login screen. The installer TUI lives in
+    # /usr/bin for the same reason (it is COPYied in after this block, already
+    # executable, so the glob below deliberately does not have to reach it).
+    chmod +x /usr/bin/start-desktop /usr/bin/hadron-*; \
     # ly runs on tty1 via the ly@tty1 instance of the ly@.service template (ly
     # 1.3.x dropped the plain ly.service and the config `tty` option — the tty is
     # the systemd instance). It authenticates the cloud-config user and launches
@@ -2732,6 +2785,12 @@ RUN chmod 1777 /tmp; \
     systemctl enable hadron-user-setup.service 2>/dev/null || true; \
     ln -sf /usr/lib/systemd/system/hadron-user-setup.service /etc/systemd/system/multi-user.target.wants/hadron-user-setup.service
 
+# Installer TUI. /usr/bin, not /usr/local/bin: /usr/local is shadowed by an empty
+# overlay at runtime on Kairos, so a binary there is invisible to the installed
+# system. (The shell installer it replaces lived in /usr/local/bin and only
+# worked because the installer runs in the live environment.)
+COPY --from=install-ui-build /out/hadron-install-ui /usr/bin/hadron-install-ui
+
 
 # ===========================================================================
 # Kairos init layer — makes the image bootable/installable.
@@ -2773,6 +2832,23 @@ RUN sed -i '/^loadfont unicode/a set color_normal=light-gray/black\nset color_hi
 # and the grub module tree on STATE so gfxmenu/tga/the theme all resolve there.
 # (hadron-theme/ isn't written by kairos-init, so its COPY at line ~1982 survives.)
 COPY rootfs/etc/kairos/branding/grubmenu.cfg /etc/kairos/branding/grubmenu.cfg
+# Console font. kairos-init may regenerate /etc/vconsole.conf, so re-apply ours
+# after it — same treatment as /etc/issue and /etc/motd below.
+COPY rootfs/etc/vconsole.conf /etc/vconsole.conf
+# Per-variant GRUB theme subtitle. theme.txt ships in the COMMON overlay with an
+# @VARIANT_SUBTITLE@ placeholder; the variant overlay supplies DESKTOP_NAME and
+# DISPLAY_NAME via /etc/hadron-desktop/session. Lowercased to match the theme's
+# typographic style ("i3 · xlibre · kairos").
+#
+# The chain is a single && list ending in `! grep`, so ANY link failing (missing
+# session file, empty names, sed error) or the placeholder surviving fails the
+# build: a theme with a literal @VARIANT_SUBTITLE@ would render that text on the
+# boot menu.
+RUN . /etc/hadron-desktop/session && \
+    [ -n "$DESKTOP_NAME" ] && [ -n "$DISPLAY_NAME" ] && \
+    subtitle="$(printf '%s · %s · kairos' "$DESKTOP_NAME" "$DISPLAY_NAME" | tr '[:upper:]' '[:lower:]')" && \
+    sed -i "s|@VARIANT_SUBTITLE@|${subtitle}|" /etc/kairos/branding/hadron-theme/theme.txt && \
+    ! grep -q '@VARIANT_SUBTITLE@' /etc/kairos/branding/hadron-theme/theme.txt
 # kairos-init regenerates /etc/motd (and may touch /etc/issue); re-apply the
 # branded console banners from the selected desktop overlay on top.
 COPY --from=desktop-config /etc/issue /etc/motd /etc/

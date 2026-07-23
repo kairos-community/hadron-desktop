@@ -21,9 +21,12 @@
 # install command.
 #
 # Overrides (testing / automation seams):
-#   HADRON_INSTALL_CMD   install command to exec (default "kairos-agent install").
-#                        This is the single seam through which a wipe happens;
-#                        tests inject a fake here to assert did/didn't install.
+#   HADRON_INSTALL_CMD   install command to exec (default
+#                        "hadron-install-ui --progress-only", which runs
+#                        `kairos-agent install` itself behind a branded progress
+#                        screen). This is the single seam through which a wipe
+#                        happens; tests inject a fake here to assert did/didn't
+#                        install, which still bypasses the UI entirely.
 #   HADRON_OEM_DIR       cloud-config output dir (default /oem).
 #   HADRON_AGENT_BIN     hadron-agent binary for inspect-seed (default hadron-agent).
 #   HADRON_SYS_BLOCK     block-device listing dir (default /sys/block).
@@ -32,7 +35,7 @@ set -eu
 
 OEM_DIR="${HADRON_OEM_DIR:-/oem}"
 OUT="$OEM_DIR/99_hadron-agent-install.yaml"
-INSTALL_CMD="${HADRON_INSTALL_CMD:-kairos-agent install}"
+INSTALL_CMD="${HADRON_INSTALL_CMD:-hadron-install-ui --progress-only}"
 AGENT_BIN="${HADRON_AGENT_BIN:-hadron-agent}"
 SYS_BLOCK="${HADRON_SYS_BLOCK:-/sys/block}"
 

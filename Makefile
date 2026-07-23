@@ -51,14 +51,18 @@ endif
 
 export DOCKER_BUILDKIT := 1
 
-.PHONY: all image images iso agent-image agent-iso vm vm-install clean
+.PHONY: all image images iso agent-image agent-iso vm vm-install check-boot-ux clean
 
 all: iso
 
 # The desktop image, with the Kairos init layer folded in as the final stage
 # (build `--target default` for the bare desktop image without it).
+# --no-cache-filter on hadron-splash and kairos: the kairos stage runs
+# kairos-init's `dracut -f`, which bakes the splash into /boot/initrd. BuildKit
+# happily caches that step even when splash/main.c changed, silently shipping a
+# stale initramfs splash. Busting both stages keeps the initramfs honest.
 image:
-	docker build $(BUILD_ARGS) -t $(IMAGE) .
+	docker build $(BUILD_ARGS) --no-cache-filter hadron-splash,kairos -t $(IMAGE) .
 
 images:
 	$(MAKE) DESKTOP=sway image
@@ -72,24 +76,15 @@ agent-image:
 	  -t $(AGENT_IMAGE) .
 
 agent-iso: agent-image
-	mkdir -p $(AGENT_ISO_DIR)
-	rm -f $(AGENT_ISO_DIR)/*.iso
-	docker run --rm --privileged \
-	  -v /var/run/docker.sock:/var/run/docker.sock \
-	  -v $(CURDIR)/$(AGENT_ISO_DIR):/output \
-	  $(AURORA_IMAGE) build-iso --output /output/ docker:$(AGENT_IMAGE)
-	@echo "ISO: $$(ls -t $(AGENT_ISO_DIR)/*.iso | head -1)"
+	AURORA_IMAGE=$(AURORA_IMAGE) auroraboot/build.sh $(AGENT_IMAGE) $(AGENT_ISO_DIR)
 
-# Build the installer ISO with AuroraBoot straight from the image (it reads the
-# local image over the Docker socket).
+# Build the installer ISO with AuroraBoot via auroraboot/build.sh, which stages
+# an --overlay-iso dir carrying our own live GRUB menu (branded, themed, quiet
+# cmdline) so AuroraBoot keeps ours instead of writing its default Kairos menu.
+# build.sh also creates the output dir and clears stale ISOs, which these
+# targets used to do inline.
 iso: image
-	mkdir -p $(ISO_DIR)
-	rm -f $(ISO_DIR)/*.iso
-	docker run --rm --privileged \
-	  -v /var/run/docker.sock:/var/run/docker.sock \
-	  -v $(CURDIR)/$(ISO_DIR):/output \
-	  $(AURORA_IMAGE) build-iso --output /output/ docker:$(IMAGE)
-	@echo "ISO: $$(ls -t $(ISO_DIR)/*.iso | head -1)"
+	AURORA_IMAGE=$(AURORA_IMAGE) auroraboot/build.sh $(IMAGE) $(ISO_DIR)
 
 # Run the image in QEMU with the correct flags (UEFI + virtio-gpu, NOT the
 # default VGA which renders the boot console as garbled static). See tools/vm.sh
@@ -98,6 +93,35 @@ vm-install:           ## fresh disk, boot the newest installer ISO
 	tools/vm.sh install
 vm:                   ## boot the already-installed disk
 	tools/vm.sh run
+
+# Boot-UX assertions (splash, initramfs, branding, ISO overlay) for every variant
+# image that is already built locally. Deliberately NOT a dependency of `all`:
+# the checks inspect a built image, so wiring them into a plain `make` would
+# either fail before the image exists or force a rebuild. Run them after
+# building: `make image && make check-boot-ux`.
+#
+# Each variant is guarded on `docker image inspect` so having built only one
+# variant checks only that one instead of erroring. The subtitle passed here is
+# the assertion, not a lookup -- note the agent variant runs i3 and so is
+# expected to say "i3 · xlibre · kairos", not "agent".
+check-boot-ux:
+	@ran=0; fail=0; \
+	for spec in "sway-desktop:dev|sway · wayland · kairos" \
+	            "i3-desktop:dev|i3 · xlibre · kairos" \
+	            "agent-desktop:dev|i3 · xlibre · kairos"; do \
+	  img="$${spec%%|*}"; subtitle="$${spec#*|}"; \
+	  if docker image inspect "$$img" >/dev/null 2>&1; then \
+	    echo "==> boot-ux: $$img ($$subtitle)"; \
+	    ran=1; \
+	    test/boot-ux/run.sh "$$img" "$$subtitle" || fail=1; \
+	  else \
+	    echo "==> boot-ux: skipping $$img (not built)"; \
+	  fi; \
+	done; \
+	if [ "$$ran" -eq 0 ]; then \
+	  echo "check-boot-ux: no variant image built; run 'make image' first" >&2; exit 1; \
+	fi; \
+	exit $$fail
 
 clean:
 	rm -rf $(WORK) $(AGENT_WORK)
