@@ -802,7 +802,11 @@ cmd_fixture() {
   fi
 
   # --- wait for the forwarded gateway port to come up -----------------------
-  local timeout="${FIXTURE_BOOT_TIMEOUT:-900}"
+  # First boot runs the full install (kairos install + reboot) AND, since the
+  # first-boot Chromium change, a system-flatpak download inside the guest --
+  # 900s kills perfectly healthy installs. 2400s covers a cold first boot on
+  # a loaded host; warm boots become ready long before either limit.
+  local timeout="${FIXTURE_BOOT_TIMEOUT:-2400}"
   local deadline=$((SECONDS + timeout))
   finfo "Waiting up to ${timeout}s for the guest gateway on 127.0.0.1:$mcp_port"
   local up=0
@@ -1619,6 +1623,20 @@ cmd_stop() {
   elif ! kill -0 "$qpid" 2>/dev/null; then
     finfo "fixture PID $qpid is not running; cleaning up"
     qpid=""
+  fi
+
+  # Pidfile-less fallback: a boot that died before QEMU wrote qemu.pid (or
+  # whose launcher bash is gone) leaves a live QEMU with no tracked PID, and
+  # the next `fixture` run then fights it for the VNC display and ports.
+  # Recover it by its disk path, which is unique to THIS fixture's runtime
+  # dir -- never by process name, which is identical across fixtures.
+  if [ -z "$qpid" ]; then
+    local candidate
+    candidate="$(pgrep -f "file=$FIXTURE_RUNTIME/disk.qcow2" 2>/dev/null | head -1 || true)"
+    if [ -n "$candidate" ]; then
+      finfo "found untracked QEMU (PID $candidate) using $FIXTURE_RUNTIME/disk.qcow2; adopting it for shutdown"
+      qpid="$candidate"
+    fi
   fi
 
   # 1. graceful ACPI powerdown via QMP.
