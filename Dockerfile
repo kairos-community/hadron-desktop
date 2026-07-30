@@ -359,7 +359,22 @@ FROM toolchain AS freetype
 RUN mkdir -p /freetype
 WORKDIR /build
 ARG FREETYPE_VERSION=2.13.3
-RUN curl -L https://download.savannah.gnu.org/releases/freetype/freetype-${FREETYPE_VERSION}.tar.xz -o freetype.tar.xz && tar -xf freetype.tar.xz && rm freetype.tar.xz && mv freetype-* freetype-src
+ARG FREETYPE_SHA256=0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289
+# `-f` so a Savannah 5xx is not written to disk as the tarball: bare `curl -L`
+# saved the HTML error page and the failure only surfaced later as the
+# unhelpful `tar: invalid tar magic`. Savannah stays first as the canonical
+# host but has returned 502 for days at a stretch, so SourceForge -- FreeType's
+# other upstream distribution point -- is the fallback. The pinned checksum
+# means neither host has to be trusted, matching how npth and sqlite are
+# fetched in this Dockerfile.
+RUN curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+      https://download.savannah.gnu.org/releases/freetype/freetype-${FREETYPE_VERSION}.tar.xz \
+      -o freetype.tar.xz \
+    || curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+      https://downloads.sourceforge.net/freetype/freetype-${FREETYPE_VERSION}.tar.xz \
+      -o freetype.tar.xz && \
+    echo "${FREETYPE_SHA256}  freetype.tar.xz" | sha256sum -c - && \
+    tar -xf freetype.tar.xz && rm freetype.tar.xz && mv freetype-* freetype-src
 WORKDIR /build/freetype-src
 RUN ./configure ${COMMON_CONFIGURE_ARGS} --disable-dependency-tracking --with-harfbuzz=no --with-png=no --with-brotli=no --with-bzip2=no --with-zlib=yes
 RUN make -j$(nproc) && make install DESTDIR=/freetype

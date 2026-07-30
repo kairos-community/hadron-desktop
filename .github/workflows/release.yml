@@ -75,6 +75,19 @@ jobs:
           docker system prune --all --force
           df -h /
 
+      # BuildKit never writes a build's base image into the local image store,
+      # so `docker image inspect` would find nothing and the build manifest
+      # could not record the digest the ISO was actually built from. Pulling
+      # here -- after the prune above, before the build -- puts the base in the
+      # store, and BuildKit then resolves `FROM` against that same local copy.
+      - name: Pull the Hadron base
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_ref="$(grep -oP '^BASE_IMAGE\s*\?=\s*\K\S+' Makefile)"
+          [ -n "$base_ref" ] || { echo "could not read BASE_IMAGE from the Makefile" >&2; exit 1; }
+          docker pull "$base_ref"
+
       - name: Build installer ISO
         shell: bash
         run: |
@@ -187,6 +200,7 @@ jobs:
             ovmf \
             python3-pil \
             qemu-system-x86 \
+            qemu-utils \
             websockify \
             xorriso
           # The harness picks KVM when /dev/kvm is readable and falls back to
@@ -201,6 +215,16 @@ jobs:
         with:
           go-version-file: agent/go.mod
           cache-dependency-path: agent/go.sum
+
+      # Same reason as the desktop job: the manifest's base digest is read back
+      # from the local image store, which only a real pull populates.
+      - name: Pull the Hadron base
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_ref="$(grep -oP '^BASE_IMAGE\s*\?=\s*\K\S+' Makefile)"
+          [ -n "$base_ref" ] || { echo "could not read BASE_IMAGE from the Makefile" >&2; exit 1; }
+          docker pull "$base_ref"
 
       - name: Build agent ISO
         shell: bash

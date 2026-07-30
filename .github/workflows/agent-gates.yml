@@ -276,6 +276,7 @@ jobs:
             ovmf \
             python3-pil \
             qemu-system-x86 \
+            qemu-utils \
             websockify \
             xorriso
           # The harness picks KVM when /dev/kvm is readable and falls back to
@@ -350,6 +351,7 @@ jobs:
             ovmf \
             python3-pil \
             qemu-system-x86 \
+            qemu-utils \
             websockify \
             xorriso
           if [[ -e /dev/kvm ]]; then
@@ -434,6 +436,7 @@ jobs:
             ovmf \
             python3-pil \
             qemu-system-x86 \
+            qemu-utils \
             websockify \
             xorriso
           if [[ -e /dev/kvm ]]; then
@@ -515,6 +518,7 @@ jobs:
             ovmf \
             python3-pil \
             qemu-system-x86 \
+            qemu-utils \
             websockify \
             xorriso
           if [[ -e /dev/kvm ]]; then
@@ -596,6 +600,7 @@ jobs:
             ovmf \
             python3-pil \
             qemu-system-x86 \
+            qemu-utils \
             websockify \
             xorriso
           if [[ -e /dev/kvm ]]; then

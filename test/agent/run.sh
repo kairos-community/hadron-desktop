@@ -1691,6 +1691,13 @@ case "$SUBCOMMAND" in
   * ) err "unknown subcommand: $SUBCOMMAND"; usage; exit 64 ;;
 esac
 
+# Every other gate preflights its binaries inside its cmd_* function; the
+# compatibility gate is the one that falls through to a top-level body, so it
+# had no such check. A missing qemu-img therefore surfaced only after the image
+# and ISO were built -- roughly 1h45m into the job -- instead of in the first
+# second. Same list as cmd_ui, plus xorriso's container does the extraction.
+_agent_require_bins qemu-system-x86_64 qemu-img openssl curl python3 docker sha256sum || exit 1
+
 # --- image chain (confirmed against Makefile + the two Dockerfiles) ----------
 # make DESKTOP=i3 image  => i3-desktop:dev  (IMAGE defaults to $(DESKTOP)-desktop:dev)
 # Dockerfile.agent --target agent, BASE_IMAGE=i3-desktop:dev => hadron-agent:compat

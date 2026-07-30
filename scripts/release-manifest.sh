@@ -40,17 +40,26 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 base_ref="$(grep -oP '^BASE_IMAGE\s*\?=\s*\K\S+' "$repo_root/Makefile" || true)"
 [ -n "$base_ref" ] || die "could not read BASE_IMAGE from the Makefile"
 
-# The base was pulled by `docker build`, so it carries the digest it resolved to.
-base_digest="$(
-  docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$base_ref" 2>/dev/null |
-    head -n1 | cut -d@ -f2
-)"
+# The base must be in the local image store, carrying the registry digest it was
+# pulled at. BuildKit does NOT put a build's base image there, so the caller is
+# responsible for `docker pull`ing it before the build -- see the "Pull the
+# Hadron base" step in .github/workflows/release.yml. Inspect failures are
+# reported rather than swallowed: `2>/dev/null` plus `set -e` on a bare
+# assignment used to abort this script with no output at all.
+base_inspect="$(
+  docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$base_ref" 2>&1
+)" || die "could not inspect $base_ref (pull it before building): $base_inspect"
+base_digest="$(printf '%s\n' "$base_inspect" | head -n1 | cut -d@ -f2)"
 [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || die "could not resolve a registry digest for $base_ref"
 
 image_id="$(docker image inspect --format '{{.Id}}' "$image")" \
   || die "could not inspect the built image $image"
 iso_sha256="$(cut -d' ' -f1 < "$iso_path.sha256")"
 [ -n "$iso_sha256" ] || die "empty checksum in $iso_path.sha256"
+
+# Bare filename, not the build-time path: the release job verifies the manifest
+# from inside the flat `release/` download dir, where every asset sits together.
+iso_name="$(basename "$iso_path")"
 
 git_commit="$(cd "$repo_root" && git rev-parse HEAD)"
 
@@ -84,6 +93,7 @@ jq -n \
   --arg hadron_base_reference "$base_ref" \
   --arg hadron_base_digest "$base_digest" \
   --arg image_id "$image_id" \
+  --arg iso "$iso_name" \
   --arg iso_sha256 "$iso_sha256" \
   --arg desktop_flavor "$flavor" \
   --argjson xlibre_version "$xlibre_version" \
@@ -95,6 +105,7 @@ jq -n \
      hadron_base_reference: $hadron_base_reference,
      hadron_base_digest: $hadron_base_digest,
      image_id: $image_id,
+     iso: $iso,
      iso_sha256: $iso_sha256,
      desktop_flavor: $desktop_flavor,
      xlibre_version: $xlibre_version,
