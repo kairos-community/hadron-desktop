@@ -70,7 +70,12 @@ jobs:
       # test command runs from a different directory.
       HADRON_DIR: ${{ github.workspace }}/hadron
       CALLER_DIR: ${{ github.workspace }}/caller
-      ISO_PATH: ${{ runner.temp }}/agent.iso
+      # ISO_PATH is deliberately NOT set here: the `runner` context is not
+      # available in a job-level `env:`, and referencing it there makes GitHub
+      # reject the entire workflow file -- which showed up as a zero-second,
+      # zero-job failed run on every push. The download step below exports it
+      # from $RUNNER_TEMP instead, matching how the fixture steps already build
+      # their paths.
 
     steps:
       # The caller's repository at the caller's ref: inside a reusable workflow
@@ -101,6 +106,11 @@ jobs:
           AGENT_ISO_SHA256: ${{ inputs.agent_iso_sha256 }}
         run: |
           set -euo pipefail
+
+          # Absolute, and outside both checkouts, because run.sh cds to its own
+          # repo root and the caller's test command runs from another directory.
+          ISO_PATH="$RUNNER_TEMP/agent.iso"
+          echo "ISO_PATH=$ISO_PATH" >> "$GITHUB_ENV"
 
           if [[ ! "$AGENT_ISO_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
             echo "agent_iso_sha256 must be 64 lowercase hex characters" >&2
