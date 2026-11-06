@@ -82,6 +82,8 @@ exec hadron-update tray
 exec hadron-first-run-apps --login
 # Night light (wlsunset), if the user turned it on in an earlier session.
 exec hadron-night-light restore
+# Clipboard history (Super+Ctrl+V): wl-paste gives each copy to cliphist.
+exec hadron-clipboard daemon
 
 ### Key bindings ##########################################################
 # help-row: Windows | Super + drag | Move a floating window with the mouse
@@ -103,6 +105,9 @@ bindsym $mod+Mod1+l        exec swaylock -f
 # help-section: Basics
 # help: This help
 bindsym $mod+F1            exec foot --app-id=floatterm -T "Keyboard shortcuts" hadron-help
+# help-section: Basics
+# help: Clipboard history: copy an earlier entry again
+bindsym $mod+Ctrl+v        exec hadron-clipboard
 # The Hadron menu: apps, Wi-Fi, Bluetooth, audio, capture, update, help, power.
 # help: Hadron menu: apps, Wi-Fi, Bluetooth, updates, power
 bindsym $mod+Escape        exec hadron-menu

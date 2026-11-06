@@ -210,3 +210,12 @@ RUN rm -f /etc/systemd/user/sockets.target.wants/gnome-keyring-daemon.socket \
 RUN rm -f /usr/bin/hadron-first-run-apps && \
     sed -i '/hadron-first-run-apps/d' /etc/i3/config && \
     ! grep -rhsv '^[[:space:]]*#' /etc/i3 /etc/xdg/autostart | grep -q 'hadron-first-run-apps'
+# No clipboard history. An AI agent drives the appliance: a history would keep
+# every token, password or key that the agent or a person copies, and give it
+# back to anything that can run a command or read the screen, the agent
+# itself included in a later, unrelated task. The i3 image's
+# config.d/40-clipboard.conf (the recorder and Super+Ctrl+V) is shadowed by
+# rootfs-agent's empty file; hadron-menu and hadron-help hide the entry when
+# hadron-clipboard is gone.
+RUN rm -f /usr/bin/hadron-clipboard /usr/bin/clipnotify && \
+    ! grep -rhsv '^[[:space:]]*#' /etc/i3 /etc/xdg/autostart | grep -q 'hadron-clipboard'

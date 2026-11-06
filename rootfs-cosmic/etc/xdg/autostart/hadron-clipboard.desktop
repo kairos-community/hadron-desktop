@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Hadron Desktop clipboard history
+Comment=Records the clipboard for the history on Super+Ctrl+V
+Exec=hadron-clipboard daemon
+NoDisplay=true
+OnlyShowIn=COSMIC;
+X-GNOME-Autostart-enabled=true

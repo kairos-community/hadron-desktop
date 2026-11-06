@@ -5,6 +5,7 @@ Basics	Super + D	Launch an application
 Basics	Super + Shift + Q	Close the focused window
 Basics	Super + Shift + E	Power menu: log out, suspend, reboot, power off
 Basics	Super + F1	This help
+Basics	Super + Ctrl + V	Clipboard history: copy an earlier entry again
 Basics	Super + Escape	Hadron menu: apps, Wi-Fi, Bluetooth, updates, power
 Basics	Super + ;	Emoji picker: copies the chosen emoji
 Windows	Super + arrows / H J K L	Move focus

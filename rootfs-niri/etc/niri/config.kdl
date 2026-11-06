@@ -461,6 +461,9 @@ binds {
     // help-section: Basics
     // help: Emoji picker: copies the chosen emoji
     Mod+Semicolon hotkey-overlay-title="Emoji Picker" { spawn "hadron-emoji"; }
+    // Noctalia records the clipboard; this opens its history panel.
+    // help: Clipboard history: copy an earlier entry again
+    Mod+Ctrl+V hotkey-overlay-title="Clipboard History" { spawn "hadron-clipboard"; }
     Alt+Tab { spawn-sh "noctalia msg window-switcher hold"; }
     // help-section: System
     // help: Lock the screen

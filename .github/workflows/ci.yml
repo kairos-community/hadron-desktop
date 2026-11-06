@@ -95,3 +95,5 @@ jobs:
       # Docker runs it in a throwaway Alpine container, with fake tools.
       - name: hadron-night-light state and toggle
         run: test/night-light/check-night-light.sh
+      - name: Clipboard history dispatch and wiring
+        run: test/clipboard/dispatch_test.sh

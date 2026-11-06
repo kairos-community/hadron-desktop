@@ -1,0 +1,130 @@
+#!/bin/sh
+# Clipboard history, on Super+Ctrl+V in every variant and in the Hadron menu.
+#
+#   hadron-clipboard [show]   pick an earlier entry and put it on the clipboard
+#   hadron-clipboard daemon   record the clipboard; the session starts it once
+#   hadron-clipboard clear    forget the history
+#
+# niri: Noctalia records the history itself and shows it in its clipboard
+#   panel, so `daemon` does nothing there.
+# Sway and COSMIC: `wl-paste --watch` (the data-control protocol) gives each
+#   new clipboard to cliphist, and the picker is cliphist's list through
+#   hadron-pick.
+# i3: clipnotify waits for a clipboard change, xsel reads the text and each
+#   entry is one file. Text only: the X11 picker cannot show an image.
+#
+# The history keeps the last HADRON_CLIPBOARD_MAX entries (200). It is kept in
+# XDG_RUNTIME_DIR, in memory: it is gone when the user logs out, and a copied
+# secret is never written to disk. A copy that a password manager marks with
+# the x-kde-passwordManagerHint type is not recorded: wl-paste tells cliphist
+# with CLIPBOARD_STATE=sensitive, i3 reads the types with xclip, and Noctalia
+# checks the type itself.
+set -u
+
+MAX=${HADRON_CLIPBOARD_MAX:-200}
+case "$MAX" in ''|*[!0-9]*|0) MAX=200 ;; esac
+
+DESKTOP_NAME=""
+# shellcheck disable=SC1091
+[ -r /etc/hadron-desktop/session ] && . /etc/hadron-desktop/session
+
+# The session's private tmpfs; never a shared /tmp path another user could
+# create first.
+if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+    echo "hadron-clipboard: XDG_RUNTIME_DIR is not set" >&2
+    exit 1
+fi
+dir="$XDG_RUNTIME_DIR/hadron-clipboard"
+
+pick() { hadron-pick Clipboard 14; }
+
+# --- Sway and COSMIC: wl-paste and cliphist --------------------------------
+
+ch() { cliphist -db-path "$dir/cliphist.db" -max-items "$MAX" "$@"; }
+
+wl_daemon() {
+    mkdir -p "$dir" && chmod 700 "$dir"
+    exec wl-paste --watch cliphist -db-path "$dir/cliphist.db" -max-items "$MAX" store
+}
+
+wl_show() {
+    sel=$(ch list | pick) || exit 0
+    [ -n "$sel" ] || exit 0
+    printf '%s\n' "$sel" | ch decode | wl-copy
+}
+
+# --- i3: clipnotify, xsel, one file per entry ------------------------------
+# Entries are named by an increasing number, zero-padded so that `sort`
+# orders them by age; .seq holds the last number used.
+
+x11_entries() {
+    for f in "$dir"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]; do
+        [ -f "$f" ] && echo "${f##*/}"
+    done
+}
+
+# x11_store: record the current clipboard, if it is text, not marked
+# sensitive, not empty and not bigger than 5 MB (the same cap as cliphist).
+x11_store() {
+    targets=$(xclip -o -selection clipboard -t TARGETS 2>/dev/null) || return 0
+    printf '%s\n' "$targets" | grep -qx 'x-kde-passwordManagerHint' && return 0
+    printf '%s\n' "$targets" | grep -qx 'UTF8_STRING\|STRING\|TEXT\|text/plain.*' || return 0
+    new="$dir/.new"
+    xsel --clipboard --output > "$new" 2>/dev/null || { rm -f "$new"; return 0; }
+    size=$(wc -c < "$new")
+    if [ "$size" -eq 0 ] || [ "$size" -gt 5000000 ]; then rm -f "$new"; return 0; fi
+    # clipnotify also wakes when the primary selection changes, so most wakes
+    # find the clipboard as it was: stop there, before comparing every entry.
+    last=$(x11_entries | tail -n 1)
+    if [ -n "$last" ] && cmp -s "$new" "$dir/$last"; then rm -f "$new"; return 0; fi
+    # A copy of an older entry moves it to the top instead of adding it twice.
+    for e in $(x11_entries); do
+        cmp -s "$new" "$dir/$e" && rm -f "$dir/$e"
+    done
+    seq=$(cat "$dir/.seq" 2>/dev/null)
+    case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
+    seq=$((seq + 1))
+    echo "$seq" > "$dir/.seq"
+    mv "$new" "$dir/$(printf '%08d' "$seq")"
+    n=$(x11_entries | wc -l)
+    [ "$n" -le "$MAX" ] || x11_entries | head -n $((n - MAX)) |
+        while read -r e; do rm -f "$dir/$e"; done
+}
+
+x11_daemon() {
+    mkdir -p "$dir" && chmod 700 "$dir" || exit 1
+    x11_store
+    # clipnotify exits 0 after the next clipboard (or primary) change, and 1
+    # when the X server is gone, which ends the session's daemon too.
+    while clipnotify; do x11_store; done
+}
+
+# x11_show: newest first, as "NUMBER  first line of the text".
+x11_show() {
+    sel=$(x11_entries | sort -r | while read -r e; do
+        printf '%s  %s\n' "${e#"${e%%[!0]*}"}" \
+            "$(head -c 400 "$dir/$e" | tr '\n\t' '  ' | sed 's/ *$//' | cut -c 1-100)"
+    done | pick) || exit 0
+    id=${sel%% *}
+    case "$id" in ''|*[!0-9]*) exit 0 ;; esac
+    f="$dir/$(printf '%08d' "$id")"
+    [ -f "$f" ] || exit 0
+    xsel --clipboard --input < "$f"
+}
+
+x11_clear() { x11_entries | while read -r e; do rm -f "$dir/$e"; done; }
+
+case "${1:-show}:$DESKTOP_NAME" in
+    show:niri)      exec noctalia msg panel-toggle clipboard ;;
+    daemon:niri)    exit 0 ;;
+    clear:niri)     exec noctalia msg clipboard-clear ;;
+    show:Sway|show:COSMIC)     wl_show ;;
+    daemon:Sway|daemon:COSMIC) wl_daemon ;;
+    clear:Sway|clear:COSMIC)   ch wipe ;;
+    show:*)   x11_show ;;
+    daemon:*) x11_daemon ;;
+    clear:*)  x11_clear ;;
+    *)
+        echo "usage: hadron-clipboard [show|daemon|clear]" >&2
+        exit 2 ;;
+esac

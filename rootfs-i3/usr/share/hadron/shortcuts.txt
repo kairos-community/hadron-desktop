@@ -8,6 +8,7 @@ Basics	Super + Shift + E	Power menu: log out, suspend, reboot, power off
 Basics	Super + F1	This help
 Basics	Super + Escape	Hadron menu: apps, Wi-Fi, Bluetooth, updates, power
 Basics	Super + ;	Emoji picker: copies the chosen emoji
+Basics	Super + Ctrl + V	Clipboard history: copy an earlier entry again
 Windows	Super + arrows / H J K L	Move focus
 Windows	Super + Shift + arrows / H J K L	Move the window
 Windows	Super + S / W / E	Stacked, tabbed or split layout

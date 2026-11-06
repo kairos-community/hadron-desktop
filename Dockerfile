@@ -2021,11 +2021,13 @@ RUN meson setup buildDir ${COMMON_MESON_FLAGS} -Denable-cairo=disabled -Dpng-bac
 RUN DESTDIR=/fuzzel ninja -C buildDir install
 
 
-# wl-clipboard — clipboard utilities
+# wl-clipboard — clipboard utilities. 2.3.0 or later: `wl-paste --watch` sets
+# CLIPBOARD_STATE=sensitive for a copy marked x-kde-passwordManagerHint, which
+# is how cliphist knows not to record it.
 FROM toolchain AS wl-clipboard
 COPY --from=wayland /wayland /
 # renovate: datasource=github-tags depName=bugaevc/wl-clipboard extractVersion=^v(?<version>\d+(\.\d+)*)$
-ARG WLCLIP_VERSION=2.2.1
+ARG WLCLIP_VERSION=2.3.0
 RUN mkdir -p /wl-clipboard
 WORKDIR /build
 RUN curl --retry 5 --retry-delay 3 --retry-all-errors -L https://github.com/bugaevc/wl-clipboard/archive/refs/tags/v${WLCLIP_VERSION}.tar.gz -o wlclip.tar.gz && tar -xzf wlclip.tar.gz && rm wlclip.tar.gz && mv wl-clipboard-* wlclip-src
@@ -2033,6 +2035,19 @@ WORKDIR /build/wlclip-src
 RUN pip3 install meson ninja
 RUN meson setup buildDir ${COMMON_MESON_FLAGS}
 RUN DESTDIR=/wl-clipboard ninja -C buildDir install
+
+
+# cliphist — the clipboard history of Sway and COSMIC (hadron-clipboard).
+# `wl-paste --watch cliphist store` records each copy. Static Go binary
+# (CGO_ENABLED=0), like hadron-update, so it runs on musl with no runtime
+# linkage. niri needs none: Noctalia keeps its own history.
+FROM golang:1.25.0-alpine3.22 AS cliphist
+# renovate: datasource=github-tags depName=sentriz/cliphist extractVersion=^v(?<version>\d+(\.\d+)*)$
+ARG CLIPHIST_VERSION=0.7.0
+WORKDIR /src
+RUN wget -qO- https://github.com/sentriz/cliphist/archive/refs/tags/v${CLIPHIST_VERSION}.tar.gz | tar -xz --strip-components=1 && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /cliphist/usr/bin/cliphist . && \
+    [ "$(/cliphist/usr/bin/cliphist version 2>&1 | awk '$1 == "version" { print $2 }')" = "${CLIPHIST_VERSION}" ]
 
 
 # slurp — region selection (pairs with grim)
@@ -2642,8 +2657,9 @@ RUN DESTDIR=/i3 ninja -C buildDir install
 
 
 # Native X11 desktop tools: xauth for Ly's X session cookie, st terminal, dmenu
-# launcher and xsel clipboard. These replace foot/fuzzel/wl-clipboard; the
-# hadron-xroot stage below replaces swaybg.
+# launcher, xsel clipboard and clipnotify for the clipboard history. These
+# replace foot/fuzzel/wl-clipboard/cliphist; the hadron-xroot stage below
+# replaces swaybg.
 FROM toolchain AS x11-desktop-tools
 COPY --from=xorgproto /xorgproto /
 COPY --from=xcbproto /xcbproto /
@@ -2722,6 +2738,17 @@ ARG XSCT_VERSION=2.3
 RUN curl --retry-all-errors -fL --retry 5 https://github.com/faf0/sct/archive/refs/tags/${XSCT_VERSION}.tar.gz -o sct.tar.gz && \
     tar -xf sct.tar.gz && cd sct-${XSCT_VERSION} && \
     make CC=cc LDFLAGS=-s && install -m0755 xsct /x11-desktop-tools/usr/bin/xsct
+# clipnotify waits for the next clipboard change (XFixes) and exits; the
+# hadron-clipboard daemon runs it in a loop to record the i3 clipboard
+# history, reading the text with xsel and the types with xclip. One C file.
+# Not clipmenu: its C rewrite has no release tag to pin, and its last tagged
+# release is a bash script.
+# renovate: datasource=github-tags depName=cdown/clipnotify extractVersion=^(?<version>\d+(\.\d+)*)$
+ARG CLIPNOTIFY_VERSION=1.0.2
+RUN curl --retry-all-errors -fL --retry 5 https://github.com/cdown/clipnotify/archive/refs/tags/${CLIPNOTIFY_VERSION}.tar.gz -o clipnotify.tar.gz && \
+    tar -xf clipnotify.tar.gz && cd clipnotify-${CLIPNOTIFY_VERSION} && \
+    cc ${CFLAGS:-} clipnotify.c -o clipnotify ${LDFLAGS:-} -lX11 -lXfixes && \
+    install -m0755 clipnotify /x11-desktop-tools/usr/bin/clipnotify
 
 
 # hadron-xroot: the i3 wallpaper. Paints a PNG scaled to fill each monitor on
@@ -4198,6 +4225,7 @@ COPY --from=swaybg /swaybg /
 COPY --from=mako /mako /
 COPY --from=fuzzel /fuzzel /
 COPY --from=wl-clipboard /wl-clipboard /
+COPY --from=cliphist /cliphist /
 COPY --from=slurp /slurp /
 COPY --from=swayidle /swayidle /
 COPY --from=swaylock /swaylock /
@@ -4389,8 +4417,12 @@ COPY --from=cosmic /cosmic /
 # (hadron-pick) and the emoji picker.
 COPY --from=fcft /fcft /
 COPY --from=fuzzel /fuzzel /
-# wl-copy: the emoji picker (hadron-emoji) puts the emoji on the clipboard.
+# wl-clipboard: wl-copy puts the emoji picker's choice on the clipboard
+# (hadron-emoji), and wl-paste --watch feeds cliphist the clipboard history
+# (hadron-clipboard). cosmic-comp offers the data-control protocols to every
+# client that is not in a sandbox, so wl-paste needs no setting.
 COPY --from=wl-clipboard /wl-clipboard /
+COPY --from=cliphist /cliphist /
 COPY --from=cosmic-fonts /cosmic-fonts /
 COPY --from=hicolor-icon-theme /hicolor-icon-theme /
 COPY --from=musl-locales /musl-locales /
@@ -4712,9 +4744,13 @@ RUN chmod 1777 /tmp; \
       # nothing there; the binding is added on the line after the menu's,
       # and the build fails if Super+; is bound twice.
       f=/usr/share/cosmic/com.system76.CosmicSettings.Shortcuts/v1/defaults; \
+      # Super+Ctrl+V opens the clipboard history, as in every variant. COSMIC
+      # binds nothing to it; the build fails if upstream starts to.
+      ! grep -qF '(modifiers: [Super, Ctrl], key: "v")' "$f" || exit 1; \
       sed -i \
         -e 's/(modifiers: \[Super\], key: "Escape"): System(LockScreen),/(modifiers: [Super], key: "Escape"): Spawn("hadron-menu"),\n    (modifiers: [Super], key: "semicolon"): Spawn("hadron-emoji"),/' \
         -e 's/(modifiers: \[Super, Alt\], key: "l"): SwitchOutput(Right),/(modifiers: [Super, Alt], key: "l"): System(LockScreen),/' \
+        -e '/(modifiers: \[Super\], key: "Escape"): Spawn("hadron-menu"),/a\    (modifiers: [Super, Ctrl], key: "v"): Spawn("hadron-clipboard"),' \
         "$f" || exit 1; \
       grep -qF '(modifiers: [Super], key: "Escape"): Spawn("hadron-menu"),' "$f" || exit 1; \
       grep -qF '(modifiers: [Super, Alt], key: "l"): System(LockScreen),' "$f" || exit 1; \
@@ -4725,6 +4761,7 @@ RUN chmod 1777 /tmp; \
       grep -qF '(modifiers: [Super, Alt], key: "BackSpace"): Spawn("hadron-notify-key dnd"),' "$f" || exit 1; \
       [ "$(grep -cF '(modifiers: [Super], key: "semicolon")' "$f")" -eq 1 ] || exit 1; \
       grep -qF '(modifiers: [Super], key: "semicolon"): Spawn("hadron-emoji"),' "$f" || exit 1; \
+      [ "$(grep -cF '(modifiers: [Super, Ctrl], key: "v"): Spawn("hadron-clipboard"),' "$f")" -eq 1 ] || exit 1; \
       mkdir -p /etc/systemd/system/multi-user.target.wants; \
       for u in cosmic-greeter cosmic-greeter-daemon accounts-daemon; do \
         ln -sf /usr/lib/systemd/system/$u.service /etc/systemd/system/multi-user.target.wants/$u.service; \

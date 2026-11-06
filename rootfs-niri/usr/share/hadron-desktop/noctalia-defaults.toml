@@ -14,6 +14,10 @@ font_family = "Inter Variable"
 # Show the password prompt when an app asks for privileges (date and time,
 # Flatpak system installs). Without an agent those requests fail.
 polkit_agent = true
+# Clipboard history (Super+Ctrl+V, hadron-clipboard): the same 200 entries as
+# the other variants keep. Noctalia does not record a copy that a password
+# manager marks with x-kde-passwordManagerHint.
+clipboard_history_max_entries = 200
 
 # The blurred wallpaper behind niri's overview (Super+O); /etc/niri/config.kdl
 # places it in the overview backdrop.

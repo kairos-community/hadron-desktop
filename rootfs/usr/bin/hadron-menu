@@ -1,11 +1,11 @@
 #!/bin/sh
 # The Hadron menu, on Super+Escape in every variant: one place to reach the
 # apps, the first-run app picker, Wi-Fi, Bluetooth, audio, screenshots,
-# emoji, the night light, updates, the shortcut sheet and the power actions.
-# The picker is hadron-pick (fuzzel on Wayland, dmenu on i3). Each entry opens
-# what the variant already uses for it: the hadron-* menus on sway and i3,
-# Noctalia's panels on niri, COSMIC Settings and cosmic-osd on COSMIC. Emoji
-# opens hadron-emoji on every variant.
+# emoji, the night light, clipboard history, updates, the shortcut sheet and
+# the power actions. The picker is hadron-pick (fuzzel on Wayland, dmenu on
+# i3). Each entry opens what the variant already uses for it: the hadron-*
+# menus on sway and i3, Noctalia's panels on niri, COSMIC Settings and
+# cosmic-osd on COSMIC. Emoji opens hadron-emoji on every variant.
 #
 # Updates go through hadron-update in a terminal, as the update icon does:
 # the update service and polkit decide who may install (the admin group).
@@ -119,8 +119,8 @@ power() {
 # An entry name as the argument opens it directly (`hadron-menu Help` is what
 # the welcome notification runs when clicked).
 # Each entry is "Label<TAB>icon"; hadron-pick shows the icon in fuzzel only.
-# "Install apps" reopens the first-run app picker. The agent image does not
-# ship it.
+# "Install apps" reopens the first-run app picker. The agent image ships
+# neither it nor the clipboard history (Dockerfile.agent removes both).
 tab=$(printf '\t')
 entries="Apps${tab}󰀻"
 command -v hadron-first-run-apps >/dev/null 2>&1 && entries="$entries
@@ -134,6 +134,8 @@ Emoji${tab}󰞅"
 # COSMIC has no night light (see hadron-night-light), so no entry there.
 [ "$DESKTOP_NAME" = COSMIC ] || entries="$entries
 Night light${tab}󰖔"
+command -v hadron-clipboard >/dev/null 2>&1 && entries="$entries
+Clipboard${tab}󰅍"
 entries="$entries
 Update${tab}󰚰
 Help${tab}󰌌
@@ -153,6 +155,7 @@ case "$sel" in
     Capture)   capture ;;
     Emoji)     exec hadron-emoji ;;
     "Night light") exec hadron-night-light toggle ;;
+    Clipboard) exec hadron-clipboard ;;
     Update)    update ;;
     Help)      help_sheet ;;
     Power)     power ;;
