@@ -4,9 +4,10 @@
 # The installer's "Encrypt your files" choice encrypts COS_PERSISTENT with
 # kcrypt's passphrase method (kairos-io/kairos#6022): a LUKS2 container with
 # the subsystem "kcrypt:passphrase" in its header, that only the passphrase
-# the user chose can open. This script finds that container, stops the splash
-# (through the console agent's drop-in), asks for the passphrase with
-# systemd-ask-password until it is right, and opens the container under the
+# the user chose can open. This script finds that container, asks for the
+# passphrase with systemd-ask-password until it is right (the boot splash
+# answers, or the console agent when there is no framebuffer; see
+# 51hadron-askpass), and opens the container under the
 # mapper name kcrypt uses (/dev/mapper/<kernel name>). kcrypt then finds the
 # partition already open and skips it (sdk/kcrypt/unlock.go,
 # findEncryptedPartitions), and the boot goes on.
@@ -66,8 +67,10 @@ ask_and_open() {
     prompt="Enter the passphrase for the Hadron disk (${dev}):"
     while :; do
         # --no-tty: this unit has no terminal, so the request goes to the
-        # console agent (systemd-ask-password-console.service), which owns
-        # /dev/console while it asks. Our drop-in stops the splash first.
+        # password agents: kairos-splash draws the prompt, or, without a
+        # framebuffer, the console agent asks on /dev/console
+        # (51hadron-askpass decides which). The splash shows the Id's retry
+        # as "Wrong passphrase"; the device in the prompt is for the console.
         # --timeout=0: no timeout.
         if ! pass=$(systemd-ask-password --no-tty --timeout=0 \
                 --id="hadron-unlock:${name}" --icon=drive-harddisk "$prompt"); then

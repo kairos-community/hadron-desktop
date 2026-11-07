@@ -43,6 +43,18 @@ check "immucore quiet drop-in baked into the initramfs" \
     "lsinitrd /boot/initrd 2>/dev/null | grep -q 'immucore.service.d/10-quiet.conf'"
 check "no leftover hadron-splash in the initramfs" \
     "! lsinitrd /boot/initrd 2>/dev/null | grep -q 'hadron-splash'"
+# The splash answers disk passphrase questions (51hadron-askpass). The console
+# agent must wait for it, and the keymaps must be there for the passphrase.
+check "splash unit is Type=notify (agent decision before the console agent)" \
+    "lsinitrd /boot/initrd 2>/dev/null | grep -q 'kairos-splash.service.d/20-hadron-agent.conf'"
+check "console password agent gated on the splash" \
+    "lsinitrd /boot/initrd 2>/dev/null | grep -q 'systemd-ask-password-console.service.d/20-hadron-ask-gate.conf' && \
+     lsinitrd /boot/initrd 2>/dev/null | grep -q 'usr/libexec/hadron-ask-gate'"
+check "no drop-in that stops the splash when the console agent starts" \
+    "! lsinitrd /boot/initrd 2>/dev/null | grep -q 'systemd-ask-password-console.service.d/10-hadron-splash.conf'"
+check "console keymaps and loadkeys in the initramfs (rd.vconsole.keymap=)" \
+    "lsinitrd /boot/initrd 2>/dev/null | grep -q 'keymaps/i386/qwertz/de-latin1' && \
+     lsinitrd /boot/initrd 2>/dev/null | grep -q 'usr/bin/loadkeys'"
 # Failure mode (1): a stale splash at the right path. Only content catches it.
 # sha256sum, not cmp: the image has no diffutils, and a missing tool would read
 # as a mismatch.
