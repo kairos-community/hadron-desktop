@@ -26,6 +26,7 @@
 #define _DEFAULT_SOURCE
 #endif
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,10 +37,15 @@
 #include <linux/kd.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/un.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "agent.h"
 #include "font.h"
 
 #define FRAME_USEC   33333
@@ -320,6 +326,11 @@ static int text_run(double duration) {
 #define C_SHADOW   0x414868
 #define C_DIM      0x565f89
 #define C_TEXT     0xa9b1d6
+/* The passphrase panel. */
+#define C_PANEL    0x24283b
+#define C_FIELD    0x292e42
+#define C_LABEL    0x737aa2
+#define C_ERROR    0xf7768e
 
 /* A draw target: the mmapped framebuffer, or a heap buffer for --render.
    Pixels are composed in an XRGB back buffer and packed into the target's
@@ -501,7 +512,239 @@ typedef struct {
     int ts;              /* text scale */
     int tag_y, ver_y, sts_y;
     int top, bottom;     /* rows that ever change */
+    /* The passphrase panel, which takes the place of the tagline, version and
+       status line while a question is open. */
+    int ps;              /* panel text scale */
+    int px, py, pw, ph;  /* panel box */
+    int title_y, field_y, field_h, note_y;
 } layout_t;
+
+/* ======================================================================== */
+/* Password agent: the disk passphrase prompt.                               */
+/* ======================================================================== */
+
+/* While the initramfs splash answers systemd's password questions it says so
+   in this file (its PID), and the console agent's gate waits for that PID
+   instead of asking on the console too. See
+   rootfs/usr/lib/dracut/modules.d/51hadron-askpass/. */
+#define AGENT_PIDDIR  "/run/hadron-ask"
+#define AGENT_PIDFILE AGENT_PIDDIR "/splash-agent"
+
+#define CHECKING_SEC 4.0   /* "Checking..." after Enter, until a retry comes */
+
+typedef enum { P_NONE, P_ASK, P_CHECKING } pstate_t;
+
+static struct {
+    int on;                    /* registered as an agent */
+    agent_t ag;
+    pstate_t st;
+    double checking_until;
+    char title[64];
+    int retry, echo, silent;
+    char buf[512]; size_t len;
+    int raw; struct termios saved;
+} g_pr;
+
+static int cmdline_has(const char *word);
+
+static void prompt_wipe(void) {
+    volatile char *p = g_pr.buf;
+    for (size_t i = 0; i < sizeof g_pr.buf; i++) p[i] = 0;
+    g_pr.len = 0;
+}
+
+static void agent_unregister(void) {
+    if (!g_pr.on) return;
+    unlink(AGENT_PIDFILE);
+    if (g_pr.raw) tcsetattr(STDIN_FILENO, TCSANOW, &g_pr.saved);
+    g_pr.raw = 0;
+    agent_close(&g_pr.ag);
+    prompt_wipe();
+    g_pr.on = 0;
+}
+
+/* 1 = always (--agent), 0 = never (--no-agent, hadron.splash.agent=0),
+   -1 = only in the initramfs. */
+static int g_agent_mode = -1;
+
+/* Answer questions only when the screen can show them and the keyboard can
+   reach us: a framebuffer (the caller has one), the VT on stdin, and the
+   right to write to the asker's socket. In the booted system the stock
+   console agent asks, so the 3-second splash there stays out of it unless
+   --agent says otherwise. */
+static void agent_register(void) {
+    if (g_agent_mode == 0 || cmdline_has("hadron.splash.agent=0")) return;
+    if (g_agent_mode < 0 && access("/etc/initrd-release", F_OK)) return;
+    if (!isatty(STDIN_FILENO) || tcgetattr(STDIN_FILENO, &g_pr.saved)) return;
+    if (!ask_can_reply()) return;
+
+    mkdir(AGENT_PIDDIR, 0755);
+    char tmp[64];
+    snprintf(tmp, sizeof tmp, "%s.%d", AGENT_PIDFILE, (int)getpid());
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    fprintf(f, "%d\n", (int)getpid());
+    if (fclose(f) || rename(tmp, AGENT_PIDFILE)) { unlink(tmp); return; }
+
+    /* Raw input from the VT: one byte per key, no echo, no line editing,
+       no signals from Ctrl-C. The kernel keymap still applies, so a German
+       or Italian layout loaded by systemd-vconsole-setup types what its
+       keys say. */
+    struct termios t = g_pr.saved;
+    t.c_lflag &= ~(tcflag_t)(ICANON | ECHO | ECHONL | ISIG | IEXTEN);
+    t.c_iflag &= ~(tcflag_t)(IXON | ICRNL | INLCR | IGNCR | ISTRIP);
+    t.c_cc[VMIN] = 0; t.c_cc[VTIME] = 0;
+    g_pr.raw = tcsetattr(STDIN_FILENO, TCSANOW, &t) == 0;
+    agent_init(&g_pr.ag, NULL);
+    g_pr.on = 1;
+    atexit(agent_unregister);
+}
+
+/* Tell systemd the agent decision is made. The initramfs drop-in makes the
+   unit Type=notify, so the console agent, ordered after the splash, never
+   starts before the PID file above exists or is known not to. */
+static void notify_ready(void) {
+    static int done;
+    const char *s = getenv("NOTIFY_SOCKET");
+    if (done || !s || !*s) return;
+    done = 1;
+    struct sockaddr_un sa; memset(&sa, 0, sizeof sa);
+    sa.sun_family = AF_UNIX;
+    size_t n = strlen(s);
+    if (n >= sizeof sa.sun_path) return;
+    memcpy(sa.sun_path, s, n);
+    if (sa.sun_path[0] == '@') sa.sun_path[0] = 0;   /* abstract namespace */
+    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return;
+    sendto(fd, "READY=1", 7, MSG_NOSIGNAL, (struct sockaddr *)&sa,
+           (socklen_t)(offsetof(struct sockaddr_un, sun_path) + n));
+    close(fd);
+}
+
+static void prompt_show(void) {
+    ask_t *a = &g_pr.ag.cur;
+    ask_title(a, g_pr.title, sizeof g_pr.title);
+    g_pr.retry = ask_is_retry(a, g_pr.ag.last_id);
+    g_pr.echo = a->echo; g_pr.silent = a->silent;
+    prompt_wipe();
+    /* Keys pressed before the question was on screen are not part of it. */
+    tcflush(STDIN_FILENO, TCIFLUSH);
+    g_pr.st = P_ASK;
+}
+
+static void prompt_submit(int cancel) {
+    agent_answer(&g_pr.ag, cancel ? NULL : g_pr.buf);
+    prompt_wipe();
+    g_pr.st = cancel ? P_NONE : P_CHECKING;
+    g_pr.checking_until = now_sec() + CHECKING_SEC;
+}
+
+/* Bytes from the VT. Enter answers, Backspace deletes one character (UTF-8
+   aware), Esc and Ctrl-U clear, Ctrl-C cancels the question. Escape
+   sequences (arrows, function keys, Alt+key) are skipped whole. */
+static void prompt_keys(const unsigned char *b, size_t n) {
+    for (size_t i = 0; i < n && g_pr.st == P_ASK; i++) {
+        unsigned char c = b[i];
+        if (c == 0x1b) {
+            if (i + 1 < n) {                       /* a sequence, not the Esc key */
+                i++;
+                if (b[i] == '[' || b[i] == 'O') {
+                    while (i + 1 < n && !(b[i + 1] >= 0x40 && b[i + 1] <= 0x7e)) i++;
+                    if (i + 1 < n) i++;
+                }
+                continue;
+            }
+            prompt_wipe();
+        } else if (c == '\r' || c == '\n') {
+            prompt_submit(0);
+        } else if (c == 0x7f || c == 0x08) {
+            while (g_pr.len && ((unsigned char)g_pr.buf[g_pr.len - 1] & 0xC0) == 0x80) g_pr.buf[--g_pr.len] = 0;
+            if (g_pr.len) g_pr.buf[--g_pr.len] = 0;
+        } else if (c == 0x15) {
+            prompt_wipe();
+        } else if (c == 0x03) {
+            prompt_submit(1);
+        } else if (c >= 0x20 && g_pr.len + 1 < sizeof g_pr.buf) {
+            g_pr.buf[g_pr.len++] = (char)c;
+        }
+    }
+}
+
+/* One step per frame: watch the directory, read the keyboard. */
+static void prompt_tick(void) {
+    if (!g_pr.on) return;
+    double now = now_sec();
+    int r = agent_poll(&g_pr.ag, now);
+    if (r == 1) prompt_show();
+    else if (r == 2 && g_pr.st == P_ASK) g_pr.st = P_NONE;
+    if (g_pr.st == P_CHECKING && now > g_pr.checking_until) g_pr.st = P_NONE;
+    if (g_pr.st == P_ASK) {
+        unsigned char b[64];
+        ssize_t n;
+        while ((n = read(STDIN_FILENO, b, sizeof b)) > 0) prompt_keys(b, (size_t)n);
+        memset(b, 0, sizeof b);
+    }
+}
+
+static void fill_disc(canvas_t *c, int cx, int cy, int r, uint32_t col) {
+    for (int dy = -r; dy <= r; dy++) {
+        int hw = (int)(sqrt((double)r * r - (double)dy * dy) + .5);
+        fill(c, cx - hw, cy + dy, 2 * hw + 1, 1, col);
+    }
+}
+
+static void draw_center(canvas_t *c, const char *s, int y, int scale, uint32_t col) {
+    draw_text(c, s, (c->w - text_width(s, scale)) / 2, y, scale, col);
+}
+
+/* The panel: title, a field of dots, and one line under it for the error or
+   the key hint. No device name, no kernel text: the VT stays in graphics
+   mode the whole time. */
+static void draw_prompt(canvas_t *c, const layout_t *l, double t) {
+    int ps = l->ps, hs = ps > 1 ? ps - 1 : 1;
+    fill(c, l->px - ps, l->py - ps, l->pw + 2 * ps, l->ph + 2 * ps, C_SHADOW);
+    fill(c, l->px, l->py, l->pw, l->ph, C_PANEL);
+    fill(c, l->px, l->py, l->pw, 2 * ps, g_pr.retry && g_pr.st == P_ASK ? C_ERROR : C_BODY);
+    int pad = 12 * ps, fx = l->px + pad, fw = l->pw - 2 * pad;
+    const char *title = g_pr.title[0] ? g_pr.title : "Enter the disk passphrase";
+    if (text_width(title, ps) > fw) title = "Enter the disk passphrase";
+    draw_center(c, title, l->title_y, ps, C_HOT);
+
+    fill(c, fx, l->field_y, fw, l->field_h, C_FIELD);
+    int cy = l->field_y + l->field_h / 2, x = fx + 10 * ps;
+    if (g_pr.st == P_ASK && !g_pr.silent) {
+        if (g_pr.echo) {
+            /* Echo=1: the asker wants the text shown. Non-ASCII as '*'. */
+            char vis[128]; size_t k = 0;
+            for (size_t i = 0; i < g_pr.len && k + 1 < sizeof vis; i++) {
+                unsigned char ch = (unsigned char)g_pr.buf[i];
+                if ((ch & 0xC0) == 0x80) continue;
+                vis[k++] = ch >= 32 && ch < 127 ? (char)ch : '*';
+            }
+            vis[k] = 0;
+            int maxc = (fw - 20 * ps) / (FONT_W * ps);
+            const char *show = (int)k > maxc ? vis + k - maxc : vis;
+            draw_text(c, show, x, cy - FONT_H * ps / 2, ps, C_HOT);
+            x += text_width(show, ps);
+        } else {
+            int n = 0;
+            for (size_t i = 0; i < g_pr.len; i++)
+                if (((unsigned char)g_pr.buf[i] & 0xC0) != 0x80) n++;
+            int step = 12 * ps, maxd = (fw - 24 * ps) / step;
+            if (n > maxd) n = maxd;
+            for (int i = 0; i < n; i++) fill_disc(c, x + 4 * ps + i * step, cy, 4 * ps, C_HOT);
+            x += n * step;
+        }
+        if (((int)(t * 2)) & 1) fill(c, x + 2 * ps, cy - 7 * ps, 2 * ps, 14 * ps, C_CYAN);
+    }
+
+    if (g_pr.st == P_CHECKING)
+        draw_center(c, "Checking the passphrase...", l->note_y, hs, C_LABEL);
+    else if (g_pr.retry)
+        draw_center(c, "Wrong passphrase, try again", l->note_y, hs, C_ERROR);
+    else
+        draw_center(c, "Enter to unlock \xc2\xb7 Esc to clear", l->note_y, hs, C_LABEL);
+}
 
 static layout_t layout(const canvas_t *c) {
     layout_t l;
@@ -524,6 +767,21 @@ static layout_t layout(const canvas_t *c) {
     l.sts_y = l.ver_y + line + line / 2;
     l.top = l.ay - l.ch;
     l.bottom = l.sts_y + line + 4 * l.ts;
+
+    /* Panel text: at least 16x32 from 700 rows up, so the question reads at
+       a glance; the hint under the field is one step smaller. */
+    l.ps = l.ts > 1 ? l.ts : c->h >= 700 ? 2 : 1;
+    int ps = l.ps, hs = ps > 1 ? ps - 1 : 1;
+    l.pw = 36 * FONT_W * ps;
+    if (l.pw > c->w - 32) l.pw = c->w - 32;
+    l.px = (c->w - l.pw) / 2;
+    l.py = l.tag_y;
+    l.title_y = l.py + 14 * ps;
+    l.field_y = l.title_y + FONT_H * ps + 10 * ps;
+    l.field_h = 22 * ps;
+    l.note_y = l.field_y + l.field_h + 9 * ps;
+    l.ph = l.note_y + FONT_H * hs + 12 * ps - l.py;
+    if (l.py + l.ph + 2 * ps > l.bottom) l.bottom = l.py + l.ph + 2 * ps;
     return l;
 }
 
@@ -574,6 +832,8 @@ static void gfx_frame(canvas_t *c, const layout_t *l, double t, double fade, int
     }
     rng = rng * 1664525u + 1013904223u;
 
+    if (g_pr.st != P_NONE) { draw_prompt(c, l, t); return; }
+
     int tw = text_width(TAG, l->ts);
     draw_text(c, TAG, (c->w - tw) / 2, l->tag_y, l->ts, mix(bgc, C_TEXT, fade * (gl > 0 ? 1 - gl : 1)));
     if (g_ver[0]) {
@@ -614,6 +874,8 @@ static int gfx_run(double duration) {
 
     layout_t l = layout(&c);
     blit(&c, 0, c.h);
+    agent_register();
+    notify_ready();
     const double fade_s = .35;
     double t0 = timeline_start(), started = now_sec();
     for (int frame = 0; !g_exit; frame++) {
@@ -629,6 +891,7 @@ static int gfx_run(double duration) {
             blit(&c, 0, c.h);
         }
         if (!c.mem) { usleep(100000); if (fb_open(&c) == 0) { l = layout(&c); blit(&c, 0, c.h); } continue; }
+        prompt_tick();
         gfx_frame(&c, &l, t, fade, frame);
         blit(&c, l.top, l.bottom);
         usleep(FRAME_USEC);
@@ -636,13 +899,14 @@ static int gfx_run(double duration) {
     /* Leave the plain background, not a frozen logo, for whatever comes next. */
     if (c.mem) { memcpy(c.back, c.bg, (size_t)c.w * c.h * 4); blit(&c, 0, c.h); }
     canvas_free(&c);
+    agent_unregister();
     tty_text();
     return 0;
 }
 
 /* --render: draw one frame into a PPM, for the build-time check and for
    previewing the design without booting anything. */
-static int render_ppm(const char *path, int w, int h, double t) {
+static int render_ppm(const char *path, int w, int h, double t, const char *prompt) {
     canvas_t c; memset(&c, 0, sizeof c);
     c.fd = -1; c.w = w; c.h = h; c.bpp = 32; c.stride = w * 4;
     c.r.offset = 16; c.g.offset = 8; c.b.offset = 0; c.r.length = c.g.length = c.b.length = 8;
@@ -650,6 +914,14 @@ static int render_ppm(const char *path, int w, int h, double t) {
     c.mem = malloc(c.len);
     if (!c.mem || canvas_alloc(&c)) return 1;
     layout_t l = layout(&c);
+    /* --prompt=ask|retry|checking: the passphrase panel with eight
+       characters typed, for previewing it without a boot. */
+    if (prompt) {
+        g_pr.st = !strcmp(prompt, "checking") ? P_CHECKING : P_ASK;
+        g_pr.retry = !strcmp(prompt, "retry");
+        snprintf(g_pr.title, sizeof g_pr.title, "Enter the disk passphrase");
+        g_pr.len = 8; memset(g_pr.buf, 'x', 8);
+    }
     gfx_frame(&c, &l, t, 1, 1);
     FILE *f = fopen(path, "wb");
     if (!f) return 1;
@@ -674,21 +946,24 @@ static double parse_duration(const char *s) {
     return v;
 }
 
-/* The kill switch kairos-init documents: kairos.splash=0 anywhere on the
-   kernel command line. Matched as a whole word. */
-static int splash_disabled(void) {
+/* A whole word on the kernel command line. */
+static int cmdline_has(const char *word) {
     FILE *f = fopen("/proc/cmdline", "r");
     if (!f) return 0;
     char b[4096]; size_t n = fread(b, 1, sizeof b - 1, f); fclose(f);
     b[n] = 0;
     for (char *w = strtok(b, " \t\n"); w; w = strtok(NULL, " \t\n"))
-        if (!strcmp(w, "kairos.splash=0")) return 1;
+        if (!strcmp(w, word)) return 1;
     return 0;
 }
 
+/* The kill switch kairos-init documents: kairos.splash=0 anywhere on the
+   kernel command line. */
+static int splash_disabled(void) { return cmdline_has("kairos.splash=0"); }
+
 int main(int argc, char **argv) {
     double duration = 0, at = 1.5;
-    const char *render = NULL; int rw = 1280, rh = 800;
+    const char *render = NULL, *prompt = NULL; int rw = 1280, rh = 800;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strncmp(a, "--duration=", 11)) duration = parse_duration(a + 11);
@@ -696,15 +971,19 @@ int main(int argc, char **argv) {
         else if (!strncmp(a, "--render=", 9)) render = a + 9;
         else if (!strncmp(a, "--size=", 7)) sscanf(a + 7, "%dx%d", &rw, &rh);
         else if (!strncmp(a, "--at=", 5)) at = parse_duration(a + 5);
+        else if (!strncmp(a, "--prompt=", 9)) prompt = a + 9;
+        else if (!strcmp(a, "--agent")) g_agent_mode = 1;
+        else if (!strcmp(a, "--no-agent")) g_agent_mode = 0;
         /* Anything else is ignored on purpose: a newer kairos-init may pass a
            flag this build does not know, and a splash must never fail a boot
            over that. */
     }
     load_version();
-    if (render) return render_ppm(render, rw, rh, at);
-    if (splash_disabled()) return 0;
+    if (render) return render_ppm(render, rw, rh, at, prompt);
+    if (splash_disabled()) { notify_ready(); return 0; }
 
     if (!isatty(STDOUT_FILENO)) {
+        notify_ready();
         if (g_ver[0]) printf("HADRON %s\n", g_ver); else puts("HADRON");
         return 0;
     }
@@ -714,5 +993,7 @@ int main(int argc, char **argv) {
     sigaction(SIGINT, &sa, NULL); sigaction(SIGTERM, &sa, NULL);
 
     if (gfx_run(duration) == 0) return 0;
+    /* No framebuffer: no agent. The console agent asks instead. */
+    notify_ready();
     return text_run(duration);
 }
