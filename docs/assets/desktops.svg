@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="330" viewBox="0 0 1280 330" role="img" aria-labelledby="t d">
+  <title id="t">The four Hadron desktops</title>
+  <desc id="d">COSMIC places windows freely with a dock; niri scrolls columns of windows sideways; Sway and i3 tile windows side by side.</desc>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#24283b"/>
+      <stop offset="1" stop-color="#1a1b26"/>
+    </linearGradient>
+    <clipPath id="screen"><rect width="280" height="175" rx="6"/></clipPath>
+  </defs>
+  <rect width="1280" height="330" fill="#16161e" rx="16"/>
+
+  <g font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif">
+
+  <!-- COSMIC: floating windows, top panel, dock -->
+  <g transform="translate(30 30)">
+    <rect width="280" height="175" rx="6" fill="url(#sky)" stroke="#414868"/>
+    <g clip-path="url(#screen)">
+      <rect width="280" height="12" fill="#16161e"/>
+      <rect x="22" y="30" width="150" height="96" rx="6" fill="#292e42" stroke="#7aa2f7" stroke-width="1.5"/>
+      <rect x="22" y="30" width="150" height="14" rx="6" fill="#7aa2f7" opacity="0.35"/>
+      <rect x="112" y="58" width="146" height="88" rx="6" fill="#24283b" stroke="#565f89"/>
+      <rect x="112" y="58" width="146" height="14" rx="6" fill="#414868"/>
+      <rect x="88" y="154" width="104" height="16" rx="8" fill="#16161e" stroke="#414868"/>
+      <circle cx="104" cy="162" r="4" fill="#7aa2f7"/><circle cx="122" cy="162" r="4" fill="#7dcfff"/>
+      <circle cx="140" cy="162" r="4" fill="#bb9af7"/><circle cx="158" cy="162" r="4" fill="#9ece6a"/><circle cx="176" cy="162" r="4" fill="#e0af68"/>
+    </g>
+    <text x="0" y="212" font-size="22" font-weight="700" fill="#7aa2f7">COSMIC</text>
+    <text x="0" y="238" font-size="15" fill="#a9b1d6">Windows where you put them.</text>
+    <text x="0" y="258" font-size="15" fill="#a9b1d6">The one to start with.</text>
+  </g>
+
+  <!-- niri: scrolling columns that run off the screen -->
+  <g transform="translate(340 30)">
+    <rect width="280" height="175" rx="6" fill="url(#sky)" stroke="#414868"/>
+    <g clip-path="url(#screen)">
+      <rect width="280" height="12" fill="#16161e"/>
+      <rect x="-60" y="22" width="90" height="144" rx="8" fill="#24283b" stroke="#414868"/>
+      <rect x="40" y="22" width="124" height="144" rx="8" fill="#292e42" stroke="#bb9af7" stroke-width="2"/>
+      <rect x="174" y="22" width="80" height="68" rx="8" fill="#24283b" stroke="#565f89"/>
+      <rect x="174" y="98" width="80" height="68" rx="8" fill="#24283b" stroke="#565f89"/>
+      <rect x="264" y="22" width="100" height="144" rx="8" fill="#24283b" stroke="#414868"/>
+    </g>
+    <path d="M232 6 h36 m-6 -4 l6 4 l-6 4" fill="none" stroke="#bb9af7" stroke-width="1.5"/>
+    <text x="0" y="212" font-size="22" font-weight="700" fill="#bb9af7">niri + Noctalia</text>
+    <text x="0" y="238" font-size="15" fill="#a9b1d6">An endless strip of windows</text>
+    <text x="0" y="258" font-size="15" fill="#a9b1d6">that scrolls sideways.</text>
+  </g>
+
+  <!-- Sway: tiles with a top bar -->
+  <g transform="translate(650 30)">
+    <rect width="280" height="175" rx="6" fill="url(#sky)" stroke="#414868"/>
+    <g clip-path="url(#screen)">
+      <rect width="280" height="14" fill="#16161e"/>
+      <rect x="6" y="5" width="10" height="5" rx="2" fill="#7dcfff"/><rect x="20" y="5" width="10" height="5" rx="2" fill="#414868"/>
+      <rect x="6" y="20" width="132" height="149" rx="3" fill="#292e42" stroke="#7dcfff" stroke-width="2"/>
+      <rect x="144" y="20" width="130" height="72" rx="3" fill="#24283b" stroke="#414868"/>
+      <rect x="144" y="97" width="130" height="72" rx="3" fill="#24283b" stroke="#414868"/>
+    </g>
+    <text x="0" y="212" font-size="22" font-weight="700" fill="#7dcfff">Sway</text>
+    <text x="0" y="238" font-size="15" fill="#a9b1d6">Tiling on Wayland,</text>
+    <text x="0" y="258" font-size="15" fill="#a9b1d6">driven from the keyboard.</text>
+  </g>
+
+  <!-- i3: tiles with a bottom bar -->
+  <g transform="translate(960 30)">
+    <rect width="280" height="175" rx="6" fill="url(#sky)" stroke="#414868"/>
+    <g clip-path="url(#screen)">
+      <rect x="6" y="6" width="86" height="149" rx="3" fill="#24283b" stroke="#414868"/>
+      <rect x="97" y="6" width="86" height="149" rx="3" fill="#292e42" stroke="#9ece6a" stroke-width="2"/>
+      <rect x="188" y="6" width="86" height="149" rx="3" fill="#24283b" stroke="#414868"/>
+      <rect y="161" width="280" height="14" fill="#16161e"/>
+      <rect x="6" y="165" width="10" height="5" rx="2" fill="#9ece6a"/><rect x="20" y="165" width="10" height="5" rx="2" fill="#414868"/>
+    </g>
+    <text x="0" y="212" font-size="22" font-weight="700" fill="#9ece6a">i3</text>
+    <text x="0" y="238" font-size="15" fill="#a9b1d6">The classic tiler, on the</text>
+    <text x="0" y="258" font-size="15" fill="#a9b1d6">XLibre X server.</text>
+  </g>
+
+  </g>
+</svg>

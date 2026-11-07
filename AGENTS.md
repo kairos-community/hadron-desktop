@@ -64,5 +64,6 @@ released, never upgraded or never checked:
 - `scripts/release-manifest.sh` (the flavor/line pairs) and `update/release.go`
   (the flavor list).
 - The tray updater's "Switch desktop" list.
-- `README.md`: the variant list and the releases section.
+- `README.md`: the desktop list and the download table;
+  `docs/DEVELOPMENT.md`: the variant list and the releases section.
 - A design note in `docs/superpowers/specs/`.

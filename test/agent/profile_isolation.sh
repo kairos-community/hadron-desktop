@@ -17,7 +17,7 @@
 #      hdn_u_/hdn_a_ bearer, no configured (non-placeholder) bearer digest,
 #      and no PEM private-key block -- proving the generic ISO embeds no
 #      runtime secret. Tokens/keys are seed data written at boot by the OEM
-#      provisioning stage, never Docker build args (see README).
+#      provisioning stage, never Docker build args (see docs/DEVELOPMENT.md).
 #
 # Usage:
 #   bash test/agent/profile_isolation.sh
