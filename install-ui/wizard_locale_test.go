@@ -178,6 +178,9 @@ func TestRenderCloudConfigWritesKeyboardAndTimezone(t *testing.T) {
 		"                Option \"XkbVariant\" \"nodeadkeys\"\n",
 		"        - \"ln -sfn /usr/share/zoneinfo/Europe/Rome /etc/localtime\"\n",
 		"echo 'KEYMAP=de-latin1-nodeadkeys' >> /etc/vconsole.conf",
+		// The initramfs, where the disk passphrase is typed, never sees that
+		// vconsole.conf; it gets the keymap from the command line.
+		"  grub_options:\n    extra_cmdline: \"rd.vconsole.keymap=de-latin1-nodeadkeys\"\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered config missing %q\n---\n%s", want, out)
@@ -189,8 +192,26 @@ func TestRenderCloudConfigWritesKeyboardAndTimezone(t *testing.T) {
 	if kb < 0 || boot < kb {
 		t.Errorf("keyboard file must be written in the initramfs stage:\n%s", out)
 	}
+	// grub_options belongs to install:, which ends where hostname: starts.
+	if g, h := strings.Index(out, "  grub_options:"), strings.Index(out, "\nhostname:"); g < 0 || h < g {
+		t.Errorf("grub_options must be under install:\n%s", out)
+	}
 	if n := topLevelStages(out); n != 1 {
 		t.Errorf("%d top-level stages: keys, want 1", n)
+	}
+}
+
+// An encrypted install is the one that needs the keymap in the initramfs,
+// where the passphrase is typed. grub_options must stay under install:, not
+// under the kcrypt: key that follows.
+func TestRenderCloudConfigEncryptedKeepsTheKeymapUnderInstall(t *testing.T) {
+	c := Choice{Hostname: "h", Username: "u", Disk: "/dev/vda", Encrypt: true, Passphrase: "correct horse battery",
+		KeyboardLayout: "de", ConsoleKeymap: "de-latin1", Timezone: "UTC"}
+	out := RenderCloudConfig(c, "x")
+	want := "install:\n  device: \"/dev/vda\"\n  auto: true\n" +
+		"  grub_options:\n    extra_cmdline: \"rd.vconsole.keymap=de-latin1\"\n  reboot: false\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("config is missing\n%s\nin\n%s", want, out)
 	}
 }
 
@@ -210,6 +231,9 @@ func TestRenderCloudConfigLocaleDefaults(t *testing.T) {
 	}
 	if strings.Contains(out, "KEYMAP=") {
 		t.Errorf("no console keymap was resolved, so vconsole.conf must not be touched:\n%s", out)
+	}
+	if strings.Contains(out, "grub_options") || strings.Contains(out, "vconsole.keymap") {
+		t.Errorf("no console keymap was resolved, so the command line must not change:\n%s", out)
 	}
 }
 
