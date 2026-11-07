@@ -158,5 +158,6 @@ live ISO for the install.
   with a higher time cost instead of 1 GiB.
 - The console agent shows the prompt on the consoles in `console=` only.
 - Recovery boots do not run the hook; recovery does not mount COS_PERSISTENT.
-- A reset (`kairos-agent reset`) of a passphrase install would need the
-  passphrase file again. Not handled.
+  kcrypt still asks there, and accepts an empty answer to leave the disk
+  locked. A reset then erases the locked container and makes a new one with a
+  new passphrase. See `2026-11-08-encryption-recovery-design.md`.
