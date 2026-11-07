@@ -25,6 +25,13 @@ type Choice struct {
 	KeyboardVariant string
 	ConsoleKeymap   string
 	Timezone        string
+
+	// Encrypt asks kairos-agent to encrypt COS_PERSISTENT with a key held
+	// by the TPM. Recovery is the passphrase the installer adds as a second
+	// LUKS2 keyslot after the install; like Password, it is never written
+	// anywhere, the cloud-config included.
+	Encrypt  bool
+	Recovery string
 }
 
 // desktopGroups are the supplemental groups a desktop user needs: seat/input for
@@ -46,7 +53,15 @@ func RenderCloudConfig(c Choice, hash string) string {
 	b.WriteString("install:\n")
 	fmt.Fprintf(&b, "  device: %q\n", c.Disk)
 	b.WriteString("  auto: true\n")
-	b.WriteString("  reboot: true\n")
+	if c.Encrypt {
+		// The installer reboots itself once it has added the recovery
+		// keyslot; a kairos-agent reboot would come first.
+		b.WriteString("  reboot: false\n")
+		b.WriteString("  encrypted_partitions:\n")
+		fmt.Fprintf(&b, "    - %s\n", encryptedPartition)
+	} else {
+		b.WriteString("  reboot: true\n")
+	}
 	fmt.Fprintf(&b, "hostname: %q\n", c.Hostname)
 	b.WriteString("users:\n")
 	fmt.Fprintf(&b, "  - name: %q\n", c.Username)
@@ -72,6 +87,9 @@ func RenderCloudConfig(c Choice, hash string) string {
 	fmt.Fprintf(&b, "            user = %s\n", c.Username)
 	b.WriteString("            session_index = 2\n")
 	writeLocaleStage(&b, c)
+	if c.Encrypt {
+		writeEncryptionMarker(&b)
+	}
 	// The display name again, in case a kairos-agent stops passing gecos
 	// through. /etc is rebuilt from cloud-config at every boot, so it is set
 	// again each boot, after the users step above (yip runs the users of a
@@ -81,6 +99,19 @@ func RenderCloudConfig(c Choice, hash string) string {
 	b.WriteString("      commands:\n")
 	fmt.Fprintf(&b, "        - usermod -c %s %s\n", c.Username, c.Username)
 	return b.String()
+}
+
+// writeEncryptionMarker records, with no secret, that the disk is encrypted
+// with a TPM-held key and has a recovery keyslot. Like the keyboard file it
+// is written again at every boot, because /etc is rebuilt from the image.
+func writeEncryptionMarker(b *strings.Builder) {
+	b.WriteString("    - name: \"Hadron disk encryption marker\"\n")
+	b.WriteString("      files:\n")
+	fmt.Fprintf(b, "        - path: %s\n", encryptionMarker)
+	b.WriteString("          permissions: 0644\n")
+	b.WriteString("          content: |\n")
+	b.WriteString("            mode=tpm\n")
+	b.WriteString("            recovery=1\n")
 }
 
 // keyboardFile is the one place the installed system keeps the keyboard

@@ -20,6 +20,9 @@ func oemDir() string {
 	return "/oem"
 }
 
+// userConfigPath is the cloud-config the wizard writes.
+func userConfigPath() string { return oemDir() + "/99_hadron-user.yaml" }
+
 // posixUsername is the conservative intersection of what useradd accepts and
 // what is safe to interpolate: lowercase start (letter or underscore), then
 // letters, digits, dash or underscore, 32 characters at most.
@@ -91,6 +94,9 @@ func choiceFromEnv() (Choice, bool, error) {
 		KeyboardLayout:  orDefault(os.Getenv("HADRON_KEYBOARD_LAYOUT"), defaultLayout),
 		KeyboardVariant: os.Getenv("HADRON_KEYBOARD_VARIANT"),
 		Timezone:        orDefault(os.Getenv("HADRON_TIMEZONE"), defaultTimezone),
+
+		Encrypt:  os.Getenv("HADRON_ENCRYPT") == "1",
+		Recovery: os.Getenv("HADRON_RECOVERY_PASSPHRASE"),
 	}
 	if c.Hostname == "" {
 		c.Hostname = defaultHostname
@@ -127,6 +133,15 @@ func choiceFromEnv() (Choice, bool, error) {
 	if err := validateTimezone(c.Timezone); err != nil {
 		return c, true, fmt.Errorf("HADRON_TIMEZONE: %w", err)
 	}
+	// Encryption has no default passphrase: without HADRON_RECOVERY_PASSPHRASE
+	// the only key would be the one in the TPM.
+	if c.Encrypt {
+		if err := validateRecovery(c.Recovery); err != nil {
+			return c, true, fmt.Errorf("HADRON_RECOVERY_PASSPHRASE: %w", err)
+		}
+	} else {
+		c.Recovery = ""
+	}
 	return c, true, nil
 }
 
@@ -160,18 +175,24 @@ const (
 	stepPass
 	stepGithub
 	stepDisk
+	stepEncrypt
+	stepRecovery
+	stepRecoveryConfirm
 	stepReview
 )
 
 var stepName = map[wizardStep]string{
-	stepKeyboard: "keyboard",
-	stepTimezone: "timezone",
-	stepHostname: "hostname",
-	stepUser:     "username",
-	stepPass:     "password",
-	stepGithub:   "ssh keys",
-	stepDisk:     "target disk",
-	stepReview:   "review",
+	stepKeyboard:        "keyboard",
+	stepTimezone:        "timezone",
+	stepHostname:        "hostname",
+	stepUser:            "username",
+	stepPass:            "password",
+	stepGithub:          "ssh keys",
+	stepDisk:            "target disk",
+	stepEncrypt:         "encryption",
+	stepRecovery:        "recovery passphrase",
+	stepRecoveryConfirm: "recovery passphrase",
+	stepReview:          "review",
 }
 
 type wizardModel struct {
@@ -192,6 +213,15 @@ type wizardModel struct {
 	// applyKeymap loads one on the live console. newWizard makes it a no-op.
 	keymapsDir  string
 	applyKeymap func(string)
+
+	// hasTPM shows the encryption step; without a TPM 2.0 the wizard goes
+	// from the disk straight to the review. encIdx is the cursor on that
+	// step, 0 for "no" (the default) and 1 for "yes".
+	hasTPM bool
+	encIdx int
+	// recoveryFirst is the recovery passphrase as first typed, until the
+	// second entry matches it.
+	recoveryFirst string
 }
 
 // newWizard is the wizard with the built-in keyboard and timezone lists and
@@ -273,6 +303,17 @@ func (m *wizardModel) enter(s wizardStep) {
 		m.in.SetValue(m.choice.Password)
 	case stepGithub:
 		m.in.SetValue(m.choice.Github)
+	case stepEncrypt:
+		m.encIdx = 0
+		if m.choice.Encrypt {
+			m.encIdx = 1
+		}
+	case stepRecovery:
+		m.in.EchoMode = textinput.EchoPassword
+		m.in.SetValue(m.choice.Recovery)
+	case stepRecoveryConfirm:
+		m.in.EchoMode = textinput.EchoPassword
+		m.in.SetValue("")
 	}
 	m.in.Focus()
 	m.in.CursorEnd()
@@ -314,7 +355,7 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc":
 		if m.step > stepKeyboard {
-			m.enter(m.step - 1)
+			m.enter(m.prevStep())
 		}
 		return m, nil
 	}
@@ -324,6 +365,9 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.step == stepDisk {
 		return m.updateDisk(key)
+	}
+	if m.step == stepEncrypt {
+		return m.updateEncrypt(key)
 	}
 	if m.step == stepReview {
 		return m.updateReview(key)
@@ -336,9 +380,46 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// prevStep is where esc goes: the step before, skipping the encryption
+// steps that were not shown.
+func (m wizardModel) prevStep() wizardStep {
+	switch m.step {
+	case stepReview:
+		switch {
+		case m.choice.Encrypt:
+			return stepRecoveryConfirm
+		case m.hasTPM:
+			return stepEncrypt
+		}
+		return stepDisk
+	case stepEncrypt:
+		return stepDisk
+	}
+	return m.step - 1
+}
+
 func (m wizardModel) commitField() (tea.Model, tea.Cmd) {
 	v := strings.TrimSpace(m.in.Value())
 	switch m.step {
+	case stepRecovery:
+		// Not trimmed: the passphrase is used byte for byte, and
+		// validateRecovery refuses leading and trailing spaces instead.
+		raw := m.in.Value()
+		if err := validateRecovery(raw); err != nil {
+			m.err = err.Error()
+			return m, nil
+		}
+		m.recoveryFirst = raw
+		m.enter(stepRecoveryConfirm)
+	case stepRecoveryConfirm:
+		if m.in.Value() != m.recoveryFirst {
+			m.in.SetValue("")
+			m.err = "the passphrases do not match: type it again, or esc to start over"
+			return m, nil
+		}
+		m.choice.Recovery = m.recoveryFirst
+		m.recoveryFirst = ""
+		m.enter(stepReview)
 	case stepHostname:
 		m.choice.Hostname = orDefault(v, defaultHostname)
 		m.enter(stepUser)
@@ -430,9 +511,49 @@ func (m wizardModel) updateDisk(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		m.choice.Disk = m.disks[m.diskIdx].Path
-		m.enter(stepReview)
+		if m.hasTPM {
+			m.enter(stepEncrypt)
+		} else {
+			m.enter(stepReview)
+		}
 	}
 	return m, nil
+}
+
+func (m wizardModel) updateEncrypt(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "up", "k":
+		m.encIdx = 0
+	case "down", "j":
+		m.encIdx = 1
+	case "enter":
+		if m.encIdx == 1 {
+			m.choice.Encrypt = true
+			m.enter(stepRecovery)
+		} else {
+			m.choice.Encrypt = false
+			m.choice.Recovery = ""
+			m.enter(stepReview)
+		}
+	}
+	return m, nil
+}
+
+// encryptText is shown on the encryption step. It says what the TPM-held key
+// protects and what it does not; see the design note for the reasoning.
+var encryptText = []string{
+	"Encrypt the partition that holds your files (/home) and /var.",
+	"The key is kept in this computer's TPM chip, so the disk unlocks",
+	"by itself at boot.",
+	"",
+	"Protects: your files when the disk is taken out of this computer.",
+	"Does not protect: someone who has the whole computer. The key is not",
+	"tied to the system that boots, so a person who starts another system",
+	"on it (from a USB stick, say) can likely read the key from the TPM.",
+	"",
+	"You also set a recovery passphrase. If the TPM is cleared or reset,",
+	"or the mainboard is replaced, it is the only way back to your files.",
+	"Write it down and keep it away from the computer.",
 }
 
 func (m wizardModel) updateReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -489,6 +610,21 @@ func (m wizardModel) View() string {
 		}
 		b.WriteString("\n  " + tnDim.Render("up/down select · enter confirm · esc back") + "\n")
 
+	case stepEncrypt:
+		b.WriteString("  " + tnHot.Render("Encrypt your files?") + "\n\n")
+		for _, l := range encryptText {
+			b.WriteString("  " + l + "\n")
+		}
+		b.WriteString("\n")
+		for i, l := range []string{"no, do not encrypt", "yes, encrypt my files"} {
+			if i == m.encIdx {
+				b.WriteString("  " + tnAcc.Render("> "+l) + "\n")
+			} else {
+				b.WriteString("    " + tnDim.Render(l) + "\n")
+			}
+		}
+		b.WriteString("\n  " + tnDim.Render("up/down select · enter confirm · esc back") + "\n")
+
 	case stepReview:
 		b.WriteString("  " + haltRed.Render("this ERASES "+m.choice.Disk+" and installs hadron-desktop") + "\n\n")
 		b.WriteString("    keyboard   " + tnHot.Render(keyboardLabel(m.choice)) + "\n")
@@ -497,11 +633,23 @@ func (m wizardModel) View() string {
 		b.WriteString("    username   " + tnHot.Render(m.choice.Username) + "\n")
 		b.WriteString("    ssh keys   " + tnHot.Render(orDefault(githubLabel(m.choice.Github), "none")) + "\n")
 		b.WriteString("    disk       " + haltRed.Render(m.choice.Disk) + "\n")
+		if m.hasTPM {
+			enc := "off"
+			if m.choice.Encrypt {
+				enc = "on (TPM key and recovery passphrase)"
+			}
+			b.WriteString("    encrypt    " + tnHot.Render(enc) + "\n")
+		}
 		b.WriteString("\n  " + tnDim.Render("enter to INSTALL · esc back") + "\n")
 
 	default:
 		b.WriteString("  " + prompt(m.step) + "\n")
 		b.WriteString("  " + m.in.View() + "\n")
+		if m.step == stepRecovery {
+			if h := passphraseStrength(m.in.Value()); h != "" {
+				b.WriteString("  " + tnDim.Render("strength: "+h) + "\n")
+			}
+		}
 		if m.err != "" {
 			b.WriteString("\n  " + haltRed.Render(m.err) + "\n")
 		}
@@ -535,6 +683,10 @@ func prompt(s wizardStep) string {
 		return tnDim.Render("password for that account")
 	case stepGithub:
 		return tnDim.Render("GitHub username to import SSH keys from (blank to skip)")
+	case stepRecovery:
+		return tnDim.Render(fmt.Sprintf("recovery passphrase, %d characters or more (a few words work well)", minRecoveryLen))
+	case stepRecoveryConfirm:
+		return tnDim.Render("type the recovery passphrase again")
 	}
 	return ""
 }
@@ -544,26 +696,32 @@ func prompt(s wizardStep) string {
 // runWizard collects the install configuration and writes it to /oem for
 // `kairos-agent install` to merge. It is a no-op when a config is already present,
 // preserving the shell installer's unattended behaviour for seeded installs.
-func runWizard() error {
-	out := oemDir() + "/99_hadron-user.yaml"
+// It returns what was chosen, or nil when it wrote nothing; the caller needs
+// the choice to add the recovery passphrase after the install.
+func runWizard() (*Choice, error) {
+	out := userConfigPath()
 
 	present, err := ConfigPresent(oemDir(), out)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if present {
 		// Someone already supplied a users/install config: install unattended.
-		return nil
+		return nil, nil
 	}
 
 	c, nonInteractive, err := choiceFromEnv()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	hasTPM := tpmPresent(tpmDevice, "/sys/class/tpm")
 
 	if nonInteractive {
 		if err := zoneExists(zoneinfoDir, c.Timezone); err != nil {
-			return fmt.Errorf("HADRON_TIMEZONE: %w", err)
+			return nil, fmt.Errorf("HADRON_TIMEZONE: %w", err)
+		}
+		if c.Encrypt && !hasTPM {
+			return nil, fmt.Errorf("HADRON_ENCRYPT: no TPM 2.0 (%s) on this machine", tpmDevice)
 		}
 		c.ConsoleKeymap = consoleKeymap(keymapsDir, c.KeyboardLayout, c.KeyboardVariant)
 	} else {
@@ -571,20 +729,24 @@ func runWizard() error {
 			loadKeyboards(xkbRulesList), loadTimezones(zoneinfoDir), detectTimezone("/etc/localtime"))
 		w.keymapsDir = keymapsDir
 		w.applyKeymap = loadConsoleKeymap
+		w.hasTPM = hasTPM
 		final, err := tea.NewProgram(w, tea.WithAltScreen()).Run()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		wm, ok := final.(wizardModel)
 		if !ok || wm.aborted || !wm.done {
-			return errors.New("install cancelled")
+			return nil, errors.New("install cancelled")
 		}
 		c = wm.choice
 	}
 
 	hash, err := HashPassword(c.Password)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return writeChoice(out, c, hash)
+	if err := writeChoice(out, c, hash); err != nil {
+		return nil, err
+	}
+	return &c, nil
 }

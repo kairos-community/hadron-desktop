@@ -46,6 +46,9 @@ var Steps = []Step{
 	// "Running stage: %s" — kairos-agent itself never logs an
 	// "after-install hook" line.
 	{"Running after-install", "Running stage: after-install"},
+	// Only an encrypted install logs this (encrypt.go), after kairos-agent
+	// exits; any other install jumps from here to Complete on exit.
+	{"Adding recovery passphrase", "hadron: adding the recovery passphrase"},
 	{"Complete", "Finish Lifecycle hook"},
 }
 

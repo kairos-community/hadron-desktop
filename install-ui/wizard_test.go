@@ -636,7 +636,7 @@ func TestRunWizardNonInteractiveWritesConfig(t *testing.T) {
 	t.Setenv("HADRON_HOSTNAME", "box")
 	t.Setenv("HADRON_GITHUB", "adalovelace")
 
-	if err := runWizard(); err != nil {
+	if _, err := runWizard(); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "99_hadron-user.yaml"))
@@ -667,7 +667,7 @@ func TestRunWizardSkipsWhenConfigPresent(t *testing.T) {
 	// runWizard would try to open a terminal here rather than return nil.
 	t.Setenv("HADRON_INSTALL_NONINTERACTIVE", "")
 
-	if err := runWizard(); err != nil {
+	if _, err := runWizard(); err != nil {
 		t.Fatalf("seeded /oem should install unattended, got: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "99_hadron-user.yaml")); !os.IsNotExist(err) {
@@ -681,7 +681,7 @@ func TestRunWizardReportsMissingEnv(t *testing.T) {
 	t.Setenv("HADRON_USER", "")
 	t.Setenv("HADRON_PASS", "")
 	t.Setenv("HADRON_DISK", "")
-	err := runWizard()
+	_, err := runWizard()
 	if err == nil {
 		t.Fatal("expected an error when the non-interactive env is incomplete")
 	}

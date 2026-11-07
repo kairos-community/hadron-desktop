@@ -10,16 +10,30 @@ import (
 
 func TestInstallCommandDefault(t *testing.T) {
 	t.Setenv("HADRON_INSTALL_CMD", "")
-	cmd := installCommand()
+	cmd := installCommand("")
 	got := strings.Join(cmd.Args, " ")
-	if !strings.Contains(got, "kairos-agent") || !strings.Contains(got, "install") {
+	if got != "/usr/bin/kairos-agent install" {
 		t.Errorf("default command = %q, want kairos-agent install", got)
+	}
+}
+
+// An encrypted install must not end in kairos-agent's "press enter" prompt,
+// which `install` shows when the config says reboot: false.
+func TestInstallCommandForEncryptedInstall(t *testing.T) {
+	t.Setenv("HADRON_INSTALL_CMD", "")
+	got := strings.Join(installCommand("/oem/99_hadron-user.yaml").Args, " ")
+	if got != "/usr/bin/kairos-agent manual-install --use-default-dirs /oem/99_hadron-user.yaml" {
+		t.Errorf("command = %q", got)
+	}
+	t.Setenv("HADRON_INSTALL_CMD", "/bin/true --fake")
+	if got := strings.Join(installCommand("/oem/x.yaml").Args, " "); !strings.Contains(got, "/bin/true --fake") {
+		t.Errorf("the HADRON_INSTALL_CMD seam lost to the encrypted install: %q", got)
 	}
 }
 
 func TestInstallCommandHonoursOverride(t *testing.T) {
 	t.Setenv("HADRON_INSTALL_CMD", "/bin/true --fake")
-	cmd := installCommand()
+	cmd := installCommand("")
 	got := strings.Join(cmd.Args, " ")
 	if !strings.Contains(got, "/bin/true --fake") {
 		t.Errorf("override command = %q, want it to carry /bin/true --fake", got)
