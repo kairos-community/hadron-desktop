@@ -12,6 +12,9 @@
 #   make agent-iso                       # build the agent ISO
 #   make LLVM_OUT=<ref> llvm-image       # build only LLVM, for LLVM_IMAGE=<ref>
 #   make STAGE=cosmic-shell STAGE_OUT=<ref> stage-image  # one prebuilt half of COSMIC
+#   make uki-keys                        # Secure Boot test keys for a UKI ISO
+#   make uki-iso                         # build a Trusted Boot (UKI) ISO
+#   make UKI_FROM=<ref> uki-iso          # the same, from a published image
 #   make clean                           # remove build artifacts
 #
 # Knobs (override on the command line):
@@ -115,7 +118,7 @@ STAGE_OUT ?=
 
 export DOCKER_BUILDKIT := 1
 
-.PHONY: all image images iso agent-image agent-iso llvm-image stage-image vm vm-install check-boot-ux print-base-image print-llvm-tag print-stage-key clean
+.PHONY: all image images iso uki-keys uki-image uki-iso agent-image agent-iso llvm-image stage-image vm vm-install check-boot-ux print-aurora-image print-base-image print-llvm-tag print-stage-key clean
 
 all: iso
 
@@ -179,6 +182,40 @@ print-stage-key:
 iso: image
 	AURORA_IMAGE=$(AURORA_IMAGE) auroraboot/build.sh $(IMAGE) $(ISO_DIR)
 
+# Trusted Boot (UKI) edition: Secure Boot, measured boot and disk encryption
+# sealed to the TPM. See docs/superpowers/specs/2026-11-07-trusted-boot-edition-design.md.
+#
+# KEYS_DIR holds the Secure Boot keys. `make uki-keys` writes test keys there;
+# a machine installed with them boots only UKIs signed with them, so keep them.
+# The image is built on hadron-trusted, the Hadron base without dracut (a UKI
+# carries the whole image as its initramfs). UKI_FROM skips the desktop build:
+# it re-runs only the kairos stage, with TRUSTED_BOOT=true, on a published
+# image such as ghcr.io/kairos-community/hadron-desktop:sway-vm-v0.0.8. Changes
+# to rootfs/ in this tree are then not in the ISO, only the kairos stage's.
+KEYS_DIR  ?= build/uki-keys
+UKI_IMAGE ?= $(DESKTOP)-desktop:uki
+UKI_FROM  ?=
+UKI_ISO_DIR := $(WORK)/uki-iso
+TRUSTED_BASE_IMAGE ?= ghcr.io/kairos-io/hadron-trusted:$(HADRON_VERSION)
+
+uki-keys:
+	@[ ! -e $(KEYS_DIR)/db.key ] || { echo "$(KEYS_DIR) already holds keys; machines enrolled with them need them" >&2; exit 1; }
+	mkdir -p $(KEYS_DIR)
+	docker run --rm -u $$(id -u):$$(id -g) -v $(abspath $(KEYS_DIR)):/keys $(AURORA_IMAGE) \
+	  genkey -e 365 --output /keys "Hadron Desktop local"
+
+uki-image:
+ifdef UKI_FROM
+	docker build $(BUILD_ARGS) --build-arg TRUSTED_BOOT=true --build-arg GPU=$(or $(GPU),vm) \
+	  --build-context default=docker-image://$(UKI_FROM) --no-cache-filter kairos --target kairos -t $(UKI_IMAGE) .
+else
+	docker build $(BUILD_ARGS) --build-arg TRUSTED_BOOT=true --build-arg BASE_IMAGE=$(TRUSTED_BASE_IMAGE) \
+	  $(call cache_args,$(CACHE_NAME)) --no-cache-filter kairos -t $(UKI_IMAGE) .
+endif
+
+uki-iso: uki-image
+	AURORA_IMAGE=$(AURORA_IMAGE) auroraboot/build-uki.sh $(UKI_IMAGE) $(UKI_ISO_DIR) $(KEYS_DIR)
+
 # Run the image in QEMU with the correct flags (UEFI + virtio-gpu, NOT the
 # default VGA which renders the boot console as garbled static). See tools/vm.sh
 # for env knobs (NOVNC=1, FRESH=1, MEM, VNC, ...).
@@ -223,6 +260,9 @@ check-boot-ux:
 	exit $$fail
 
 # The resolved base reference, for CI steps that pull it before the build.
+print-aurora-image:
+	@echo $(AURORA_IMAGE)
+
 print-base-image:
 	@echo $(BASE_IMAGE)
 
