@@ -1,0 +1,24 @@
+# Asks for the disk passphrase of a COS_PERSISTENT encrypted with kcrypt's
+# passphrase method. See hadron-unlock.sh. Runs before immucore, so the
+# partition is already open when kcrypt looks for it.
+[Unit]
+Description=Ask for the Hadron disk passphrase
+DefaultDependencies=no
+After=systemd-udev-settle.service systemd-udev-trigger.service
+Before=immucore.service initrd.target
+# Recovery, the state reset and the live media do not mount COS_PERSISTENT
+# through this path; the same words the splash tests.
+ConditionKernelCommandLine=!root=LABEL=COS_SYSTEM
+ConditionKernelCommandLine=!root=live:LABEL=COS_RECOVERY
+ConditionKernelCommandLine=!kairos.reset
+ConditionKernelCommandLine=!rd.cos.disable
+ConditionKernelCommandLine=!rd.immucore.disable
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/hadron-unlock
+StandardOutput=journal
+StandardError=journal
+# The prompt can wait for a person for as long as it takes.
+TimeoutStartSec=infinity
