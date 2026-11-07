@@ -394,6 +394,137 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  # Trusted Boot edition, one line first: sway on the full (hardware) line,
+  # because Trusted Boot is for real machines with a TPM. A prototype, off
+  # until the repository variable TRUSTED_BOOT_RELEASE is "true" and the
+  # signing keys below are set; see
+  # docs/superpowers/specs/2026-11-07-trusted-boot-edition-design.md.
+  #
+  # It does not build the desktop again. It re-runs only the Dockerfile's
+  # kairos stage, with TRUSTED_BOOT=true, on the image the build job pushed
+  # (`make UKI_FROM=... uki-iso`), then signs one UKI with the project keys:
+  #   - the ISO, uploaded as the workflow artifact uki-<line>, not release-*,
+  #     so the publish job's asset counts do not change yet;
+  #   - the UKI upgrade image <flavor>-uki-<tag>, which holds the signed EFI
+  #     files that `kairos-agent upgrade` copies to the ESP of a Trusted Boot
+  #     system. hadron-update must pull it, never <flavor>-<tag>.
+  #
+  # Secrets, all PEM or the binary .auth files base64-encoded, from
+  # `auroraboot genkey` run once, offline:
+  #   UKI_DB_KEY, UKI_DB_PEM    sign every UKI (Secure Boot db)
+  #   UKI_TPM_PCR_KEY           signs the PCR policy the disk key is sealed to
+  #   UKI_PK_AUTH, UKI_KEK_AUTH, UKI_DB_AUTH
+  #                             public keys systemd-boot enrolls in setup mode
+  # PK.key and KEK.key never come here: they only sign key updates, offline.
+  build-uki:
+    name: Build sway Trusted Boot ISO (full)
+    needs: [build]
+    if: ${{ !cancelled() && needs.build.result == 'success' && vars.TRUSTED_BOOT_RELEASE == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      DESKTOP: sway
+      GPU: full
+      LINE: sway-uki
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # On the runner's RAM disk, readable by the runner user only, and gone
+      # with the runner. Never in the workspace, which artifacts upload from.
+      - name: Write the signing keys
+        shell: bash
+        env:
+          UKI_DB_KEY: ${{ secrets.UKI_DB_KEY }}
+          UKI_DB_PEM: ${{ secrets.UKI_DB_PEM }}
+          UKI_TPM_PCR_KEY: ${{ secrets.UKI_TPM_PCR_KEY }}
+          UKI_PK_AUTH: ${{ secrets.UKI_PK_AUTH }}
+          UKI_KEK_AUTH: ${{ secrets.UKI_KEK_AUTH }}
+          UKI_DB_AUTH: ${{ secrets.UKI_DB_AUTH }}
+        run: |
+          set -euo pipefail
+          umask 077
+          keys=/dev/shm/uki-keys
+          mkdir -p "$keys"
+          for v in UKI_DB_KEY UKI_DB_PEM UKI_TPM_PCR_KEY UKI_PK_AUTH UKI_KEK_AUTH UKI_DB_AUTH; do
+            [ -n "${!v}" ] || { echo "secret $v is not set" >&2; exit 1; }
+          done
+          printf '%s\n' "$UKI_DB_KEY" > "$keys/db.key"
+          printf '%s\n' "$UKI_DB_PEM" > "$keys/db.pem"
+          printf '%s\n' "$UKI_TPM_PCR_KEY" > "$keys/tpm2-pcr-private.pem"
+          base64 -d <<<"$UKI_PK_AUTH" > "$keys/PK.auth"
+          base64 -d <<<"$UKI_KEK_AUTH" > "$keys/KEK.auth"
+          base64 -d <<<"$UKI_DB_AUTH" > "$keys/db.auth"
+          echo "KEYS_DIR=$keys" >> "$GITHUB_ENV"
+
+      - name: Build the Trusted Boot ISO
+        shell: bash
+        run: |
+          set -euo pipefail
+          make DESKTOP="$DESKTOP" GPU="$GPU" FIRMWARE=true VERSION="$RELEASE_TAG" \
+            UKI_FROM="${IMAGE_REPO}:${DESKTOP}-${RELEASE_TAG}" KEYS_DIR="$KEYS_DIR" uki-iso
+          mapfile -t isos < <(find "build/${DESKTOP}-desktop/uki-iso" -maxdepth 1 -type f -name '*-uki.iso')
+          (( ${#isos[@]} == 1 )) || { echo "expected one UKI ISO, found ${#isos[@]}" >&2; exit 1; }
+          mkdir -p dist
+          asset="hadron-desktop-${LINE}-${RELEASE_TAG}-amd64.iso"
+          cp "${isos[0]}" "dist/$asset"
+          (cd dist && sha256sum "$asset" > "$asset.sha256")
+
+      # The same signed UKI as a container image for `kairos-agent upgrade`.
+      # AuroraBoot writes it as a docker-archive without our labels, so it is
+      # wrapped once more to carry the io.kairos.hadron-desktop.* labels that
+      # hadron-update reads before it pulls.
+      - name: Build the UKI upgrade image
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$(mktemp -d)"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$out":/output \
+            -v "$KEYS_DIR":/keys:ro "$(make -s print-aurora-image)" build-uki \
+            --output-dir /output --output-type container --public-keys /keys \
+            --tpm-pcr-private-key /keys/tpm2-pcr-private.pem --sb-key /keys/db.key --sb-cert /keys/db.pem \
+            --sdboot-in-source --boot-branding "Hadron Desktop" "docker:${DESKTOP}-desktop:uki"
+          loaded="$(docker load -i "$out"/*.tar | sed -n 's/^Loaded image: //p' | tail -n1)"
+          [ -n "$loaded" ] || { echo "no image in the UKI upgrade archive" >&2; exit 1; }
+          printf 'FROM %s\nLABEL io.kairos.hadron-desktop.flavor=%s io.kairos.hadron-desktop.version=%s io.kairos.hadron-desktop.gpu=%s io.kairos.hadron-desktop.trusted-boot=true\n' \
+            "$loaded" "$DESKTOP" "$RELEASE_TAG" "$GPU" | docker build -t "${IMAGE_REPO}:${LINE}-${RELEASE_TAG}" -
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.3
+
+      - name: Push the UKI upgrade image
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${IMAGE_REPO}:${LINE}-${RELEASE_TAG}"
+          docker push "$target"
+          digest="$(docker buildx imagetools inspect "$target" --format '{{json .Manifest}}' | jq -r .digest)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "could not resolve the pushed digest of $target" >&2; exit 1; }
+          cosign sign --yes "${IMAGE_REPO}@${digest}"
+
+      - name: Upload the Trusted Boot ISO
+        uses: actions/upload-artifact@v7
+        with:
+          name: uki-${{ env.LINE }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
   build-agent:
     name: Gate and build agent ISO
     # The agent image is built on i3, whose Mesa needs LLVM (llvmpipe). A

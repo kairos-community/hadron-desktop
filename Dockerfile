@@ -4888,8 +4888,8 @@ ARG DESKTOP
 ARG GPU
 ARG FIRMWARE=false
 RUN case "${GPU}" in full|vm) ;; *) echo "GPU must be full or vm, not '${GPU}'" >&2; exit 1 ;; esac && \
-    printf 'FLAVOR=%s\nGPU=%s\nVERSION=%s\nHADRON_VERSION=%s\nIMAGE_REPO=%s\nGITHUB_REPO=%s\n' \
-      "${DESKTOP}" "${GPU}" "${VERSION}" "${HADRON_VERSION}" "${IMAGE_REPO}" kairos-community/hadron-desktop \
+    printf 'FLAVOR=%s\nGPU=%s\nVERSION=%s\nHADRON_VERSION=%s\nIMAGE_REPO=%s\nGITHUB_REPO=%s\nTRUSTED_BOOT=%s\n' \
+      "${DESKTOP}" "${GPU}" "${VERSION}" "${HADRON_VERSION}" "${IMAGE_REPO}" kairos-community/hadron-desktop "${TRUSTED_BOOT}" \
       > /etc/hadron-desktop/release
 # The same identity as OCI labels, so hadron-update can tell a Hadron Desktop
 # image from any other one without pulling it (the registry config blob carries
@@ -4905,7 +4905,9 @@ LABEL io.kairos.hadron-desktop.flavor="${DESKTOP}" \
 # /etc/cos/grub.cfg (copied to COS_STATE at install) before grubmenu.cfg switches
 # to the gfxterm theme, and these 16-colour accents also apply if gfxterm/the
 # theme ever fail to load. Inserted after `loadfont unicode`, before the menu.
-RUN sed -i '/^loadfont unicode/a set color_normal=light-gray/black\nset color_highlight=black/cyan\nset menu_color_normal=cyan/black\nset menu_color_highlight=black/cyan' /etc/cos/grub.cfg
+# A Trusted Boot image has no GRUB: kairos-init writes no /etc/cos/grub.cfg
+# with -t true, and systemd-boot boots the signed UKIs directly.
+RUN [ "${TRUSTED_BOOT}" = true ] || sed -i '/^loadfont unicode/a set color_normal=light-gray/black\nset color_highlight=black/cyan\nset menu_color_normal=cyan/black\nset menu_color_highlight=black/cyan' /etc/cos/grub.cfg
 # Tokyo Night gfxterm theme with a background image. kairos-init's branding stage
 # writes its own /etc/kairos/branding/grubmenu.cfg (bundled.ExtraGrubCfg),
 # clobbering the overlay copy, so re-apply ours AFTER kairos-init: it switches the
