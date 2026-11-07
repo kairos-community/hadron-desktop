@@ -130,9 +130,9 @@ RUN curl --retry 5 --retry-delay 3 --retry-all-errors -fL https://github.com/Khr
     tar -xf sh.tgz && mv SPIRV-Headers-* spirv-headers && \
     tar -xf st.tgz && mv SPIRV-Tools-* spirv-tools && \
     cp -a spirv-headers spirv-tools/external/spirv-headers
-RUN cd spirv-headers && cmake -G Ninja -B build -DCMAKE_INSTALL_PREFIX=/usr && \
+RUN cd spirv-headers && cmake -G Ninja -B build -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib && \
     DESTDIR=/spirv-tools ninja -C build install
-RUN cd spirv-tools && cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+RUN cd spirv-tools && cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
       -DSPIRV_SKIP_TESTS=ON -DBUILD_SHARED_LIBS=ON \
       -DSPIRV-Headers_SOURCE_DIR=/b/spirv-tools/external/spirv-headers && \
     ninja -C build -j$(nproc) && DESTDIR=/spirv-tools ninja -C build install
@@ -183,7 +183,7 @@ RUN curl --retry 5 --retry-delay 3 --retry-all-errors -fL https://github.com/Khr
     tar -xf sh.tgz && mv SPIRV-Headers-* spirv-headers && \
     curl --retry 5 --retry-delay 3 --retry-all-errors -fL https://github.com/KhronosGroup/SPIRV-LLVM-Translator/archive/refs/tags/v${SPIRV_LLVM_TRANSLATOR_VERSION}.tar.gz -o tr.tgz && \
     tar -xf tr.tgz && mv SPIRV-LLVM-Translator-* tr
-RUN cd tr && cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+RUN cd tr && cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
       -DLLVM_DIR=/usr/lib/cmake/llvm -DBUILD_SHARED_LIBS=OFF \
       -DLLVM_EXTERNAL_SPIRV_HEADERS_SOURCE_DIR=/b/spirv-headers && \
     ninja -C build -j$(nproc) && DESTDIR=/translator ninja -C build install
@@ -250,13 +250,16 @@ RUN if [ "$GPU" = "full" ]; then \
     -Dcpp_rtti=false \
     -Dbuild-tests=false
 RUN DESTDIR=/mesa ninja -C buildDir install
-# The megadriver links libLLVM at runtime (llvmpipe in every mode), and
-# radeonsi also links libelf. They come from the LLVM stack and the toolchain
-# and aren't otherwise in the OS image, so bundle them: only the shared
-# libraries, not the LLVM install (libLLVM is ~125MB, the cost of llvmpipe).
+# The megadriver links libLLVM at runtime (llvmpipe in every mode); with
+# GPU=full it also links libelf (radeonsi) and the shared SPIRV-Tools
+# libraries (iris). They come from the LLVM stack and the toolchain and aren't
+# otherwise in the OS image, so bundle them: only the shared libraries, not
+# the LLVM install (libLLVM is ~125MB, the cost of llvmpipe).
 RUN mkdir -p /mesa/usr/lib && \
     cp -a /usr/lib/libLLVM.so* /mesa/usr/lib/ && \
-    if [ "$GPU" = "full" ]; then cp -a /usr/lib/libelf.so* /mesa/usr/lib/ ; fi
+    if [ "$GPU" = "full" ]; then \
+      cp -a /usr/lib/libelf.so* /usr/lib/libSPIRV-Tools*.so* /mesa/usr/lib/ ; \
+    fi
 
 
 FROM toolchain AS xkeyboard-config
@@ -3061,7 +3064,13 @@ FROM toolchain AS iso-codes
 ARG ISO_CODES_VERSION=4.18.0
 RUN mkdir -p /iso-codes/usr/share/iso-codes/json /iso-codes/usr/share/pkgconfig
 WORKDIR /build
-RUN curl --retry-all-errors -fL --retry 5 https://salsa.debian.org/iso-codes-team/iso-codes/-/archive/v${ISO_CODES_VERSION}/iso-codes-v${ISO_CODES_VERSION}.tar.gz -o i.tar.gz && tar -xzf i.tar.gz && \
+# salsa makes the archive on request and can answer 200 with a truncated body,
+# which curl does not retry, so download until the archive reads to the end.
+RUN for i in 1 2 3 4 5; do \
+      curl --retry-all-errors -fL --retry 5 https://salsa.debian.org/iso-codes-team/iso-codes/-/archive/v${ISO_CODES_VERSION}/iso-codes-v${ISO_CODES_VERSION}.tar.gz -o i.tar.gz && \
+        tar -tzf i.tar.gz > /dev/null && break; \
+      [ "$i" = 5 ] && exit 1; sleep 10; \
+    done && tar -xzf i.tar.gz && \
     cp iso-codes-*/data/*.json /iso-codes/usr/share/iso-codes/json/ && \
     printf 'prefix=/usr\ndatarootdir=${prefix}/share\ndatadir=${datarootdir}\ndomains=iso_639-2 iso_639-3 iso_639-5 iso_3166-1 iso_3166-2 iso_3166-3 iso_4217 iso_15924\n\nName: iso-codes\nDescription: ISO country, subdivision, language, currency and script codes and their translations\nVersion: %s\n' "${ISO_CODES_VERSION}" \
       > /iso-codes/usr/share/pkgconfig/iso-codes.pc
