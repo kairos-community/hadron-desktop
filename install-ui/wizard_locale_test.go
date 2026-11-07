@@ -68,7 +68,7 @@ func TestWizardSearchesAndPicksKeyboardAndTimezone(t *testing.T) {
 
 	m = keys(t, m, "enter", "enter")
 	m = clear(t, m, "")
-	m = keys(t, m, "box", "enter", "ada", "enter", "pw", "enter", "enter", "enter")
+	m = keys(t, m, "box", "enter", "ada", "enter", "pw", "enter", "enter", "enter", "enter")
 	if m.step != stepReview {
 		t.Fatalf("step = %v, want stepReview", m.step)
 	}

@@ -289,6 +289,10 @@ func TestWizardHappyPathCollectsEveryField(t *testing.T) {
 		t.Fatalf("step = %v, want stepDisk", m.step)
 	}
 	m = keys(t, m, "down", "enter")
+	if m.step != stepEncrypt {
+		t.Fatalf("step = %v, want stepEncrypt", m.step)
+	}
+	m = keys(t, m, "enter")
 	if m.step != stepReview {
 		t.Fatalf("step = %v, want stepReview", m.step)
 	}
@@ -350,9 +354,13 @@ func TestWizardEscRestoresPreviousValue(t *testing.T) {
 
 func TestWizardEscFromReviewGoesBackToDisk(t *testing.T) {
 	m := atHostname(t, testDisks())
-	m = keys(t, m, "box", "enter", "ada", "enter", "pw", "enter", "enter", "enter")
+	m = keys(t, m, "box", "enter", "ada", "enter", "pw", "enter", "enter", "enter", "enter")
 	if m.step != stepReview {
 		t.Fatalf("step = %v, want stepReview", m.step)
+	}
+	m = keys(t, m, "esc")
+	if m.step != stepEncrypt {
+		t.Errorf("step = %v, want stepEncrypt", m.step)
 	}
 	m = keys(t, m, "esc")
 	if m.step != stepDisk {
@@ -570,7 +578,7 @@ func TestWizardDiskSelectionClampsAtBothEnds(t *testing.T) {
 // disk is erased, so it must name the disk that is about to go.
 func TestWizardReviewShowsTheTarget(t *testing.T) {
 	m := atHostname(t, testDisks())
-	m = keys(t, m, "box", "enter", "ada", "enter", "pw", "enter", "adalovelace", "enter", "enter")
+	m = keys(t, m, "box", "enter", "ada", "enter", "pw", "enter", "adalovelace", "enter", "enter", "enter")
 	view := m.View()
 	for _, want := range []string{"/dev/sda", "box", "ada", "github:adalovelace", "ERASES"} {
 		if !strings.Contains(view, want) {
@@ -599,7 +607,7 @@ func TestWizardReviewShowsTheTarget(t *testing.T) {
 // start an irreversible install.
 func TestWizardReviewOnlyConfirmsOnEnter(t *testing.T) {
 	base := atHostname(t, testDisks())
-	base = keys(t, base, "box", "enter", "ada", "enter", "pw", "enter", "adalovelace", "enter", "enter")
+	base = keys(t, base, "box", "enter", "ada", "enter", "pw", "enter", "adalovelace", "enter", "enter", "enter")
 	if base.step != stepReview {
 		t.Fatalf("step = %v, want stepReview", base.step)
 	}
@@ -636,7 +644,7 @@ func TestRunWizardNonInteractiveWritesConfig(t *testing.T) {
 	t.Setenv("HADRON_HOSTNAME", "box")
 	t.Setenv("HADRON_GITHUB", "adalovelace")
 
-	if err := runWizard(); err != nil {
+	if _, err := runWizard(); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "99_hadron-user.yaml"))
@@ -667,7 +675,7 @@ func TestRunWizardSkipsWhenConfigPresent(t *testing.T) {
 	// runWizard would try to open a terminal here rather than return nil.
 	t.Setenv("HADRON_INSTALL_NONINTERACTIVE", "")
 
-	if err := runWizard(); err != nil {
+	if _, err := runWizard(); err != nil {
 		t.Fatalf("seeded /oem should install unattended, got: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "99_hadron-user.yaml")); !os.IsNotExist(err) {
@@ -681,7 +689,7 @@ func TestRunWizardReportsMissingEnv(t *testing.T) {
 	t.Setenv("HADRON_USER", "")
 	t.Setenv("HADRON_PASS", "")
 	t.Setenv("HADRON_DISK", "")
-	err := runWizard()
+	_, err := runWizard()
 	if err == nil {
 		t.Fatal("expected an error when the non-interactive env is incomplete")
 	}

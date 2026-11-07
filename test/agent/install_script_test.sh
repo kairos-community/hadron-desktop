@@ -155,6 +155,11 @@ if [ -f "$cfg" ]; then
   grep -Eq '^[[:space:]]*enabled:[[:space:]]*true' "$cfg" && ok "config: hadron_agent.enabled true" || err "config: missing hadron_agent enabled:true"
   grep -Eq 'name:[[:space:]]*"?agent"?' "$cfg" && ok "config: locked agent user present" || err "config: agent user missing"
   grep -Eq 'lock_passwd:[[:space:]]*true' "$cfg" && ok "config: agent password locked" || err "config: agent not locked"
+  # Disk encryption is a desktop installer choice; the appliance is exempt
+  # (it installs through `hadron-install-ui --progress-only`, no wizard).
+  grep -Eq 'encrypted_partitions|hadron-desktop/encryption' "$cfg" \
+    && err "config: the agent appliance install asks for disk encryption" \
+    || ok "config: no disk encryption on the agent appliance"
   # Never grant the human agent a privileged group.
   if grep -Eq '(^|[^[:alnum:]_])(admin|sudo|docker)([^[:alnum:]_]|$)' "$cfg"; then
     err "config: privileged group leaked into agent user"

@@ -51,7 +51,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the last r.height lines) — which silently ate the red "install halted"
 		// banner, the one thing the user must see. See TestViewsFitTerminalHeight.
 		m.height = msg.Height
-		m.vp = viewport.New(msg.Width, msg.Height-2)
+		// A terminal that reports no size (a pty under script(1)) gives
+		// Height 0; a negative viewport height panics in GotoBottom.
+		m.vp = viewport.New(msg.Width, max(msg.Height-2, 1))
 		m.vp.SetContent(m.logs.text())
 		m.ready = true
 		return m, nil
@@ -71,6 +73,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case doneMsg:
 		if msg.err != nil {
 			m.failed = true
+			// kairos-agent's own output explains its failures, but not one
+			// of the installer's (the disk check): log the error too.
+			m.logs.add("hadron-install-ui: " + msg.err.Error())
 			m.showLogs = true // a failure without logs is useless
 			if m.ready {
 				m.vp.SetContent(m.logs.text())
