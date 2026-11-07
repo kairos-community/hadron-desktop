@@ -1,0 +1,11 @@
+#cloud-config
+# System extensions (hadron-ext) from the hadron-layers catalog carry no
+# signature systemd can verify, so systemd-sysext refuses them by default.
+# With this set, `kairos-agent install` writes
+# /oem/10_extensions_ignore_signatures.yaml, which relaxes the image policy of
+# systemd-sysext. The catalog pins every image by digest, only the admin
+# group may install one, and hadron-updated checks it against /usr first.
+# See docs/superpowers/specs/2026-11-07-extensions-design.md, "Signatures".
+# Not on Trusted Boot: the Dockerfile kairos stage removes this file there.
+extensions:
+  ignore_signatures: true

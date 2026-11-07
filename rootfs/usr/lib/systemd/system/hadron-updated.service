@@ -12,7 +12,9 @@ RefuseManualStop=yes
 Type=dbus
 BusName=io.kairos.HadronUpdate1
 ExecStart=/usr/bin/hadron-update daemon
-# /var/lib/hadron-update holds the pin.
+# /var/lib/hadron-update holds the pin, and where each system extension came
+# from (extensions/). The extensions themselves are kairos-agent's, in
+# /var/lib/kairos/extensions.
 StateDirectory=hadron-update
 # /run/hadron-update holds the reboot-pending marker. It must outlive the
 # idle exit: systemd removes a RuntimeDirectory when the unit stops, and a

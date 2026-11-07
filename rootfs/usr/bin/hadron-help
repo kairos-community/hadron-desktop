@@ -26,6 +26,11 @@ software() {
         "distrobox create / enter" "a mutable Linux to tinker in" \
         "hadron-update" "check for a new Hadron Desktop release" \
         "hadron-update upgrade" "install it (applies on the next boot)"
+    # System extensions; the agent image has none (Dockerfile.agent).
+    command -v hadron-ext >/dev/null 2>&1 && printf 'Software\t%s\t%s\n' \
+        "hadron-ext browse" "host software (VPN, firmware) from the catalogs" \
+        "hadron-ext install <name>" "add it to /usr, checked first (admin only)"
+    return 0
 }
 
 rows() { { grep -v '^#' "$sheet"; software; }; }

@@ -1,14 +1,15 @@
 #!/bin/sh
 # The Hadron menu, on Super+Escape in every variant: one place to reach the
 # apps, the first-run app picker, Wi-Fi, Bluetooth, audio, screenshots,
-# emoji, the night light, clipboard history, updates, the shortcut sheet and
-# the power actions. The picker is hadron-pick (fuzzel on Wayland, dmenu on
+# emoji, the night light, clipboard history, updates, system extensions, the
+# shortcut sheet and the power actions. The picker is hadron-pick (fuzzel on Wayland, dmenu on
 # i3). Each entry opens what the variant already uses for it: the hadron-*
 # menus on sway and i3, Noctalia's panels on niri, COSMIC Settings and
 # cosmic-osd on COSMIC. Emoji opens hadron-emoji on every variant.
 #
-# Updates go through hadron-update in a terminal, as the update icon does:
-# the update service and polkit decide who may install (the admin group).
+# Updates and system extensions go through hadron-update in a terminal, as
+# the update icon does: the update service and polkit decide who may install
+# (the admin group).
 
 # DESKTOP_NAME (Sway, i3, niri, COSMIC) and TERMINAL_EXEC, the terminal to
 # run a command in, split on spaces.
@@ -90,6 +91,32 @@ Restart into the previous system"
     esac
 }
 
+# extensions: the catalogs' system extensions, ✓ on the installed ones.
+# Picking one installs or removes it in a terminal, where hadron-ext shows
+# what it is and asks first. The tray's "Extensions…" opens this entry.
+extensions() {
+    pause='printf "\nPress Enter to close."; read -r _'
+    # Without the service or the network, show why in a terminal.
+    list=$(hadron-ext browse --menu 2>/dev/null) || { term "hadron-ext browse; $pause"; exit 0; }
+    [ -n "$list" ] || { term "hadron-ext browse; $pause"; exit 0; }
+    n=$(printf '%s\n' "$list" | wc -l)
+    [ "$n" -le 12 ] || n=12
+    sel=$(printf '%s\n' "$list" | pick Extensions "$n") || exit 0
+    case "$sel" in
+        "Install from a URL…") term "hadron-ext install -; $pause"; exit 0 ;;
+    esac
+    # "✓ name — description" or "  name — description". The name is checked
+    # before it reaches the shell command: the catalog could hold anything.
+    name=$(printf '%s\n' "$sel" | sed 's/^✓//' | awk '{ print $1 }')
+    case "$name" in
+        ''|-*|*[!A-Za-z0-9._+-]*) exit 0 ;;
+    esac
+    case "$sel" in
+        ✓*) term "hadron-ext remove $name; $pause" ;;
+        *)  term "hadron-ext install $name; $pause" ;;
+    esac
+}
+
 help_sheet() {
     case "$DESKTOP_NAME" in
         Sway)   exec foot --app-id=floatterm -T "Keyboard shortcuts" hadron-help ;;
@@ -120,7 +147,8 @@ power() {
 # the welcome notification runs when clicked).
 # Each entry is "Label<TAB>icon"; hadron-pick shows the icon in fuzzel only.
 # "Install apps" reopens the first-run app picker. The agent image ships
-# neither it nor the clipboard history (Dockerfile.agent removes both).
+# neither it, the clipboard history nor hadron-ext (Dockerfile.agent removes
+# them).
 tab=$(printf '\t')
 entries="Apps${tab}󰀻"
 command -v hadron-first-run-apps >/dev/null 2>&1 && entries="$entries
@@ -137,7 +165,10 @@ Night light${tab}󰖔"
 command -v hadron-clipboard >/dev/null 2>&1 && entries="$entries
 Clipboard${tab}󰅍"
 entries="$entries
-Update${tab}󰚰
+Update${tab}󰚰"
+command -v hadron-ext >/dev/null 2>&1 && entries="$entries
+Extensions${tab}󰏓"
+entries="$entries
 Help${tab}󰌌
 Power${tab}󰐥"
 n=$(printf '%s\n' "$entries" | wc -l)
@@ -157,6 +188,7 @@ case "$sel" in
     "Night light") exec hadron-night-light toggle ;;
     Clipboard) exec hadron-clipboard ;;
     Update)    update ;;
+    Extensions) extensions ;;
     Help)      help_sheet ;;
     Power)     power ;;
 esac

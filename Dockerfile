@@ -4835,6 +4835,9 @@ RUN chmod 1777 /tmp; \
 COPY --from=install-ui-build /out/hadron-install-ui /usr/bin/hadron-install-ui
 # Update checker + upgrade CLI. /usr/bin for the same /usr/local reason.
 COPY --from=update-build /out/hadron-update /usr/bin/hadron-update
+# hadron-ext is the same binary: run under that name it is `hadron-update ext`
+# (system extensions, see update/ext.go).
+RUN ln -sf hadron-update /usr/bin/hadron-ext
 
 
 # ===========================================================================
@@ -4858,6 +4861,12 @@ ARG FIPS=no-fips
 # /etc/kairos/branding/splash into the initramfs, so writing it here, before
 # kairos-init builds the initramfs, gives both halves of the boot the same one.
 RUN mkdir -p /etc/kairos/branding/splash && printf '%s\n' "${VERSION}" > /etc/kairos/branding/splash/version
+# System extensions from the catalogs are unsigned; the normal install merges
+# them anyway (rootfs/etc/kairos/90_hadron_extensions.yaml and
+# rootfs/system/oem/93_hadron_extensions.yaml). A Trusted Boot image keeps
+# signatures on: it gets neither file.
+RUN [ "${TRUSTED_BOOT}" = false ] || \
+    rm -f /etc/kairos/90_hadron_extensions.yaml /system/oem/93_hadron_extensions.yaml
 RUN --mount=type=bind,from=kairos-init,src=/kairos-init,dst=/kairos-init \
     fips_flag=""; [ "$FIPS" = "fips" ] && fips_flag="--fips"; \
     /kairos-init -l debug -s install -m "${MODEL}" -t "${TRUSTED_BOOT}" --version "${VERSION}" $fips_flag && \

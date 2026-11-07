@@ -26,6 +26,9 @@ const (
 
 	actionApply  = "io.kairos.hadron-update.apply"
 	actionReboot = "io.kairos.hadron-update.reboot"
+	// actionExtensions covers installing, enabling, disabling and removing
+	// system extensions: each one changes what runs as root.
+	actionExtensions = "io.kairos.hadron-update.extensions"
 )
 
 // busIntrospection describes the interface for busctl, d-feet and friends.
@@ -47,6 +50,23 @@ const busIntrospection = introspect.IntrospectDeclarationString + `<node>
     <method name="Cancel"/>
     <method name="Reboot"/>
     <method name="RebootPrevious"/>
+    <method name="Extensions"><arg name="extensions" type="aa{sv}" direction="out"/></method>
+    <method name="Catalog"><arg name="entries" type="aa{sv}" direction="out"/></method>
+    <method name="ExtensionFiles">
+      <arg name="name" type="s" direction="in"/>
+      <arg name="files" type="as" direction="out"/>
+    </method>
+    <method name="InstallExtension">
+      <arg name="ref" type="s" direction="in"/>
+      <arg name="version" type="s" direction="in"/>
+      <arg name="force" type="b" direction="in"/>
+    </method>
+    <method name="SetExtensionEnabled">
+      <arg name="name" type="s" direction="in"/>
+      <arg name="on" type="b" direction="in"/>
+      <arg name="force" type="b" direction="in"/>
+    </method>
+    <method name="RemoveExtension"><arg name="name" type="s" direction="in"/></method>
     <signal name="StateChanged"><arg name="status" type="a{sv}"/></signal>
     <signal name="Progress"><arg name="line" type="s"/></signal>
   </interface>` + introspect.IntrospectDataString + `</node>`
@@ -150,7 +170,7 @@ func busError(err error) *dbus.Error {
 		name = "Rebooting"
 	case errors.Is(err, ErrAgentImage), errors.Is(err, ErrNotHadron), errors.Is(err, ErrNotRelease),
 		errors.Is(err, ErrNeedsCredentials), errors.Is(err, ErrWrongPlatform),
-		errors.Is(err, errUnmanaged):
+		errors.Is(err, errUnmanaged), errors.Is(err, errExtNeedsAdvanced):
 		name = "Refused"
 	default:
 		name = "Failed"
@@ -159,10 +179,10 @@ func busError(err error) *dbus.Error {
 }
 
 var errNotAuthorized = dbus.NewError(busInterface+".Error.NotAuthorized",
-	[]any{"not authorized: only members of the admin group may install updates or reboot"})
+	[]any{"not authorized: only members of the admin group may install updates or extensions, or reboot"})
 
 var errSandboxed = dbus.NewError(busInterface+".Error.NotAuthorized",
-	[]any{"not authorized: applications in a Flatpak sandbox may not install updates or reboot"})
+	[]any{"not authorized: applications in a Flatpak sandbox may not install updates or extensions, or reboot"})
 
 // procRoot is where the caller's process is looked up, and selfFdinfo
 // where this process's own fds are described. Variables so tests can point
@@ -329,13 +349,15 @@ func sandboxed(c callerCreds) (bool, error) {
 
 func statusDict(s Status) map[string]dbus.Variant {
 	return map[string]dbus.Variant{
-		"state":     dbus.MakeVariant(string(s.State)),
-		"installed": dbus.MakeVariant(s.Installed),
-		"latest":    dbus.MakeVariant(s.Latest),
-		"pin":       dbus.MakeVariant(s.Pin),
-		"detail":    dbus.MakeVariant(s.Detail),
-		"advanced":  dbus.MakeVariant(s.Advanced),
-		"pending":   dbus.MakeVariant(s.Pending),
+		"state":      dbus.MakeVariant(string(s.State)),
+		"installed":  dbus.MakeVariant(s.Installed),
+		"latest":     dbus.MakeVariant(s.Latest),
+		"pin":        dbus.MakeVariant(s.Pin),
+		"detail":     dbus.MakeVariant(s.Detail),
+		"advanced":   dbus.MakeVariant(s.Advanced),
+		"pending":    dbus.MakeVariant(s.Pending),
+		"ext_result": dbus.MakeVariant(s.ExtResult),
+		"ext_detail": dbus.MakeVariant(s.ExtDetail),
 	}
 }
 

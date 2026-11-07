@@ -136,6 +136,7 @@ type trayHarness struct {
 	mu       sync.Mutex
 	notes    []string
 	launches [][]string
+	menus    []string
 }
 
 func (h *trayHarness) notified() []string {
@@ -166,6 +167,12 @@ func startTray(t *testing.T, dial func() (daemonClient, error), first, every tim
 	h.app.launch = func(args ...string) error {
 		h.mu.Lock()
 		h.launches = append(h.launches, args)
+		h.mu.Unlock()
+		return nil
+	}
+	h.app.openMenu = func(entry string) error {
+		h.mu.Lock()
+		h.menus = append(h.menus, entry)
 		h.mu.Unlock()
 		return nil
 	}
@@ -409,6 +416,30 @@ func TestTrayClicks(t *testing.T) {
 	}
 	if f.count("Reboot") != 1 || len(h.notified()) != 1 || !strings.Contains(h.notified()[0], "admin group") {
 		t.Fatalf("reboot calls %d, notes %q", f.count("Reboot"), h.notified())
+	}
+}
+
+// TestTrayExtensionsOpensTheHadronMenuEntry: "Extensions…" opens the same
+// list as the Hadron menu, even while the service is unreachable.
+func TestTrayExtensionsOpensTheHadronMenuEntry(t *testing.T) {
+	h := startTray(t, func() (daemonClient, error) { return nil, errors.New("down") }, time.Hour, time.Hour)
+	h.ui.waitView(t, "error", func(v trayView) bool { return v.Icon == "error" })
+	h.app.clicks <- "extensions"
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		h.mu.Lock()
+		got := strings.Join(h.menus, ",")
+		h.mu.Unlock()
+		if got == "Extensions" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("menus opened %q", got)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if iconFor(StateExtension) != "busy" || !busyState(StateExtension) {
+		t.Fatal("an extension job is not shown as busy")
 	}
 }
 

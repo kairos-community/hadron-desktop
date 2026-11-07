@@ -1,0 +1,39 @@
+# The same systemd-sysext policy as /oem/10_extensions_ignore_signatures.yaml,
+# for a system installed before /etc/kairos/90_hadron_extensions.yaml existed:
+# kairos-agent writes that /oem file only at install, so an upgraded system
+# has none, and an unsigned extension from the catalog would be enabled and
+# then silently not merged. The drop-ins are the ones kairos-agent writes
+# (agent/internal/agent/hooks/extensions.go, IgnoreSignaturesCloudConfig).
+# Not on Trusted Boot: the Dockerfile kairos stage removes this file there,
+# and the check below skips a UKI boot all the same.
+name: "Hadron extensions: merge unsigned system extensions"
+stages:
+  boot:
+    - if: '[ ! -e /run/cos/uki_boot_mode ] && [ ! -e /run/cos/live_mode ] && [ ! -e /oem/10_extensions_ignore_signatures.yaml ]'
+      name: "relax the systemd-sysext image policy"
+      files:
+        - path: /etc/systemd/system/systemd-sysext.service.d/zz-kairos-ignore-signatures.conf
+          permissions: 0644
+          owner: 0
+          group: 0
+          content: |
+            # Written by /system/oem/93_hadron_extensions.yaml.
+            [Service]
+            ExecStart=
+            ExecStart=systemd-sysext refresh --image-policy="root=verity+signed+encrypted+unprotected+absent:usr=verity+signed+encrypted+unprotected+absent"
+            ExecReload=
+            ExecReload=systemd-sysext refresh --image-policy="root=verity+signed+encrypted+unprotected+absent:usr=verity+signed+encrypted+unprotected+absent"
+        - path: /etc/systemd/system/systemd-confext.service.d/zz-kairos-ignore-signatures.conf
+          permissions: 0644
+          owner: 0
+          group: 0
+          content: |
+            # Written by /system/oem/93_hadron_extensions.yaml.
+            [Service]
+            ExecStart=
+            ExecStart=systemd-confext refresh --image-policy="root=verity+signed+encrypted+unprotected+absent:usr=verity+signed+encrypted+unprotected+absent"
+            ExecReload=
+            ExecReload=systemd-confext refresh --image-policy="root=verity+signed+encrypted+unprotected+absent:usr=verity+signed+encrypted+unprotected+absent"
+      commands:
+        - systemctl daemon-reload
+        - systemctl restart systemd-sysext systemd-confext || true

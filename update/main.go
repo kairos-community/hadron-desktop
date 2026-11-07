@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -53,6 +54,9 @@ Commands:
       --no-icon          the same, without the icon
   notify            the same as tray --no-icon
       --once             check once and exit
+  ext [command]     system extensions: list, browse, info, install, enable,
+                    disable, remove; see "hadron-update ext help". Also
+                    installed as hadron-ext
   daemon            run the root update service on the system bus; started
                     by D-Bus activation, not by hand
 `
@@ -67,6 +71,10 @@ func kairosAgent() string {
 }
 
 func main() {
+	// hadron-ext is a link to this binary.
+	if filepath.Base(os.Args[0]) == "hadron-ext" {
+		os.Exit(cmdExt(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
@@ -91,6 +99,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdTray(args, stderr)
 	case "notify":
 		return cmdNotify(args, stderr)
+	case "ext":
+		return cmdExt(args, stdin, stdout, stderr)
 	case "daemon":
 		return cmdDaemon(args, stderr)
 	case "help", "-h", "--help":

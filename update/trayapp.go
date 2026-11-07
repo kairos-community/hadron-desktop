@@ -51,6 +51,9 @@ type trayApp struct {
 	// running `hadron-update <args>`.
 	notify func(summary, body string) error
 	launch func(args ...string) error
+	// openMenu opens an entry of hadron-menu, the same one Super+Escape
+	// shows: "Extensions" is one list on every variant.
+	openMenu func(entry string) error
 	// noIcon makes the notification point at the CLI: there is no menu.
 	noIcon bool
 
@@ -72,6 +75,7 @@ func newTrayApp(rel Release, ui trayUI, dial func() (daemonClient, error), logOu
 		firstCheck: notifyDelay, interval: notifyInterval, retry: trayRetry,
 	}
 	a.launch = func(args ...string) error { return openTerminal(args, logOut) }
+	a.openMenu = openHadronMenu
 	return a
 }
 
@@ -252,6 +256,8 @@ func (a *trayApp) click(c daemonClient, id string) {
 		err = a.launch("switch", "--gpu", strings.TrimPrefix(id, "gpu/"), "--pause-on-error")
 	case id == "advanced":
 		err = a.launch("upgrade", "--pause-on-error", "--image", "-")
+	case id == "extensions":
+		err = a.openMenu("Extensions")
 	case c == nil && (id == "cancel" || id == "restart" || id == "rollback"):
 		err = errServiceUnavailable
 	case id == "cancel":
@@ -313,7 +319,7 @@ func announce(c daemonClient, rel Release, st Status, noIcon bool, notify func(s
 
 // busyState reports whether the service is running a job.
 func busyState(s State) bool {
-	return s == StateChecking || s == StateInspecting || s == StateApplying
+	return s == StateChecking || s == StateInspecting || s == StateApplying || s == StateExtension
 }
 
 // defaultSessionFile names the variant's session settings, among them
@@ -345,6 +351,16 @@ func terminalArgv(self string, args []string, logOut io.Writer) ([]string, error
 		}
 	}
 	return nil, fmt.Errorf("no terminal to open: %s sets no TERMINAL_EXEC, and neither foot nor xterm is installed", sessionFile())
+}
+
+// openHadronMenu runs `hadron-menu ENTRY` and does not wait for it.
+func openHadronMenu(entry string) error {
+	cmd := exec.Command("hadron-menu", entry)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go cmd.Wait()
+	return nil
 }
 
 // openTerminal starts the CLI in a terminal and does not wait for it.

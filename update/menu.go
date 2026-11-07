@@ -40,6 +40,8 @@ func statusLine(st Status) string {
 		return "Checking the image…"
 	case StateApplying:
 		return "Installing the update…"
+	case StateExtension:
+		return "Changing system extensions…"
 	case StateRebootPending:
 		// After a failed or interrupted install the slots may already be
 		// swapped: no retry before a restart.
@@ -126,6 +128,9 @@ func BuildMenu(st Status, releases []Latest, flavor, line string) []MenuItem {
 	if st.State == StateRebootPending {
 		menu = append(menu, MenuItem{ID: "restart", Label: "Restart now", Enabled: true})
 	}
+	// The Hadron menu's Extensions list. Always clickable: it only reads,
+	// and the service refuses a change while a job runs.
+	menu = append(menu, MenuItem{ID: "extensions", Label: "Extensions…", Enabled: true})
 	// Hidden, not greyed, when it cannot be used: while a job runs, and while
 	// an install waits for its reboot, when the passive slot holds the system
 	// the user runs now and "previous" would mean the wrong one.

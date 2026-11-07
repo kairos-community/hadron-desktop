@@ -219,3 +219,10 @@ RUN rm -f /usr/bin/hadron-first-run-apps && \
 # hadron-clipboard is gone.
 RUN rm -f /usr/bin/hadron-clipboard /usr/bin/clipnotify && \
     ! grep -rhsv '^[[:space:]]*#' /etc/i3 /etc/xdg/autostart | grep -q 'hadron-clipboard'
+# No system extensions. An appliance must not take root code from a menu: the
+# hadron-ext command goes (hadron-menu and hadron-help hide it then), and so
+# do its catalog list and the setting that merges unsigned extensions. Their
+# polkit action went with the policy file above, and `hadron-update ext`
+# refuses on the agent flavor.
+RUN rm -f /usr/bin/hadron-ext /etc/hadron-desktop/extensions.conf /etc/kairos/90_hadron_extensions.yaml /system/oem/93_hadron_extensions.yaml && \
+    ! test -e /usr/bin/hadron-ext
