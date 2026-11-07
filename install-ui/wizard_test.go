@@ -700,3 +700,15 @@ func TestOemDirDefaultsToOem(t *testing.T) {
 		t.Errorf("oemDir() = %q, want /tmp/fake-oem", got)
 	}
 }
+
+func TestConfigOutFollowsOemDirUnlessSet(t *testing.T) {
+	t.Setenv("HADRON_OEM_DIR", "/tmp/fake-oem")
+	t.Setenv("HADRON_CONFIG_OUT", "")
+	if got := configOut(); got != "/tmp/fake-oem/99_hadron-user.yaml" {
+		t.Errorf("configOut() = %q, want /tmp/fake-oem/99_hadron-user.yaml", got)
+	}
+	t.Setenv("HADRON_CONFIG_OUT", "/etc/kairos/99_hadron-user.yaml")
+	if got := configOut(); got != "/etc/kairos/99_hadron-user.yaml" {
+		t.Errorf("configOut() = %q, want /etc/kairos/99_hadron-user.yaml", got)
+	}
+}

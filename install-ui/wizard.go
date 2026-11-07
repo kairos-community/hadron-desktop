@@ -20,6 +20,19 @@ func oemDir() string {
 	return "/oem"
 }
 
+// configOut is the file the wizard writes. It is normally in oemDir, but a
+// Trusted Boot (UKI) install medium boots with a read-only root: there /oem is
+// a read-only directory and only /etc, /var, /srv and /home are writable.
+// 90_desktop_installer.yaml sets HADRON_CONFIG_OUT to a file in /etc/kairos,
+// which kairos-agent also reads its config from (agent GetUserConfigDirs).
+// oemDir is still the directory scanned for a seeded config.
+func configOut() string {
+	if p := os.Getenv("HADRON_CONFIG_OUT"); p != "" {
+		return p
+	}
+	return oemDir() + "/99_hadron-user.yaml"
+}
+
 // posixUsername is the conservative intersection of what useradd accepts and
 // what is safe to interpolate: lowercase start (letter or underscore), then
 // letters, digits, dash or underscore, 32 characters at most.
@@ -545,7 +558,7 @@ func prompt(s wizardStep) string {
 // `kairos-agent install` to merge. It is a no-op when a config is already present,
 // preserving the shell installer's unattended behaviour for seeded installs.
 func runWizard() error {
-	out := oemDir() + "/99_hadron-user.yaml"
+	out := configOut()
 
 	present, err := ConfigPresent(oemDir(), out)
 	if err != nil {

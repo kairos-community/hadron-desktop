@@ -24,3 +24,25 @@ stages:
             ExecStart=/usr/bin/hadron-install-ui
       commands:
         - systemctl daemon-reload
+    # A Trusted Boot (UKI) install medium has no install-mode entry to pick:
+    # immucore writes /run/cos/install_mode_interactive on every UKI medium
+    # boot, and kairos-init's 52_installer.yaml then starts
+    # kairos-interactive.service, the stock Kairos installer, not
+    # kairos-installer.service. Point that one at the Hadron installer too.
+    # The UKI medium's root is read-only apart from /etc, /var, /srv and /home,
+    # so /oem cannot take the wizard's answers: HADRON_CONFIG_OUT puts them in
+    # /etc/kairos, one of the directories kairos-agent reads its config from.
+    - if: '[ -f /run/cos/uki_install_mode ] && [ -f /run/cos/install_mode_interactive ]'
+      name: "point the UKI interactive installer at the Hadron desktop installer"
+      files:
+        - path: /etc/systemd/system/kairos-interactive.service.d/10-desktop.conf
+          permissions: 0644
+          owner: 0
+          group: 0
+          content: |
+            [Service]
+            Environment=HADRON_CONFIG_OUT=/etc/kairos/99_hadron-user.yaml
+            ExecStart=
+            ExecStart=/usr/bin/hadron-install-ui
+      commands:
+        - systemctl daemon-reload
