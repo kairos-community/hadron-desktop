@@ -15,7 +15,7 @@ The baseline:
 
 | Feature | How the variants provide it today |
 |---|---|
-| Boot splash and branded login | `kairos-splash`; ly, or cosmic-greeter for COSMIC. `make check-boot-ux` asserts the subtitle per variant |
+| Boot splash and branded login | `kairos-splash`; ly, or cosmic-greeter for COSMIC. `make check-boot-ux` asserts the subtitle per variant. In the initramfs the splash is also the password agent that asks for the disk passphrase (`rootfs/usr/lib/dracut/modules.d/51hadron-askpass/`, `splash/README.md`) |
 | Session identity | `/etc/hadron-desktop/session`, `/etc/issue`, `/etc/motd` in `rootfs-<variant>/`; `/etc/hadron-desktop/release` written in the Dockerfile `kairos` stage |
 | Notifications server | mako (sway), dunst (i3), cosmic-notifications, Noctalia |
 | Update tray icon (hadron-update) | `hadron-update tray` at session start, talking to the root `hadron-updated` daemon over D-Bus; see `docs/superpowers/specs/2026-11-05-tray-updater-design.md`. Not on agent, which keeps `hadron-update upgrade` through sudo |

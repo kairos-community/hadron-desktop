@@ -89,8 +89,9 @@ refused there.
    /oem/99_hadron-user.yaml`, which reads the same config directories and
    returns. An install without encryption still runs `kairos-agent install`.
 6. At every boot, `hadron-unlock` in the initramfs (#60) sees the
-   `kcrypt:passphrase` subsystem, stops the splash, asks for the passphrase on
-   the console, and opens the container before immucore. kcrypt (#6022) would
+   `kcrypt:passphrase` subsystem, asks for the passphrase (in the boot
+   splash, or on the console without a framebuffer), and opens the container
+   before immucore. kcrypt (#6022) would
    ask the same way if the hook were not there, because `kcrypt.method:
    passphrase` is in `/oem/90_custom.yaml`.
 

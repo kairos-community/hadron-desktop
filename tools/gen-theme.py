@@ -155,6 +155,11 @@ RULES = {
         (r"^#define C_SHADOW\s+0x{hex}$", "border"),
         (r"^#define C_DIM\s+0x{hex}$", "muted"),
         (r"^#define C_TEXT\s+0x{hex}$", "subtext"),
+        # The disk passphrase panel.
+        (r"^#define C_PANEL\s+0x{hex}$", "surface"),
+        (r"^#define C_FIELD\s+0x{hex}$", "overlay"),
+        (r"^#define C_LABEL\s+0x{hex}$", "dim"),
+        (r"^#define C_ERROR\s+0x{hex}$", "error"),
     ]),
     # st: the sed that sets its default colours (the rest of the Dockerfile
     # is full of digests, so it is not strict).

@@ -87,13 +87,13 @@ initramfs after `COPY rootfs/ /`, so it is in every variant (sway, i3,
 cosmic, niri) and in the agent image, which inherits i3's initramfs (the agent
 installer never encrypts, so there it finds nothing to do).
 
-- A drop-in for `systemd-ask-password-console.service`:
-  `Conflicts=kairos-splash.service` and `After=kairos-splash.service`. The
-  console agent starts only when something asks for a password, so a boot
-  without a question keeps its splash. When a question is asked, systemd stops
-  the splash first (it puts the console back in text mode on exit), then the
-  agent asks on tty1 and on ttyS0. This also makes kcrypt's own prompt
-  visible, the Trusted Boot fallback included.
+- Who answers is the `51hadron-askpass` module's job (it replaced this
+  module's first drop-in, `Conflicts=kairos-splash.service`, which stopped
+  the splash for every question). With a framebuffer, `kairos-splash` is the
+  password agent and draws the prompt; the console agent's `ExecStartPre=`
+  gate waits while it does. Without one, the gate stops the splash and the
+  console agent asks on tty1 and on ttyS0. Both serve kcrypt's own prompt
+  too, the Trusted Boot fallback included. See `splash/README.md`.
 - `hadron-unlock.service`: a oneshot in `initrd.target.wants`, ordered
   `After=systemd-udev-settle.service` and `Before=immucore.service`. It skips
   recovery, the state reset and live media, with the same command line tests

@@ -44,6 +44,11 @@ jobs:
       - name: Configs match the Hadron palette
         run: python3 tools/gen-theme.py --check
 
+      # The splash's password agent: ask-file parsing, the panel title, the
+      # retry rule, and the reply on a real socket.
+      - name: Boot splash password agent
+        run: make -C splash test
+
       # The image build draws the wallpapers; a non-deterministic generator
       # would make every build ship different bytes. The committed GRUB
       # background must still be what the palette draws.

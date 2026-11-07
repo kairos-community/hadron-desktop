@@ -42,15 +42,19 @@ FROM ghcr.io/kairos-io/hadron-toolchain:${HADRON_VERSION} AS toolchain
 # kairos-splash.service runs it before the login screen). It draws straight
 # into the framebuffer, falling back to a text animation without one.
 #
-# The smoke tests run the whole program twice: the non-tty fallback, and one
-# rendered frame, which must be a PPM of exactly the requested size.
+# `make test` checks the password agent protocol (agent.c). The smoke tests
+# run the whole program three times: the non-tty fallback, one rendered
+# frame and one with the passphrase panel, each a PPM of exactly the
+# requested size.
 # ---------------------------------------------------------------------------
 FROM toolchain AS hadron-splash
 COPY splash/ /build/splash/
-RUN cd /build/splash && make clean && make && \
+RUN cd /build/splash && make clean && make && make test && \
     ./hadron-splash | grep -q HADRON && \
     ./hadron-splash --render=/tmp/frame.ppm --size=640x400 --at=2 && \
-    [ "$(stat -c %s /tmp/frame.ppm)" -eq $((15 + 640 * 400 * 3)) ]
+    [ "$(stat -c %s /tmp/frame.ppm)" -eq $((15 + 640 * 400 * 3)) ] && \
+    ./hadron-splash --render=/tmp/prompt.ppm --size=640x400 --at=2 --prompt=retry && \
+    [ "$(stat -c %s /tmp/prompt.ppm)" -eq $((15 + 640 * 400 * 3)) ]
 
 
 FROM toolchain AS wayland

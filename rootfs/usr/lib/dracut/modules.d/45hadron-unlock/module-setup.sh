@@ -25,9 +25,8 @@ install() {
     mkdir -p "${initdir}/${systemdsystemunitdir}/initrd.target.wants"
     ln_r "${systemdsystemunitdir}/hadron-unlock.service" "${systemdsystemunitdir}/initrd.target.wants/hadron-unlock.service"
 
+    # Who answers the question (the splash or the console agent) is
+    # 51hadron-askpass's job.
     inst_multiple -o "${systemdsystemunitdir}/systemd-ask-password-console.path" \
         "${systemdsystemunitdir}/systemd-ask-password-console.service"
-    mkdir -p "${initdir}/${systemdsystemunitdir}/systemd-ask-password-console.service.d"
-    inst_simple "${moddir}/ask-password-console-splash.conf" \
-        "${systemdsystemunitdir}/systemd-ask-password-console.service.d/10-hadron-splash.conf"
 }

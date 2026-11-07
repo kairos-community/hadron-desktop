@@ -52,6 +52,8 @@ func RenderCloudConfig(c Choice, hash string) string {
 	b.WriteString("install:\n")
 	fmt.Fprintf(&b, "  device: %q\n", c.Disk)
 	b.WriteString("  auto: true\n")
+	// Before the encryption block: that one opens the top-level kcrypt: key.
+	writeInitramfsKeymap(&b, c)
 	if c.Encrypt {
 		// The installer deletes the passphrase file and checks the disk
 		// before it reboots; a kairos-agent reboot would come first.
@@ -174,6 +176,27 @@ func writeLocaleStage(b *strings.Builder, c Choice) {
 		fmt.Fprintf(b, "        - %q\n",
 			"touch /etc/vconsole.conf && sed -i '/^KEYMAP=/d' /etc/vconsole.conf && echo 'KEYMAP="+km+"' >> /etc/vconsole.conf")
 	}
+}
+
+// writeInitramfsKeymap puts the console keymap on the kernel command line as
+// rd.vconsole.keymap=, through the grubenv kairos-agent writes at install
+// (install.grub_options.extra_cmdline).
+//
+// The KEYMAP line that writeLocaleStage adds to /etc/vconsole.conf comes too
+// late for the disk passphrase: the initramfs is built into the image, its
+// own vconsole.conf has only the FONT, and the stage that writes KEYMAP runs
+// after the encrypted partition is open. systemd-vconsole-setup in the
+// initramfs reads rd.vconsole.keymap=, and dracut's i18n module already
+// carries every keymap, so the passphrase prompt gets the layout the
+// passphrase was typed with in this installer. A Trusted Boot (UKI) install
+// has a signed command line and no grubenv, so it keeps the US layout there.
+func writeInitramfsKeymap(b *strings.Builder, c Choice) {
+	km := c.ConsoleKeymap
+	if km == "" || !consoleKeymapName.MatchString(km) {
+		return
+	}
+	b.WriteString("  grub_options:\n")
+	fmt.Fprintf(b, "    extra_cmdline: %q\n", "rd.vconsole.keymap="+km)
 }
 
 // topLevelKey matches a `users:` or `install:` key at the start of a line,
