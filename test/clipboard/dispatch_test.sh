@@ -150,6 +150,9 @@ expect "hadron-menu offers Clipboard" "$(cut -f1 "$T/pick.in" | grep -c '^Clipbo
 rm "$B/hadron-clipboard"; "$repo/rootfs/usr/bin/hadron-menu"
 expect "hadron-menu hides Clipboard without hadron-clipboard (agent)" "$(cut -f1 "$T/pick.in" | grep -c '^Clipboard$')" 0
 expect "hadron-menu keeps the other entries" "$(cut -f1 "$T/pick.in" | tr '\n' ' ')" "Apps Wi-Fi Bluetooth Audio Capture Emoji Night light Update Help Power "
+fake hadron-ext 'exit 0'; "$repo/rootfs/usr/bin/hadron-menu"
+expect "hadron-menu offers Extensions after Update when hadron-ext is there" "$(cut -f1 "$T/pick.in" | tr '\n' ' ')" "Apps Wi-Fi Bluetooth Audio Capture Emoji Night light Update Extensions Help Power "
+rm "$B/hadron-ext"
 
 # --- 4. wiring --------------------------------------------------------------
 count() { grep -v '^[[:space:]]*\(#\|//\)' "$2" | grep -ci -- "$1"; }

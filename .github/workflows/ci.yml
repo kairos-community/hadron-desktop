@@ -97,3 +97,5 @@ jobs:
         run: test/night-light/check-night-light.sh
       - name: Clipboard history dispatch and wiring
         run: test/clipboard/dispatch_test.sh
+      - name: Extensions menu entry and wiring
+        run: test/extensions/check-extensions-menu.sh
