@@ -3,7 +3,7 @@
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <!--
   Actions of hadron-updated. The defaults refuse everyone: the rule in
-  rules.d/50-hadron-update.rules grants both actions to the admin group, and
+  rules.d/50-hadron-update.rules grants every action to the admin group, and
   the service never asks for interactive authentication.
 -->
 <policyconfig>
@@ -23,6 +23,16 @@
   <action id="io.kairos.hadron-update.reboot">
     <description>Restart the system to finish a Hadron Desktop update, or into the previous system</description>
     <message>Only members of the admin group can restart the system from the updater.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>no</allow_active>
+    </defaults>
+  </action>
+
+  <action id="io.kairos.hadron-update.extensions">
+    <description>Install, enable, disable or remove a system extension</description>
+    <message>Only members of the admin group can change system extensions: they run as root.</message>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>

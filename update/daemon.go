@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +27,8 @@ const (
 	StateRebootPending   State = "reboot-pending"
 	StateError           State = "error"
 	StateUnmanaged       State = "unmanaged"
+	// StateExtension: an extension job runs kairos-agent sysext.
+	StateExtension State = "extension"
 )
 
 // Status is everything a client shows: the tray menu, the CLI's status line.
@@ -39,6 +39,9 @@ type Status struct {
 	// Pending says how the install behind reboot-pending ended: one of the
 	// pending* words, "" in every other state.
 	Pending string
+	// ExtResult and ExtDetail are the outcome of the last extension job:
+	// one of the extResult* words and its sentence, "" until one ends.
+	ExtResult, ExtDetail string
 }
 
 // The reboot marker's first word, and Status.Pending. Only "installed" means
@@ -183,6 +186,11 @@ type Daemon struct {
 	// first job; nil means none.
 	inhibitor Inhibitor
 
+	// ext runs the extension commands; nil refuses every extension job.
+	ext                  ExtBackend
+	extResult, extDetail string // guarded by mu
+	extCat               extCache
+
 	relMu    sync.Mutex
 	relCache []Latest
 	relOK    bool
@@ -194,6 +202,9 @@ type Daemon struct {
 // every mutating call is refused.
 func NewDaemon(b Backend) *Daemon {
 	d := &Daemon{backend: b, state: StateIdle}
+	if e, ok := b.(ExtBackend); ok {
+		d.ext = e
+	}
 	rel, err := LoadRelease(releaseFile())
 	if err != nil {
 		d.state, d.detail = StateUnmanaged, err.Error()
@@ -245,6 +256,8 @@ func (d *Daemon) statusLocked() Status {
 		Detail:    d.detail,
 		Advanced:  AdvancedEnabled(),
 		Pending:   d.pendingLocked(),
+		ExtResult: d.extResult,
+		ExtDetail: d.extDetail,
 	}
 }
 
@@ -317,7 +330,7 @@ func (d *Daemon) Busy() bool {
 }
 
 func (d *Daemon) busyLocked() bool {
-	return d.state == StateChecking || d.state == StateInspecting || d.state == StateApplying
+	return d.state == StateChecking || d.state == StateInspecting || d.state == StateApplying || d.state == StateExtension
 }
 
 // newest is the newest published tag; FetchReleases sorts newest first.
@@ -686,6 +699,8 @@ func (d *Daemon) Cancel() error {
 		return nil
 	case StateApplying:
 		return ErrNotCancellable
+	case StateExtension:
+		return errExtRunning
 	default:
 		return errNothingToCancel
 	}
@@ -693,10 +708,11 @@ func (d *Daemon) Cancel() error {
 
 // Reboot restarts the system. It refuses while an install job runs: during
 // inspecting the job could still start kairos-agent under a shutting-down
-// system. Once it is asked, no install starts until the reboot fails.
+// system, and an extension job runs it. Once it is asked, no install starts
+// until the reboot fails.
 func (d *Daemon) Reboot() error {
 	d.mu.Lock()
-	if d.state == StateInspecting || d.state == StateApplying {
+	if d.state == StateInspecting || d.state == StateApplying || d.state == StateExtension {
 		d.mu.Unlock()
 		return ErrBusy
 	}
@@ -727,7 +743,7 @@ func (d *Daemon) RebootPrevious() error {
 	case d.rebooting:
 		d.mu.Unlock()
 		return ErrRebooting
-	case d.state == StateInspecting || d.state == StateApplying:
+	case d.state == StateInspecting || d.state == StateApplying || d.state == StateExtension:
 		d.mu.Unlock()
 		return ErrBusy
 	case d.state == StateRebootPending && d.pending == pendingInstalled:
@@ -756,34 +772,7 @@ type kairosBackend struct{}
 // progress lines keep their order. ctx is ignored on purpose: the upgrade is
 // not cancellable once started (see ErrNotCancellable).
 func (kairosBackend) Upgrade(_ context.Context, source string, progress func(string)) error {
-	cmd := exec.Command(kairosAgent(), "upgrade", "--source", source)
-	r, w, err := os.Pipe()
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-	cmd.Stdout, cmd.Stderr = w, w
-	if err := cmd.Start(); err != nil {
-		w.Close()
-		return err
-	}
-	w.Close() // the child holds its own copy; EOF comes when it exits
-
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64<<10), 1<<20)
-	sc.Split(scanLinesOrCR)
-	for sc.Scan() {
-		if l := strings.TrimSpace(sc.Text()); l != "" {
-			progress(l)
-		}
-	}
-	// A line over the buffer stops the scanner; say so, and keep draining so
-	// the child never blocks on a full pipe.
-	if err := sc.Err(); err != nil {
-		progress("hadron-update: stopped reading kairos-agent's output: " + err.Error())
-	}
-	io.Copy(io.Discard, r)
-	if err := cmd.Wait(); err != nil {
+	if err := streamCommand(kairosAgent(), []string{"upgrade", "--source", source}, progress); err != nil {
 		return fmt.Errorf("kairos-agent upgrade: %w", err)
 	}
 	return nil

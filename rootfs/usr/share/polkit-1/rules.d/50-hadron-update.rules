@@ -1,6 +1,6 @@
 // hadron-updated asks polkit without interaction, so every answer here is a
-// plain yes or no: members of admin may install updates and reboot, nobody
-// else may, whatever the session.
+// plain yes or no: members of admin may install updates and system
+// extensions and reboot, nobody else may, whatever the session.
 polkit.addRule(function(action, subject) {
     if (action.id.indexOf("io.kairos.hadron-update.") == 0) {
         return subject.isInGroup("admin") ? polkit.Result.YES : polkit.Result.NO;

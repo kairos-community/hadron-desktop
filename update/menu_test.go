@@ -244,3 +244,22 @@ func TestBuildMenuOffersTheOtherLine(t *testing.T) {
 		t.Errorf("gpu/vm = %+v (%v) during a job, want present and disabled", it, ok)
 	}
 }
+
+func TestBuildMenuOffersExtensions(t *testing.T) {
+	for _, s := range []State{StateIdle, StateUpToDate, StateApplying, StateExtension, StateRebootPending} {
+		m := BuildMenu(menuStatus(s), menuReleases, "sway", gpuFull)
+		if it, ok := find(m, "extensions"); !ok || !it.Enabled || it.Label != "Extensions…" {
+			t.Errorf("%s: extensions = %+v (%v)", s, it, ok)
+		}
+	}
+	if _, ok := find(BuildMenu(menuStatus(StateUnmanaged), nil, "sway", gpuFull), "extensions"); ok {
+		t.Error("an unmanaged system offers extensions; the service refuses them there")
+	}
+	m := BuildMenu(menuStatus(StateExtension), menuReleases, "sway", gpuFull)
+	if m[0].Label != "Changing system extensions…" {
+		t.Errorf("status line %q", m[0].Label)
+	}
+	if it, _ := find(m, "install-latest"); it.Enabled {
+		t.Error("an install is offered during an extension job")
+	}
+}

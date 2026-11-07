@@ -4835,6 +4835,9 @@ RUN chmod 1777 /tmp; \
 COPY --from=install-ui-build /out/hadron-install-ui /usr/bin/hadron-install-ui
 # Update checker + upgrade CLI. /usr/bin for the same /usr/local reason.
 COPY --from=update-build /out/hadron-update /usr/bin/hadron-update
+# hadron-ext is the same binary: run under that name it is `hadron-update ext`
+# (system extensions, see update/ext.go).
+RUN ln -sf hadron-update /usr/bin/hadron-ext
 
 
 # ===========================================================================
