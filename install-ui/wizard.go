@@ -104,6 +104,9 @@ func choiceFromEnv() (Choice, bool, error) {
 		KeyboardLayout:  orDefault(os.Getenv("HADRON_KEYBOARD_LAYOUT"), defaultLayout),
 		KeyboardVariant: os.Getenv("HADRON_KEYBOARD_VARIANT"),
 		Timezone:        orDefault(os.Getenv("HADRON_TIMEZONE"), defaultTimezone),
+
+		Encrypt:    os.Getenv("HADRON_ENCRYPT") == "1",
+		Passphrase: os.Getenv("HADRON_DISK_PASSPHRASE"),
 	}
 	if c.Hostname == "" {
 		c.Hostname = defaultHostname
@@ -140,6 +143,14 @@ func choiceFromEnv() (Choice, bool, error) {
 	if err := validateTimezone(c.Timezone); err != nil {
 		return c, true, fmt.Errorf("HADRON_TIMEZONE: %w", err)
 	}
+	// Encryption has no default passphrase.
+	if c.Encrypt {
+		if err := validatePassphrase(c.Passphrase); err != nil {
+			return c, true, fmt.Errorf("HADRON_DISK_PASSPHRASE: %w", err)
+		}
+	} else {
+		c.Passphrase = ""
+	}
 	return c, true, nil
 }
 
@@ -173,18 +184,24 @@ const (
 	stepPass
 	stepGithub
 	stepDisk
+	stepEncrypt
+	stepPassphrase
+	stepPassphraseConfirm
 	stepReview
 )
 
 var stepName = map[wizardStep]string{
-	stepKeyboard: "keyboard",
-	stepTimezone: "timezone",
-	stepHostname: "hostname",
-	stepUser:     "username",
-	stepPass:     "password",
-	stepGithub:   "ssh keys",
-	stepDisk:     "target disk",
-	stepReview:   "review",
+	stepKeyboard:          "keyboard",
+	stepTimezone:          "timezone",
+	stepHostname:          "hostname",
+	stepUser:              "username",
+	stepPass:              "password",
+	stepGithub:            "ssh keys",
+	stepDisk:              "target disk",
+	stepEncrypt:           "encryption",
+	stepPassphrase:        "disk passphrase",
+	stepPassphraseConfirm: "disk passphrase",
+	stepReview:            "review",
 }
 
 type wizardModel struct {
@@ -205,6 +222,16 @@ type wizardModel struct {
 	// applyKeymap loads one on the live console. newWizard makes it a no-op.
 	keymapsDir  string
 	applyKeymap func(string)
+
+	// encIdx is the cursor on the encryption step, 0 for "no" (the
+	// default) and 1 for "yes".
+	encIdx int
+	// trustedBoot hides the encryption step: a Trusted Boot install
+	// encrypts with its TPM-sealed key instead.
+	trustedBoot bool
+	// passphraseFirst is the disk passphrase as first typed, until the
+	// second entry matches it.
+	passphraseFirst string
 }
 
 // newWizard is the wizard with the built-in keyboard and timezone lists and
@@ -286,6 +313,17 @@ func (m *wizardModel) enter(s wizardStep) {
 		m.in.SetValue(m.choice.Password)
 	case stepGithub:
 		m.in.SetValue(m.choice.Github)
+	case stepEncrypt:
+		m.encIdx = 0
+		if m.choice.Encrypt {
+			m.encIdx = 1
+		}
+	case stepPassphrase:
+		m.in.EchoMode = textinput.EchoPassword
+		m.in.SetValue(m.choice.Passphrase)
+	case stepPassphraseConfirm:
+		m.in.EchoMode = textinput.EchoPassword
+		m.in.SetValue("")
 	}
 	m.in.Focus()
 	m.in.CursorEnd()
@@ -327,7 +365,7 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc":
 		if m.step > stepKeyboard {
-			m.enter(m.step - 1)
+			m.enter(m.prevStep())
 		}
 		return m, nil
 	}
@@ -337,6 +375,9 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.step == stepDisk {
 		return m.updateDisk(key)
+	}
+	if m.step == stepEncrypt {
+		return m.updateEncrypt(key)
 	}
 	if m.step == stepReview {
 		return m.updateReview(key)
@@ -349,9 +390,46 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// prevStep is where esc goes: the step before, skipping the encryption
+// steps that were not shown.
+func (m wizardModel) prevStep() wizardStep {
+	switch m.step {
+	case stepReview:
+		switch {
+		case m.choice.Encrypt:
+			return stepPassphraseConfirm
+		case m.trustedBoot:
+			return stepDisk
+		}
+		return stepEncrypt
+	case stepEncrypt:
+		return stepDisk
+	}
+	return m.step - 1
+}
+
 func (m wizardModel) commitField() (tea.Model, tea.Cmd) {
 	v := strings.TrimSpace(m.in.Value())
 	switch m.step {
+	case stepPassphrase:
+		// Not trimmed: the passphrase is used byte for byte, and
+		// validatePassphrase refuses leading and trailing spaces instead.
+		raw := m.in.Value()
+		if err := validatePassphrase(raw); err != nil {
+			m.err = err.Error()
+			return m, nil
+		}
+		m.passphraseFirst = raw
+		m.enter(stepPassphraseConfirm)
+	case stepPassphraseConfirm:
+		if m.in.Value() != m.passphraseFirst {
+			m.in.SetValue("")
+			m.err = "the passphrases do not match: type it again, or esc to start over"
+			return m, nil
+		}
+		m.choice.Passphrase = m.passphraseFirst
+		m.passphraseFirst = ""
+		m.enter(stepReview)
 	case stepHostname:
 		m.choice.Hostname = orDefault(v, defaultHostname)
 		m.enter(stepUser)
@@ -443,9 +521,49 @@ func (m wizardModel) updateDisk(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		m.choice.Disk = m.disks[m.diskIdx].Path
-		m.enter(stepReview)
+		if m.trustedBoot {
+			m.enter(stepReview)
+		} else {
+			m.enter(stepEncrypt)
+		}
 	}
 	return m, nil
+}
+
+func (m wizardModel) updateEncrypt(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "up", "k":
+		m.encIdx = 0
+	case "down", "j":
+		m.encIdx = 1
+	case "enter":
+		if m.encIdx == 1 {
+			m.choice.Encrypt = true
+			m.enter(stepPassphrase)
+		} else {
+			m.choice.Encrypt = false
+			m.choice.Passphrase = ""
+			m.enter(stepReview)
+		}
+	}
+	return m, nil
+}
+
+// encryptText is shown on the encryption step. It says what the passphrase
+// protects, what it costs, and what happens if it is lost; see the design
+// note for the reasoning.
+var encryptText = []string{
+	"Encrypt the partition that holds your files (/home) and /var",
+	"with a passphrase you choose.",
+	"",
+	"This computer asks for the passphrase every time it starts.",
+	"",
+	"Protects: your files if the laptop or its disk is stolen while it",
+	"is switched off. The system itself is not encrypted; it holds",
+	"nothing of yours.",
+	"",
+	"If you forget the passphrase, your files are gone. Nobody can",
+	"recover them. Write it down and keep it away from the computer.",
 }
 
 func (m wizardModel) updateReview(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -502,6 +620,21 @@ func (m wizardModel) View() string {
 		}
 		b.WriteString("\n  " + tnDim.Render("up/down select · enter confirm · esc back") + "\n")
 
+	case stepEncrypt:
+		b.WriteString("  " + tnHot.Render("Encrypt your files?") + "\n\n")
+		for _, l := range encryptText {
+			b.WriteString("  " + l + "\n")
+		}
+		b.WriteString("\n")
+		for i, l := range []string{"no, do not encrypt", "yes, encrypt my files"} {
+			if i == m.encIdx {
+				b.WriteString("  " + tnAcc.Render("> "+l) + "\n")
+			} else {
+				b.WriteString("    " + tnDim.Render(l) + "\n")
+			}
+		}
+		b.WriteString("\n  " + tnDim.Render("up/down select · enter confirm · esc back") + "\n")
+
 	case stepReview:
 		b.WriteString("  " + haltRed.Render("this ERASES "+m.choice.Disk+" and installs hadron-desktop") + "\n\n")
 		b.WriteString("    keyboard   " + tnHot.Render(keyboardLabel(m.choice)) + "\n")
@@ -510,11 +643,23 @@ func (m wizardModel) View() string {
 		b.WriteString("    username   " + tnHot.Render(m.choice.Username) + "\n")
 		b.WriteString("    ssh keys   " + tnHot.Render(orDefault(githubLabel(m.choice.Github), "none")) + "\n")
 		b.WriteString("    disk       " + haltRed.Render(m.choice.Disk) + "\n")
+		if !m.trustedBoot {
+			enc := "off"
+			if m.choice.Encrypt {
+				enc = "on (passphrase at every start)"
+			}
+			b.WriteString("    encrypt    " + tnHot.Render(enc) + "\n")
+		}
 		b.WriteString("\n  " + tnDim.Render("enter to INSTALL · esc back") + "\n")
 
 	default:
 		b.WriteString("  " + prompt(m.step) + "\n")
 		b.WriteString("  " + m.in.View() + "\n")
+		if m.step == stepPassphrase {
+			if h := passphraseStrength(m.in.Value()); h != "" {
+				b.WriteString("  " + tnDim.Render("strength: "+h) + "\n")
+			}
+		}
 		if m.err != "" {
 			b.WriteString("\n  " + haltRed.Render(m.err) + "\n")
 		}
@@ -548,6 +693,10 @@ func prompt(s wizardStep) string {
 		return tnDim.Render("password for that account")
 	case stepGithub:
 		return tnDim.Render("GitHub username to import SSH keys from (blank to skip)")
+	case stepPassphrase:
+		return tnDim.Render(fmt.Sprintf("disk passphrase, %d characters or more (a few words work well)", minPassphraseLen))
+	case stepPassphraseConfirm:
+		return tnDim.Render("type the disk passphrase again")
 	}
 	return ""
 }
@@ -557,26 +706,33 @@ func prompt(s wizardStep) string {
 // runWizard collects the install configuration and writes it to /oem for
 // `kairos-agent install` to merge. It is a no-op when a config is already present,
 // preserving the shell installer's unattended behaviour for seeded installs.
-func runWizard() error {
+// It returns what was chosen, or nil when it wrote nothing; the caller needs
+// the choice to hand the disk passphrase to kcrypt.
+func runWizard() (*Choice, error) {
 	out := configOut()
 
 	present, err := ConfigPresent(oemDir(), out)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if present {
 		// Someone already supplied a users/install config: install unattended.
-		return nil
+		return nil, nil
 	}
 
 	c, nonInteractive, err := choiceFromEnv()
 	if err != nil {
-		return err
+		return nil, err
 	}
+
+	trustedBoot := trustedBootMedium(ukiInstallMarker)
 
 	if nonInteractive {
 		if err := zoneExists(zoneinfoDir, c.Timezone); err != nil {
-			return fmt.Errorf("HADRON_TIMEZONE: %w", err)
+			return nil, fmt.Errorf("HADRON_TIMEZONE: %w", err)
+		}
+		if c.Encrypt && trustedBoot {
+			return nil, errors.New("HADRON_ENCRYPT: a Trusted Boot install encrypts with its TPM-sealed key; the passphrase method is for the normal edition")
 		}
 		c.ConsoleKeymap = consoleKeymap(keymapsDir, c.KeyboardLayout, c.KeyboardVariant)
 	} else {
@@ -584,20 +740,24 @@ func runWizard() error {
 			loadKeyboards(xkbRulesList), loadTimezones(zoneinfoDir), detectTimezone("/etc/localtime"))
 		w.keymapsDir = keymapsDir
 		w.applyKeymap = loadConsoleKeymap
+		w.trustedBoot = trustedBoot
 		final, err := tea.NewProgram(w, tea.WithAltScreen()).Run()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		wm, ok := final.(wizardModel)
 		if !ok || wm.aborted || !wm.done {
-			return errors.New("install cancelled")
+			return nil, errors.New("install cancelled")
 		}
 		c = wm.choice
 	}
 
 	hash, err := HashPassword(c.Password)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return writeChoice(out, c, hash)
+	if err := writeChoice(out, c, hash); err != nil {
+		return nil, err
+	}
+	return &c, nil
 }

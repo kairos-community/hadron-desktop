@@ -14,7 +14,8 @@ func TestAdvanceStepMatchesKnownPhases(t *testing.T) {
 		{"Copying /run/cos/state/cOS/active.img source to /run/cos/recovery/cOS/recovery.img", 5},
 		{"Copying /run/cos/state/cOS/active.img source to /run/cos/state/cOS/passive.img", 6},
 		{"Running stage: after-install", 7},
-		{"Finish Lifecycle hook", 8},
+		{"hadron: checking the disk passphrase", 8},
+		{"Finish Lifecycle hook", 9},
 	}
 	for _, c := range cases {
 		if got := AdvanceStep(c.line, 0); got != c.want {
