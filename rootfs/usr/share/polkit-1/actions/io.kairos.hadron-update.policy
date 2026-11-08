@@ -39,4 +39,13 @@
       <allow_active>no</allow_active>
     </defaults>
   </action>
+  <action id="io.kairos.hadron-update.recovery">
+    <description>Show, replace or reseal the disk recovery key</description>
+    <message>Only members of the admin group can change how the disk is unlocked.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>no</allow_active>
+    </defaults>
+  </action>
 </policyconfig>

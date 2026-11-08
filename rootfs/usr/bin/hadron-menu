@@ -168,6 +168,14 @@ entries="$entries
 Update${tab}󰚰"
 command -v hadron-ext >/dev/null 2>&1 && entries="$entries
 Extensions${tab}󰏓"
+# The disk recovery key, on an encrypted disk: the installer's marker, or a
+# Trusted Boot system, whose disk is always sealed to the TPM. The agent image
+# ships no hadron-recovery (Dockerfile.agent removes it).
+if command -v hadron-recovery >/dev/null 2>&1 &&
+    { [ -e /etc/hadron-desktop/encryption ] || grep -q rd.immucore.uki /proc/cmdline 2>/dev/null; }; then
+    entries="$entries
+Recovery key${tab}󰌆"
+fi
 entries="$entries
 Help${tab}󰌌
 Power${tab}󰐥"
@@ -189,6 +197,7 @@ case "$sel" in
     Clipboard) exec hadron-clipboard ;;
     Update)    update ;;
     Extensions) extensions ;;
+    "Recovery key") term "hadron-recovery; printf '\nPress Enter to close.'; read -r _" ;;
     Help)      help_sheet ;;
     Power)     power ;;
 esac

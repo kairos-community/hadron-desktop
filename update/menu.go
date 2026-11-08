@@ -1,5 +1,7 @@
 package main
 
+import "os"
+
 // MenuItem is one entry of the tray menu, independent of any tray library, so
 // the menu can be tested as data. A disabled item is shown greyed out.
 type MenuItem struct {
@@ -131,6 +133,10 @@ func BuildMenu(st Status, releases []Latest, flavor, line string) []MenuItem {
 	// The Hadron menu's Extensions list. Always clickable: it only reads,
 	// and the service refuses a change while a job runs.
 	menu = append(menu, MenuItem{ID: "extensions", Label: "Extensions…", Enabled: true})
+	// The disk recovery key, on a system whose disk is encrypted.
+	if diskEncrypted() {
+		menu = append(menu, MenuItem{ID: "recovery", Label: "Recovery key…", Enabled: true})
+	}
 	// Hidden, not greyed, when it cannot be used: while a job runs, and while
 	// an install waits for its reboot, when the passive slot holds the system
 	// the user runs now and "previous" would mean the wrong one.
@@ -138,4 +144,18 @@ func BuildMenu(st Status, releases []Latest, flavor, line string) []MenuItem {
 		menu = append(menu, MenuItem{ID: "rollback", Label: "Restart into the previous system", Enabled: true})
 	}
 	return menu
+}
+
+// encryptionMarkerFile is written by the installer for an encrypted disk
+// (mode=passphrase or mode=tpm-recovery-key). A Trusted Boot disk is always
+// encrypted, with or without the marker.
+var encryptionMarkerFile = "/etc/hadron-desktop/encryption"
+
+// diskEncrypted reports whether the recovery key entry makes sense here.
+// A variable so the tests can choose.
+var diskEncrypted = func() bool {
+	if _, err := os.Stat(encryptionMarkerFile); err == nil {
+		return true
+	}
+	return edition() == editionTrustedBoot
 }

@@ -226,3 +226,6 @@ RUN rm -f /usr/bin/hadron-clipboard /usr/bin/clipnotify && \
 # refuses on the agent flavor.
 RUN rm -f /usr/bin/hadron-ext /etc/hadron-desktop/extensions.conf /etc/kairos/90_hadron_extensions.yaml /system/oem/93_hadron_extensions.yaml && \
     ! test -e /usr/bin/hadron-ext
+# No recovery key manager either: it talks to the update service, which the
+# agent does not have, and hadron-menu hides its entry without the command.
+RUN rm -f /usr/bin/hadron-recovery && ! test -e /usr/bin/hadron-recovery

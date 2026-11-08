@@ -29,6 +29,9 @@ const (
 	// actionExtensions covers installing, enabling, disabling and removing
 	// system extensions: each one changes what runs as root.
 	actionExtensions = "io.kairos.hadron-update.extensions"
+	// actionRecovery covers the disk recovery key: reading which keyslots
+	// exist, adding a new key and resealing to the TPM.
+	actionRecovery = "io.kairos.hadron-update.recovery"
 )
 
 // busIntrospection describes the interface for busctl, d-feet and friends.
@@ -67,6 +70,9 @@ const busIntrospection = introspect.IntrospectDeclarationString + `<node>
       <arg name="force" type="b" direction="in"/>
     </method>
     <method name="RemoveExtension"><arg name="name" type="s" direction="in"/></method>
+    <method name="RecoveryStatus"><arg name="status" type="a{sv}" direction="out"/></method>
+    <method name="RecoveryReseal"><arg name="secret" type="h" direction="in"/></method>
+    <method name="RecoveryNewKey"><arg name="secrets" type="h" direction="in"/></method>
     <signal name="StateChanged"><arg name="status" type="a{sv}"/></signal>
     <signal name="Progress"><arg name="line" type="s"/></signal>
   </interface>` + introspect.IntrospectDataString + `</node>`

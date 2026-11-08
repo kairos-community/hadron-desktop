@@ -258,6 +258,8 @@ func (a *trayApp) click(c daemonClient, id string) {
 		err = a.launch("upgrade", "--pause-on-error", "--image", "-")
 	case id == "extensions":
 		err = a.openMenu("Extensions")
+	case id == "recovery":
+		err = a.openMenu("Recovery key")
 	case c == nil && (id == "cancel" || id == "restart" || id == "rollback"):
 		err = errServiceUnavailable
 	case id == "cancel":
