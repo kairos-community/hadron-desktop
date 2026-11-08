@@ -50,7 +50,19 @@ func rebootCommand() *exec.Cmd {
 // (whether or not the install worked), post checks the disk. All three are
 // nil for a choice without encryption, for --progress-only (the agent
 // appliance) and for a seeded config.
+//
+// A Trusted Boot install with a recovery key has no passphrase file: pre does
+// nothing, post adds the key to the TPM-sealed containers kairos-agent left
+// (enrollRecoveryKey writes and deletes its own 0600 file around that), and
+// cleanup makes sure that file is gone.
 func encryptionSteps(c *Choice) (pre func() error, cleanup func() error, post postInstall) {
+	if c != nil && c.RecoveryKey && !c.Encrypt {
+		disk, key := c.Disk, c.RecoveryKeyValue
+		pre = func() error { return nil }
+		cleanup = func() error { return removePassphraseFile(recoveryKeyFile) }
+		post = func(log func(string)) error { return enrollRecoveryKey(execRunner, disk, key, log) }
+		return pre, cleanup, post
+	}
 	if c == nil || !c.Encrypt {
 		return nil, nil, nil
 	}

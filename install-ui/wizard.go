@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -187,6 +188,9 @@ const (
 	stepEncrypt
 	stepPassphrase
 	stepPassphraseConfirm
+	stepRecovery
+	stepRecoveryShow
+	stepRecoveryConfirm
 	stepReview
 )
 
@@ -201,6 +205,9 @@ var stepName = map[wizardStep]string{
 	stepEncrypt:           "encryption",
 	stepPassphrase:        "disk passphrase",
 	stepPassphraseConfirm: "disk passphrase",
+	stepRecovery:          "recovery key",
+	stepRecoveryShow:      "recovery key",
+	stepRecoveryConfirm:   "recovery key",
 	stepReview:            "review",
 }
 
@@ -232,6 +239,15 @@ type wizardModel struct {
 	// passphraseFirst is the disk passphrase as first typed, until the
 	// second entry matches it.
 	passphraseFirst string
+
+	// recIdx is the cursor on the recovery key step (Trusted Boot only),
+	// 0 for "no" (the default) and 1 for "yes". confirmGroup is the
+	// 0-based group of the key the person types back. newKey and
+	// pickGroup are crypto/rand backed; the tests replace them.
+	recIdx       int
+	confirmGroup int
+	newKey       func() (string, error)
+	pickGroup    func() int
 }
 
 // newWizard is the wizard with the built-in keyboard and timezone lists and
@@ -247,6 +263,8 @@ func newWizardWith(disks []Disk, keyboards []Keyboard, zones []string, tz string
 		keyboards:   keyboards,
 		zones:       zones,
 		applyKeymap: func(string) {},
+		newKey:      newRecoveryKey,
+		pickGroup:   func() int { return recoveryGroupToConfirm(rand.Reader) },
 	}
 	m.choice.KeyboardLayout = defaultLayout
 	m.choice.Timezone = defaultTimezone
@@ -324,6 +342,13 @@ func (m *wizardModel) enter(s wizardStep) {
 	case stepPassphraseConfirm:
 		m.in.EchoMode = textinput.EchoPassword
 		m.in.SetValue("")
+	case stepRecovery:
+		m.recIdx = 0
+		if m.choice.RecoveryKey {
+			m.recIdx = 1
+		}
+	case stepRecoveryConfirm:
+		m.in.SetValue("")
 	}
 	m.in.Focus()
 	m.in.CursorEnd()
@@ -379,6 +404,16 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.step == stepEncrypt {
 		return m.updateEncrypt(key)
 	}
+	if m.step == stepRecovery {
+		return m.updateRecovery(key)
+	}
+	if m.step == stepRecoveryShow {
+		if key.String() == "enter" {
+			m.confirmGroup = m.pickGroup()
+			m.enter(stepRecoveryConfirm)
+		}
+		return m, nil
+	}
 	if m.step == stepReview {
 		return m.updateReview(key)
 	}
@@ -399,11 +434,15 @@ func (m wizardModel) prevStep() wizardStep {
 		case m.choice.Encrypt:
 			return stepPassphraseConfirm
 		case m.trustedBoot:
-			return stepDisk
+			// Not back to the key: it is shown once, before it is
+			// confirmed.
+			return stepRecovery
 		}
 		return stepEncrypt
-	case stepEncrypt:
+	case stepEncrypt, stepRecovery:
 		return stepDisk
+	case stepRecoveryShow:
+		return stepRecovery
 	}
 	return m.step - 1
 }
@@ -411,6 +450,13 @@ func (m wizardModel) prevStep() wizardStep {
 func (m wizardModel) commitField() (tea.Model, tea.Cmd) {
 	v := strings.TrimSpace(m.in.Value())
 	switch m.step {
+	case stepRecoveryConfirm:
+		if !confirmsRecoveryKey(m.choice.RecoveryKeyValue, m.confirmGroup, m.in.Value()) {
+			m.in.SetValue("")
+			m.err = fmt.Sprintf("that is not group %d: check what you wrote down, or esc to see the key again", m.confirmGroup+1)
+			return m, nil
+		}
+		m.enter(stepReview)
 	case stepPassphrase:
 		// Not trimmed: the passphrase is used byte for byte, and
 		// validatePassphrase refuses leading and trailing spaces instead.
@@ -522,7 +568,7 @@ func (m wizardModel) updateDisk(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		m.choice.Disk = m.disks[m.diskIdx].Path
 		if m.trustedBoot {
-			m.enter(stepReview)
+			m.enter(stepRecovery)
 		} else {
 			m.enter(stepEncrypt)
 		}
@@ -547,6 +593,48 @@ func (m wizardModel) updateEncrypt(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m wizardModel) updateRecovery(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "up", "k":
+		m.recIdx = 0
+	case "down", "j":
+		m.recIdx = 1
+	case "enter":
+		if m.recIdx == 0 {
+			m.choice.RecoveryKey = false
+			m.choice.RecoveryKeyValue = ""
+			m.enter(stepReview)
+			return m, nil
+		}
+		if m.choice.RecoveryKeyValue == "" {
+			k, err := m.newKey()
+			if err != nil {
+				m.err = err.Error()
+				return m, nil
+			}
+			m.choice.RecoveryKeyValue = k
+		}
+		m.choice.RecoveryKey = true
+		m.enter(stepRecoveryShow)
+	}
+	return m, nil
+}
+
+// recoveryText is shown on the recovery key step of a Trusted Boot install.
+var recoveryText = []string{
+	"This computer unlocks its disk with its TPM security chip, without",
+	"asking you anything. Without a recovery key, your files cannot be",
+	"recovered if:",
+	"",
+	"  - the TPM is reset or cleared,",
+	"  - a firmware (BIOS) update changes what the TPM checks at start,",
+	"  - the disk is moved to another computer.",
+	"",
+	"A recovery key is a long code that the computer asks for only then.",
+	"If you create one, keep it somewhere safe and NOT on this computer:",
+	"on paper, or in a password manager on another device.",
 }
 
 // encryptText is shown on the encryption step. It says what the passphrase
@@ -635,6 +723,35 @@ func (m wizardModel) View() string {
 		}
 		b.WriteString("\n  " + tnDim.Render("up/down select · enter confirm · esc back") + "\n")
 
+	case stepRecovery:
+		b.WriteString("  " + tnHot.Render("Create a recovery key?") + "\n\n")
+		for _, l := range recoveryText {
+			b.WriteString("  " + l + "\n")
+		}
+		b.WriteString("\n")
+		for i, l := range []string{"no, the TPM only", "yes, create a recovery key"} {
+			if i == m.recIdx {
+				b.WriteString("  " + tnAcc.Render("> "+l) + "\n")
+			} else {
+				b.WriteString("    " + tnDim.Render(l) + "\n")
+			}
+		}
+		if m.err != "" {
+			b.WriteString("\n  " + haltRed.Render(m.err) + "\n")
+		}
+		b.WriteString("\n  " + tnDim.Render("up/down select · enter confirm · esc back") + "\n")
+
+	case stepRecoveryShow:
+		b.WriteString("  " + tnHot.Render("Your recovery key") + "\n\n")
+		for _, l := range bigRecoveryKey(m.choice.RecoveryKeyValue) {
+			b.WriteString("  " + tnAcc.Render(l) + "\n")
+		}
+		b.WriteString("  " + tnHot.Render(m.choice.RecoveryKeyValue) + "\n\n")
+		b.WriteString("  Write it down or take a photo of it now, and keep it away from\n")
+		b.WriteString("  this computer. It is shown only this once and saved nowhere.\n")
+		b.WriteString("  The letters are only these: " + strings.Join(strings.Split(modhex, ""), " ") + "\n")
+		b.WriteString("\n  " + tnDim.Render("enter when you have saved it · esc back") + "\n")
+
 	case stepReview:
 		b.WriteString("  " + haltRed.Render("this ERASES "+m.choice.Disk+" and installs hadron-desktop") + "\n\n")
 		b.WriteString("    keyboard   " + tnHot.Render(keyboardLabel(m.choice)) + "\n")
@@ -643,6 +760,13 @@ func (m wizardModel) View() string {
 		b.WriteString("    username   " + tnHot.Render(m.choice.Username) + "\n")
 		b.WriteString("    ssh keys   " + tnHot.Render(orDefault(githubLabel(m.choice.Github), "none")) + "\n")
 		b.WriteString("    disk       " + haltRed.Render(m.choice.Disk) + "\n")
+		if m.trustedBoot {
+			rk := "no (the TPM only)"
+			if m.choice.RecoveryKey {
+				rk = "yes (you saved it)"
+			}
+			b.WriteString("    recovery   " + tnHot.Render(rk) + "\n")
+		}
 		if !m.trustedBoot {
 			enc := "off"
 			if m.choice.Encrypt {
@@ -653,7 +777,11 @@ func (m wizardModel) View() string {
 		b.WriteString("\n  " + tnDim.Render("enter to INSTALL · esc back") + "\n")
 
 	default:
-		b.WriteString("  " + prompt(m.step) + "\n")
+		if m.step == stepRecoveryConfirm {
+			b.WriteString("  " + m.recoveryPrompt() + "\n")
+		} else {
+			b.WriteString("  " + prompt(m.step) + "\n")
+		}
 		b.WriteString("  " + m.in.View() + "\n")
 		if m.step == stepPassphrase {
 			if h := passphraseStrength(m.in.Value()); h != "" {
@@ -701,6 +829,12 @@ func prompt(s wizardStep) string {
 	return ""
 }
 
+// recoveryPrompt asks for one group of the recovery key back.
+func (m wizardModel) recoveryPrompt() string {
+	n := m.confirmGroup + 1
+	return tnDim.Render(fmt.Sprintf("to check you saved it, type the %s group of the recovery key (group %d of 8)", ordinal(n), n))
+}
+
 // --- entry point -----------------------------------------------------------
 
 // runWizard collects the install configuration and writes it to /oem for
@@ -733,6 +867,9 @@ func runWizard() (*Choice, error) {
 		}
 		if c.Encrypt && trustedBoot {
 			return nil, errors.New("HADRON_ENCRYPT: a Trusted Boot install encrypts with its TPM-sealed key; the passphrase method is for the normal edition")
+		}
+		if os.Getenv("HADRON_RECOVERY_KEY") == "1" {
+			return nil, errRecoveryKeyNonInteractive
 		}
 		c.ConsoleKeymap = consoleKeymap(keymapsDir, c.KeyboardLayout, c.KeyboardVariant)
 	} else {

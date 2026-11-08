@@ -127,8 +127,8 @@ the copy).
    non-orderly shutdown as a failed try when DA-protected objects are in use.
    swtpm's limits are lower than a laptop TPM's, but a user who holds the
    power button several times can hit it, and has only the recovery key
-   path (none is set up today). The installer text must say so, and we need a
-   recovery passphrase before shipping (the sibling encryption work).
+   path. The installer text must say so. The opt-in recovery key (below) is
+   that path; without it the files are gone.
 8. **Upgrade images are separate.** A Trusted Boot system upgrades from the
    UKI container (`kairos-agent upgrade --source oci:<uki-image>`); the agent
    dumps the source onto the ESP and refuses a target without
@@ -232,6 +232,70 @@ Secure Boot in user mode (`bootctl status` or the SecureBoot EFI variable), and
 `MemTotal`; it refuses with a plain reason when one is missing. It sets
 `install.partitions.efi.size: 4096` in the cloud-config.
 
+## Recovery key (opt-in, 2026-11-08)
+
+Owner decision: a Trusted Boot install never offers a passphrase the person
+chooses. The default stays TPM-only: two containers (COS_OEM_LUKS,
+COS_PERSISTENT_LUKS), one PCR-sealed keyslot each. On top of that the
+installer offers, off by default, a generated recovery key, as BitLocker does.
+
+**Installer.** After the disk step, on Trusted Boot media only (the
+`/run/cos/uki_install_mode` check from #63), "Create a recovery key?" says
+that without one a TPM reset, some firmware updates or the disk in another
+machine make the files unrecoverable, and that the key belongs somewhere safe,
+not on this computer. "Yes" generates the key, shows it once in a 3x5 block
+font with the group numbers and in plain text, then asks for one random group
+back (the whole key is accepted too). Esc from the review goes back to the
+yes/no step, not to the key. `HADRON_RECOVERY_KEY=1` is refused in the
+unattended installer: the key must be shown to a person.
+
+**The key.** systemd-cryptenroll's recovery key format: 32 bytes from
+crypto/rand (256 bits), each nibble one of the 16 modhex letters
+`cbdefghijklnrtuv`, 8 groups of 8 joined by dashes. The keyslot holds that
+string, dashes included, as systemd's does, so a key made with
+`systemd-cryptenroll --recovery-key` works the same way.
+
+**Where it is enrolled, and why there.** After `kairos-agent manual-install`
+(`reboot: false`), from the installer, still on the install medium:
+`cryptsetup luksAddKey --token-type systemd-tpm2 --pbkdf pbkdf2 --hash sha512
+--pbkdf-force-iterations 1000 <dev> /run/hadron-install/recovery-key` on every
+LUKS container of the target disk, then `cryptsetup token import` of
+`{"type":"systemd-recovery","keyslots":["N"]}`, then a check that the key
+alone (`--disable-external-tokens --key-slot N`) opens it. The TPM unseals on
+the install medium because it boots the same signed UKI, so PCR 11 matches
+the sealed policy. This needs no Kairos change to the encrypt path. The other
+option, a `kcrypt.recovery_key_file` read in `TPMWithPCREncryptor.Encrypt`,
+would put a new secret input into the TPM path of every Kairos install.
+PBKDF2 at the minimum cost is enough for 256 random bits; argon2's memory cost
+buys nothing there and would only slow the boot prompt on a small machine.
+The key file is 0600 in `/run` (tmpfs), written just before the first
+luksAddKey and deleted right after the last check, and again on any failure.
+It is never in the cloud-config, so never in `/oem`.
+
+**Boot.** The cloud-config sets `kcrypt.passphrase_fallback: true` and the
+marker `mode=tpm-recovery-key` only with a recovery key. On Trusted Boot that
+config sits in the encrypted OEM, unreadable before the unlock, so kcrypt
+(kairos-io/kairos#6024) also turns the fallback on when a locked container has
+a `systemd-recovery` token. Its prompt then says "recovery key", on the
+console (immucore is PID 1 there), and takes the key in any case, with spaces
+or without dashes. One key opens OEM and persistent: the second container is
+tried with it before anyone is asked again.
+
+**Tested** (QEMU, OVMF Secure Boot, swtpm, sway-vm v0.0.8 rebuilt as UKI with
+Kairos master + #6024): the key screen; a TPM boot with no prompt; the TPM
+cleared: "Enter the recovery key for COS_OEM_LUKS", a wrong key refused
+("Wrong recovery key"), the right one typed without dashes opened both
+containers and booted to ly; an install without the key: one keyslot, one
+`systemd-tpm2` token, no `passphrase_fallback` in `/oem`, no marker; the key
+appears nowhere in `/oem`.
+
+**Risks.** The key is only as safe as where the person keeps it, and anyone
+holding it and the disk reads the files. The enrollment trusts the install
+medium's TPM unseal: if a future AuroraBoot signs a different PCR phase set
+for the medium, luksAddKey fails and the install reports it (it does not
+leave a half-enrolled disk silently). The key is typed on the US layout,
+which is why modhex has letters only.
+
 ## Go / no-go per variant
 
 | Variant | Rootfs | Verdict |
@@ -243,8 +307,9 @@ Secure Boot in user mode (`bootctl status` or the SecureBoot EFI variable), and
 | agent | ~990 MiB | **No-go / not applicable**: a VM appliance, where a TPM-sealed Secure Boot chain buys little and the agent gates boot with plain OVMF. |
 
 Overall: go for an opt-in sway Trusted Boot ISO once (a) the immucore fix is
-released, (b) the installer sets a 4 GiB ESP and warns as above, and (c) a
-recovery passphrase exists for the TPM-lockout and firmware-update cases.
+released, (b) the installer sets a 4 GiB ESP and warns as above, and (c) the
+opt-in recovery key (above, with kairos-io/kairos#6024) covers the TPM-lockout
+and firmware-update cases.
 
 ## Not tested
 

@@ -424,6 +424,11 @@ func TestFindLUKSDevice(t *testing.T) {
 func TestWizardHidesEncryptionOnTrustedBoot(t *testing.T) {
 	m := atDisk(t)
 	m.trustedBoot = true
+	// The disk leads to the recovery key step, not to the passphrase.
+	m = keys(t, m, "enter")
+	if m.step != stepRecovery {
+		t.Fatalf("step = %v, want stepRecovery", m.step)
+	}
 	m = keys(t, m, "enter")
 	if m.step != stepReview {
 		t.Fatalf("step = %v, want stepReview", m.step)
@@ -431,8 +436,11 @@ func TestWizardHidesEncryptionOnTrustedBoot(t *testing.T) {
 	if strings.Contains(m.View(), "encrypt") {
 		t.Errorf("review mentions the passphrase choice on Trusted Boot:\n%s", m.View())
 	}
+	if m = keys(t, m, "esc"); m.step != stepRecovery {
+		t.Errorf("esc from review = %v, want stepRecovery", m.step)
+	}
 	if m = keys(t, m, "esc"); m.step != stepDisk {
-		t.Errorf("esc from review = %v, want stepDisk", m.step)
+		t.Errorf("esc from the recovery key step = %v, want stepDisk", m.step)
 	}
 }
 
