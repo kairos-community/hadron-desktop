@@ -88,70 +88,20 @@ func confirmsRecoveryKey(key string, group int, typed string) bool {
 	return group >= 0 && group < len(groups) && t == groups[group]
 }
 
-// bigGlyphs is a 3x5 block font for the modhex letters, so the key can be
-// shown in large type on a text console.
-var bigGlyphs = map[rune][5]string{
-	'b': {"#  ", "#  ", "## ", "# #", "## "},
-	'c': {"   ", " ##", "#  ", "#  ", " ##"},
-	'd': {"  #", "  #", " ##", "# #", " ##"},
-	'e': {" # ", "# #", "###", "#  ", " ##"},
-	'f': {" ##", "#  ", "## ", "#  ", "#  "},
-	'g': {" ##", "# #", " ##", "  #", "## "},
-	'h': {"#  ", "#  ", "## ", "# #", "# #"},
-	'i': {" # ", "   ", " # ", " # ", " # "},
-	'j': {"  #", "   ", "  #", "# #", " # "},
-	'k': {"#  ", "# #", "## ", "# #", "# #"},
-	'l': {"#  ", "#  ", "#  ", "#  ", " ##"},
-	'n': {"   ", "## ", "# #", "# #", "# #"},
-	'r': {"   ", "# #", "## ", "#  ", "#  "},
-	't': {" # ", "###", " # ", " # ", " ##"},
-	'u': {"   ", "# #", "# #", "# #", " ##"},
-	'v': {"   ", "# #", "# #", "# #", " # "},
-}
-
-// bigText renders s in the block font, five lines, one column between
-// letters. A space is a blank glyph, so words stand three columns apart.
-func bigText(s string) []string {
-	rows := make([]string, 5)
-	for i, r := range s {
-		g, ok := bigGlyphs[r]
-		for row := range rows {
-			if i > 0 {
-				rows[row] += " "
-			}
-			if ok {
-				rows[row] += strings.ReplaceAll(g[row], "#", "█")
-			} else {
-				rows[row] += "   "
-			}
-		}
-	}
-	return rows
-}
-
-// bigRecoveryKey renders the key in large type, two groups per line with
-// their numbers, so it fits 80 columns.
-func bigRecoveryKey(key string) []string {
-	groups := recoveryKeyGroupsOf(key)
+// recoveryKeyLines is the key screen: the key in the console's own font,
+// which keeps every letter distinct, two groups per line with their numbers
+// and a space between letters, then the whole key on one line.
+func recoveryKeyLines(key string) []string {
+	g := recoveryKeyGroupsOf(key)
 	var out []string
-	for i := 0; i < len(groups); i += 2 {
-		pair := groups[i]
-		label := fmt.Sprintf("%d", i+1)
-		if i+1 < len(groups) {
-			pair += " " + groups[i+1]
-			label += fmt.Sprintf(" & %d", i+2)
-		}
-		for j, row := range bigText(pair) {
-			prefix := "      "
-			if j == 2 {
-				prefix = fmt.Sprintf("%-6s", label)
-			}
-			out = append(out, prefix+row)
-		}
-		out = append(out, "")
+	for i := 0; i+1 < len(g); i += 2 {
+		out = append(out, fmt.Sprintf("%d  %s    %s  %d", i+1, spaced(g[i]), spaced(g[i+1]), i+2))
 	}
-	return out
+	return append(out, "", key)
 }
+
+// spaced puts a space between letters: easier to read and copy by hand.
+func spaced(s string) string { return strings.Join(strings.Split(s, ""), " ") }
 
 // luksDump is the part of `cryptsetup luksDump --dump-json-metadata` the
 // enrollment reads.
@@ -216,6 +166,14 @@ func newKeyslot(before, after luksDump) (string, error) {
 // argon2's memory cost would only make the boot prompt slower on a small
 // machine. log receives progress lines, never the key.
 func enrollRecoveryKey(run runner, disk, key string, log func(string)) error {
+	return enrollRecoveryKeyWith(run, disk, key, nil, log)
+}
+
+// enrollRecoveryKeyWith is enrollRecoveryKey for a container unlocked by a
+// passphrase: unlockFile holds it (the 0600 passphrase hand-off of the
+// normal edition), and cryptsetup reads the existing key from there instead
+// of the TPM token. nil keeps the TPM.
+func enrollRecoveryKeyWith(run runner, disk, key string, unlockFile *string, log func(string)) error {
 	log("hadron: adding the recovery key")
 	_, _ = run("udevadm", []string{"settle"}, nil)
 	out, err := run("lsblk", []string{"-P", "-p", "-o", "NAME,FSTYPE,LABEL", disk}, nil)
@@ -236,13 +194,19 @@ func enrollRecoveryKey(run runner, disk, key string, log func(string)) error {
 		if err != nil {
 			return err
 		}
-		if !hasToken(before, "systemd-tpm2") {
-			return fmt.Errorf("%s has no systemd-tpm2 token: is this a Trusted Boot install?", dev)
+		unlock := []string{"--key-file", ""}
+		if unlockFile != nil {
+			unlock[1] = *unlockFile
+		} else {
+			if !hasToken(before, "systemd-tpm2") {
+				return fmt.Errorf("%s has no systemd-tpm2 token: is this a Trusted Boot install?", dev)
+			}
+			unlock = []string{"--token-type", "systemd-tpm2"}
 		}
-		if _, err := run("cryptsetup", []string{"luksAddKey", "--batch-mode",
-			"--token-type", "systemd-tpm2",
-			"--pbkdf", "pbkdf2", "--hash", "sha512", "--pbkdf-force-iterations", "1000",
-			dev, recoveryKeyFile}, nil); err != nil {
+		args := append([]string{"luksAddKey", "--batch-mode"}, unlock...)
+		args = append(args, "--pbkdf", "pbkdf2", "--hash", "sha512", "--pbkdf-force-iterations", "1000",
+			dev, recoveryKeyFile)
+		if _, err := run("cryptsetup", args, nil); err != nil {
 			return fmt.Errorf("adding the recovery key to %s: %w", dev, err)
 		}
 		after, err := readLUKSDump(run, dev)

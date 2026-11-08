@@ -430,16 +430,19 @@ func (m wizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m wizardModel) prevStep() wizardStep {
 	switch m.step {
 	case stepReview:
-		switch {
-		case m.choice.Encrypt:
-			return stepPassphraseConfirm
-		case m.trustedBoot:
-			// Not back to the key: it is shown once, before it is
-			// confirmed.
+		// Not back to the key: it is shown once, before it is confirmed.
+		if m.choice.Encrypt || m.trustedBoot {
 			return stepRecovery
 		}
 		return stepEncrypt
-	case stepEncrypt, stepRecovery:
+	case stepRecovery:
+		if m.choice.Encrypt {
+			// The confirmation needs the first entry: start the
+			// passphrase over.
+			return stepPassphrase
+		}
+		return stepDisk
+	case stepEncrypt:
 		return stepDisk
 	case stepRecoveryShow:
 		return stepRecovery
@@ -475,7 +478,7 @@ func (m wizardModel) commitField() (tea.Model, tea.Cmd) {
 		}
 		m.choice.Passphrase = m.passphraseFirst
 		m.passphraseFirst = ""
-		m.enter(stepReview)
+		m.enter(stepRecovery)
 	case stepHostname:
 		m.choice.Hostname = orDefault(v, defaultHostname)
 		m.enter(stepUser)
@@ -589,6 +592,8 @@ func (m wizardModel) updateEncrypt(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.choice.Encrypt = false
 			m.choice.Passphrase = ""
+			m.choice.RecoveryKey = false
+			m.choice.RecoveryKeyValue = ""
 			m.enter(stepReview)
 		}
 	}
@@ -620,6 +625,18 @@ func (m wizardModel) updateRecovery(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.enter(stepRecoveryShow)
 	}
 	return m, nil
+}
+
+// passphraseRecoveryText is shown on the recovery key step after the disk
+// passphrase, on the normal edition.
+var passphraseRecoveryText = []string{
+	"A recovery key is a second, long code that also opens your files.",
+	"It is for the day you forget the passphrase: without it, your",
+	"files are gone.",
+	"",
+	"If you create one, keep it somewhere safe and NOT on this computer:",
+	"on paper, or in a password manager on another device. Anyone with",
+	"the key and the disk can read your files.",
 }
 
 // recoveryText is shown on the recovery key step of a Trusted Boot install.
@@ -724,12 +741,16 @@ func (m wizardModel) View() string {
 		b.WriteString("\n  " + tnDim.Render("up/down select · enter confirm · esc back") + "\n")
 
 	case stepRecovery:
-		b.WriteString("  " + tnHot.Render("Create a recovery key?") + "\n\n")
-		for _, l := range recoveryText {
+		title, text, opts := "Create a recovery key?", recoveryText, []string{"no, the TPM only", "yes, create a recovery key"}
+		if m.choice.Encrypt {
+			title, text, opts = "Also create a recovery key?", passphraseRecoveryText, []string{"no, the passphrase only", "yes, also create a recovery key"}
+		}
+		b.WriteString("  " + tnHot.Render(title) + "\n\n")
+		for _, l := range text {
 			b.WriteString("  " + l + "\n")
 		}
 		b.WriteString("\n")
-		for i, l := range []string{"no, the TPM only", "yes, create a recovery key"} {
+		for i, l := range opts {
 			if i == m.recIdx {
 				b.WriteString("  " + tnAcc.Render("> "+l) + "\n")
 			} else {
@@ -743,10 +764,10 @@ func (m wizardModel) View() string {
 
 	case stepRecoveryShow:
 		b.WriteString("  " + tnHot.Render("Your recovery key") + "\n\n")
-		for _, l := range bigRecoveryKey(m.choice.RecoveryKeyValue) {
+		for _, l := range recoveryKeyLines(m.choice.RecoveryKeyValue) {
 			b.WriteString("  " + tnAcc.Render(l) + "\n")
 		}
-		b.WriteString("  " + tnHot.Render(m.choice.RecoveryKeyValue) + "\n\n")
+		b.WriteString("\n")
 		b.WriteString("  Write it down or take a photo of it now, and keep it away from\n")
 		b.WriteString("  this computer. It is shown only this once and saved nowhere.\n")
 		b.WriteString("  The letters are only these: " + strings.Join(strings.Split(modhex, ""), " ") + "\n")
@@ -760,8 +781,11 @@ func (m wizardModel) View() string {
 		b.WriteString("    username   " + tnHot.Render(m.choice.Username) + "\n")
 		b.WriteString("    ssh keys   " + tnHot.Render(orDefault(githubLabel(m.choice.Github), "none")) + "\n")
 		b.WriteString("    disk       " + haltRed.Render(m.choice.Disk) + "\n")
-		if m.trustedBoot {
-			rk := "no (the TPM only)"
+		if m.trustedBoot || m.choice.Encrypt {
+			rk := "no"
+			if m.trustedBoot {
+				rk = "no (the TPM only)"
+			}
 			if m.choice.RecoveryKey {
 				rk = "yes (you saved it)"
 			}

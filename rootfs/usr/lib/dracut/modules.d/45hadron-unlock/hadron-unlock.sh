@@ -61,10 +61,47 @@ subsystem_of() {
     cryptsetup luksDump "$1" 2>/dev/null | sed -n 's/^Subsystem:[[:space:]]*//p'
 }
 
+# has_recovery_key DEVICE: the container has a recovery key, a keyslot that a
+# systemd-recovery token claims (the installer's "Also create a recovery
+# key?", or `hadron-recovery new-key`).
+has_recovery_key() {
+    cryptsetup luksDump "$1" 2>/dev/null |
+        sed -n '/^Tokens:/,/^Digests:/p' | grep -q '^ *[0-9][0-9]*: systemd-recovery$'
+}
+
+# recovery_key_form TEXT: TEXT as a recovery key in its canonical form (lower
+# case, eight dash-separated groups of eight), or nothing when TEXT is not 64
+# modhex letters once spaces and dashes are dropped. People type the key in
+# any case and often without its dashes; the keyslot holds the dashes.
+recovery_key_form() {
+    local s
+    s=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' -')
+    [[ $s =~ ^[cbdefghijklnrtuv]{64}$ ]] || return 1
+    printf '%s' "$s" | sed 's/.\{8\}/&-/g; s/-$//'
+}
+
+# open_with DEVICE NAME TEXT: opens DEVICE with TEXT as typed, then, when it
+# may be a recovery key, in the key's canonical form.
+open_with() {
+    local dev=$1 name=$2 pass=$3 key
+    printf '%s' "$pass" | cryptsetup open --key-file=- "$dev" "$name" 2>/dev/null && return 0
+    [ "${4:-0}" = 1 ] || return 1
+    key=$(recovery_key_form "$pass") || return 1
+    [ "$key" != "$pass" ] || return 1
+    printf '%s' "$key" | cryptsetup open --key-file=- "$dev" "$name" 2>/dev/null
+}
+
 # ask_and_open DEVICE: asks until the passphrase opens DEVICE.
 ask_and_open() {
-    local dev=$1 name=${1##*/} prompt pass tries=0
-    prompt="Enter the passphrase for the Hadron disk (${dev}):"
+    local dev=$1 name=${1##*/} prompt wrong pass tries=0 recovery=0
+    # No device name in the prompt: the person knows "the disk".
+    prompt="Enter the disk passphrase"
+    wrong="Wrong passphrase, try again"
+    if has_recovery_key "$dev"; then
+        recovery=1
+        prompt="Enter the disk passphrase or recovery key"
+        wrong="Wrong passphrase or recovery key, try again"
+    fi
     while :; do
         # --no-tty: this unit has no terminal, so the request goes to the
         # password agents: kairos-splash draws the prompt, or, without a
@@ -78,12 +115,12 @@ ask_and_open() {
             return 1
         fi
         tries=$((tries + 1))
-        if printf '%s' "$pass" | cryptsetup open --key-file=- "$dev" "$name" 2>/dev/null; then
+        if open_with "$dev" "$name" "$pass" "$recovery"; then
             log "opened ${dev} as /dev/mapper/${name} after ${tries} attempt(s)"
             return 0
         fi
         log "wrong passphrase for ${dev} (attempt ${tries})"
-        prompt="Wrong passphrase. Try again (${dev}):"
+        prompt=$wrong
     done
 }
 

@@ -286,6 +286,11 @@ func TestWizardDiskPassphrase(t *testing.T) {
 	}
 
 	m = keys(t, m, testPassphrase, "enter")
+	// Then the recovery key question, off by default.
+	if m.step != stepRecovery || !strings.Contains(m.View(), "Also create a recovery key?") {
+		t.Fatalf("step = %v, want stepRecovery", m.step)
+	}
+	m = keys(t, m, "enter")
 	if m.step != stepReview {
 		t.Fatalf("step = %v, want stepReview", m.step)
 	}
@@ -296,13 +301,17 @@ func TestWizardDiskPassphrase(t *testing.T) {
 		t.Errorf("review is wrong or shows the passphrase:\n%s", v)
 	}
 
-	// Back from review goes to the confirmation, then the first entry.
-	if m = keys(t, m, "esc"); m.step != stepPassphraseConfirm {
-		t.Errorf("esc from review = %v, want stepPassphraseConfirm", m.step)
+	// Back from review goes to the recovery key question, then the
+	// passphrase from its first entry.
+	if m = keys(t, m, "esc"); m.step != stepRecovery {
+		t.Errorf("esc from review = %v, want stepRecovery", m.step)
+	}
+	if m = keys(t, m, "esc"); m.step != stepPassphrase {
+		t.Errorf("esc from the recovery key = %v, want stepPassphrase", m.step)
 	}
 
 	// Turning encryption off again drops the passphrase.
-	m = keys(t, m, "esc", "esc")
+	m = keys(t, m, "esc")
 	if m.step != stepEncrypt {
 		t.Fatalf("step = %v, want stepEncrypt", m.step)
 	}

@@ -59,7 +59,7 @@ func trustedBootMedium(marker string) bool {
 
 // passphraseFile is the hand-off to kcrypt (kcrypt.passphrase_file). /run is
 // a tmpfs on the live system, so the file never touches a disk.
-const passphraseFile = "/run/hadron-install/passphrase"
+var passphraseFile = "/run/hadron-install/passphrase"
 
 // minPassphraseLen is the shortest disk passphrase the installer takes. The
 // passphrase is the only key, and anyone with the disk can guess offline, so

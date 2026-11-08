@@ -60,26 +60,22 @@ func TestConfirmsRecoveryKey(t *testing.T) {
 	}
 }
 
-func TestBigRecoveryKey(t *testing.T) {
-	for _, r := range modhex {
-		g, ok := bigGlyphs[r]
-		if !ok {
-			t.Fatalf("no glyph for %q", r)
-		}
-		for _, row := range g {
-			if len(row) != 3 {
-				t.Errorf("glyph %q row %q is not 3 wide", r, row)
-			}
-		}
+func TestRecoveryKeyLines(t *testing.T) {
+	key, _ := generateRecoveryKey(bytes.NewReader(bytes.Repeat([]byte{0x01, 0x23, 0x45, 0x67}, 8)))
+	lines := recoveryKeyLines(key)
+	if len(lines) != 6 {
+		t.Fatalf("%d lines, want 4 pairs, a blank and the key: %q", len(lines), lines)
 	}
-	key, _ := newRecoveryKey()
-	lines := bigRecoveryKey(key)
-	if len(lines) != 4*6 {
-		t.Fatalf("%d lines, want 4 pairs of 5 rows and a blank", len(lines))
+	g := recoveryKeyGroupsOf(key)
+	if want := "3  " + spaced(g[2]) + "    " + spaced(g[3]) + "  4"; lines[1] != want {
+		t.Errorf("line 2 = %q, want %q", lines[1], want)
+	}
+	if lines[5] != key {
+		t.Errorf("last line = %q", lines[5])
 	}
 	for _, l := range lines {
-		if n := len([]rune(l)); n > 80 {
-			t.Errorf("line is %d columns, over 80: %q", n, l)
+		if n := len([]rune(l)); n > 76 {
+			t.Errorf("line is %d columns: %q", n, l)
 		}
 	}
 }
@@ -276,5 +272,58 @@ func TestEncryptionStepsRecoveryKey(t *testing.T) {
 	}
 	if pre, _, _ := encryptionSteps(&Choice{Disk: "/dev/vda"}); pre != nil {
 		t.Error("a TPM-only install needs no post step")
+	}
+}
+
+// The normal edition: after the disk passphrase, "Also create a recovery
+// key?" and the same key screen and check.
+func TestWizardRecoveryKeyAfterThePassphrase(t *testing.T) {
+	key, _ := generateRecoveryKey(bytes.NewReader(bytes.Repeat([]byte{0x9a, 0xbc}, 16)))
+	m := atDisk(t)
+	m.newKey = func() (string, error) { return key, nil }
+	m.pickGroup = func() int { return 7 }
+	m = keys(t, m, "enter", "down", "enter", testPassphrase, "enter", testPassphrase, "enter")
+	if m.step != stepRecovery {
+		t.Fatalf("step = %v, want stepRecovery", m.step)
+	}
+	if v := m.View(); !strings.Contains(v, "Also create a recovery key?") || !strings.Contains(v, "forget the passphrase") {
+		t.Fatalf("view:\n%s", v)
+	}
+	m = keys(t, m, "down", "enter")
+	if m.step != stepRecoveryShow || !strings.Contains(m.View(), "7  "+spaced(recoveryKeyGroupsOf(key)[6])) {
+		t.Fatalf("key screen:\n%s", m.View())
+	}
+	m = keys(t, m, "enter", recoveryKeyGroupsOf(key)[7], "enter")
+	if m.step != stepReview || !m.choice.RecoveryKey || !m.choice.Encrypt {
+		t.Fatalf("step %v, choice %+v", m.step, m.choice)
+	}
+	cfg := RenderCloudConfig(m.choice, "$6$hash")
+	if strings.Contains(cfg, recoveryKeyGroupsOf(key)[0]) || !strings.Contains(cfg, "method: passphrase") {
+		t.Errorf("cloud-config:\n%s", cfg)
+	}
+	// Turning encryption off drops the key too.
+	m = keys(t, m, "esc", "esc", "esc", "up", "enter")
+	if m.choice.Encrypt || m.choice.RecoveryKey || m.choice.RecoveryKeyValue != "" {
+		t.Errorf("choice after turning encryption off = %+v", m.choice)
+	}
+}
+
+func TestEnrollRecoveryKeyWithThePassphrase(t *testing.T) {
+	old := recoveryKeyFile
+	recoveryKeyFile = filepath.Join(t.TempDir(), "hadron-install", "recovery-key")
+	t.Cleanup(func() { recoveryKeyFile = old })
+	key, _ := newRecoveryKey()
+	f := &fakeTB{added: map[string]bool{}}
+	pass := "/run/hadron-install/passphrase"
+	if err := enrollRecoveryKeyWith(f.run, "/dev/vda", key, &pass, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range f.calls {
+		if c.args[0] == "luksAddKey" {
+			j := strings.Join(c.args, " ")
+			if !strings.Contains(j, "--key-file "+pass) || strings.Contains(j, "--token-type") {
+				t.Errorf("luksAddKey %q", j)
+			}
+		}
 	}
 }

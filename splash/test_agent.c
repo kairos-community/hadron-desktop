@@ -95,6 +95,10 @@ static void test_title(void) {
     TITLE("Unlock the data disk:", "Unlock the data disk");
     TITLE("Gib das Passwort f\xc3\xbcr die Platte ein", "Enter the disk passphrase");   /* not in the font */
     TITLE("A very long message that will never fit in the panel at any scale", "Enter the disk passphrase");
+    /* kcrypt's prompts for a container with a recovery key, first and retry. */
+    TITLE("Enter the disk passphrase or recovery key", "Enter the disk passphrase or recovery key");
+    TITLE("Wrong passphrase or recovery key, try again", "Enter the disk passphrase or recovery key");
+    TITLE("Enter the disk passphrase", "Enter the disk passphrase");
 #undef TITLE
 }
 

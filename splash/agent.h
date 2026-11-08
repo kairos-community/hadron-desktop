@@ -46,6 +46,7 @@ int ask_alive(const ask_t *a);
    and names no
    device (no '/', no "luks"), with a trailing "(...)" and ':' cut off;
    otherwise "Enter the disk passphrase". Writes into buf and returns it. */
+int ask_mentions_recovery(const ask_t *a);
 const char *ask_title(const ask_t *a, char *buf, size_t n);
 
 /* 1 when this request is a retry after a wrong passphrase: the same non-empty

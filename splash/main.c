@@ -707,8 +707,12 @@ static void draw_prompt(canvas_t *c, const layout_t *l, double t) {
     fill(c, l->px, l->py, l->pw, 2 * ps, g_pr.retry && g_pr.st == P_ASK ? C_ERROR : C_BODY);
     int pad = 12 * ps, fx = l->px + pad, fw = l->pw - 2 * pad;
     const char *title = g_pr.title[0] ? g_pr.title : "Enter the disk passphrase";
-    if (text_width(title, ps) > fw) title = "Enter the disk passphrase";
-    draw_center(c, title, l->title_y, ps, C_HOT);
+    int ts = ps;
+    /* A long title (the recovery key one) drops a size before it is
+       replaced: at the smaller size it still fits most screens. */
+    if (text_width(title, ts) > fw && hs < ps && text_width(title, hs) <= fw) ts = hs;
+    if (text_width(title, ts) > fw) title = "Enter the disk passphrase", ts = ps;
+    draw_center(c, title, l->title_y, ts, C_HOT);
 
     fill(c, fx, l->field_y, fw, l->field_h, C_FIELD);
     int cy = l->field_y + l->field_h / 2, x = fx + 10 * ps;
@@ -741,7 +745,8 @@ static void draw_prompt(canvas_t *c, const layout_t *l, double t) {
     if (g_pr.st == P_CHECKING)
         draw_center(c, "Checking the passphrase...", l->note_y, hs, C_LABEL);
     else if (g_pr.retry)
-        draw_center(c, "Wrong passphrase, try again", l->note_y, hs, C_ERROR);
+        draw_center(c, strstr(g_pr.title, "recovery key") ? "Wrong passphrase or recovery key, try again"
+                                                          : "Wrong passphrase, try again", l->note_y, hs, C_ERROR);
     else
         draw_center(c, "Enter to unlock \xc2\xb7 Esc to clear", l->note_y, hs, C_LABEL);
 }
