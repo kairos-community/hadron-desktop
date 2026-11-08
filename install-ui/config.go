@@ -31,6 +31,14 @@ type Choice struct {
 	// in the cloud-config: it reaches kcrypt through passphraseFile.
 	Encrypt    bool
 	Passphrase string
+
+	// RecoveryKey adds a generated recovery key (RecoveryKeyValue) to the
+	// TPM-sealed containers of a Trusted Boot install, for the day the TPM
+	// refuses. Offered only on Trusted Boot media, never with Encrypt. The
+	// key is never in the cloud-config: the installer enrolls it itself
+	// after kairos-agent returns (enrollRecoveryKey).
+	RecoveryKey      bool
+	RecoveryKeyValue string
 }
 
 // desktopGroups are the supplemental groups a desktop user needs: seat/input for
@@ -65,6 +73,15 @@ func RenderCloudConfig(c Choice, hash string) string {
 		b.WriteString("kcrypt:\n")
 		fmt.Fprintf(&b, "  method: %s\n", kcryptPassphraseMethod)
 		fmt.Fprintf(&b, "  passphrase_file: %s\n", passphraseFile)
+	} else if c.RecoveryKey {
+		// The installer adds the recovery key keyslot before it reboots.
+		b.WriteString("  reboot: false\n")
+		// Ask on the console when the TPM refuses. On Trusted Boot this
+		// file sits in the encrypted OEM, so the boot also turns the
+		// prompt on from the recovery key's LUKS2 token; this says the
+		// same where the config can be read.
+		b.WriteString("kcrypt:\n")
+		b.WriteString("  passphrase_fallback: true\n")
 	} else {
 		b.WriteString("  reboot: true\n")
 	}
@@ -93,8 +110,11 @@ func RenderCloudConfig(c Choice, hash string) string {
 	fmt.Fprintf(&b, "            user = %s\n", c.Username)
 	b.WriteString("            session_index = 2\n")
 	writeLocaleStage(&b, c)
-	if c.Encrypt {
-		writeEncryptionMarker(&b)
+	switch {
+	case c.Encrypt:
+		writeEncryptionMarker(&b, "passphrase")
+	case c.RecoveryKey:
+		writeEncryptionMarker(&b, "tpm-recovery-key")
 	}
 	// The display name again, in case a kairos-agent stops passing gecos
 	// through. /etc is rebuilt from cloud-config at every boot, so it is set
@@ -107,16 +127,17 @@ func RenderCloudConfig(c Choice, hash string) string {
 	return b.String()
 }
 
-// writeEncryptionMarker records, with no secret, that the disk is encrypted
-// with a passphrase. Like the keyboard file it is written again at every
-// boot, because /etc is rebuilt from the image.
-func writeEncryptionMarker(b *strings.Builder) {
+// writeEncryptionMarker records, with no secret, how the disk is encrypted:
+// "passphrase", or "tpm-recovery-key" for a Trusted Boot install with a
+// recovery key. Like the keyboard file it is written again at every boot,
+// because /etc is rebuilt from the image.
+func writeEncryptionMarker(b *strings.Builder, mode string) {
 	b.WriteString("    - name: \"Hadron disk encryption marker\"\n")
 	b.WriteString("      files:\n")
 	fmt.Fprintf(b, "        - path: %s\n", encryptionMarker)
 	b.WriteString("          permissions: 0644\n")
 	b.WriteString("          content: |\n")
-	b.WriteString("            mode=passphrase\n")
+	fmt.Fprintf(b, "            mode=%s\n", mode)
 }
 
 // keyboardFile is the one place the installed system keeps the keyboard

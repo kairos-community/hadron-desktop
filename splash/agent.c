@@ -105,7 +105,19 @@ int ask_alive(const ask_t *a) {
     return !(kill((pid_t)a->pid, 0) < 0 && errno == ESRCH);
 }
 
+#define RECOVERY_TITLE "Enter the disk passphrase or recovery key"
+
+/* kcrypt says "recovery key" when the container has one (a systemd-recovery
+   token): the panel then names both, whatever else the message says, and
+   also on a retry. The panel draws it smaller when it is too wide. */
+int ask_mentions_recovery(const ask_t *a) {
+    for (const char *s = a->message; *s; s++)
+        if (!strncasecmp(s, "recovery key", 12)) return 1;
+    return 0;
+}
+
 const char *ask_title(const ask_t *a, char *buf, size_t n) {
+    if (ask_mentions_recovery(a)) { copy_str(buf, n, RECOVERY_TITLE, strlen(RECOVERY_TITLE)); return buf; }
     char m[256];
     copy_str(m, sizeof m, a->message, strlen(a->message));
     size_t L = strlen(m);

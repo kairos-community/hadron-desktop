@@ -93,6 +93,7 @@ if [ "$FLAVOR" = agent ]; then
         check "agent: no $f" "! test -e \$R$f"
     done
     check "agent: no hadron-ext (system extensions)" "! test -e \$R/usr/bin/hadron-ext"
+    check "agent: no hadron-recovery (disk recovery key)" "! test -e \$R/usr/bin/hadron-recovery"
     check "agent: no setting that merges unsigned extensions" \
         "! test -e \$R/etc/kairos/90_hadron_extensions.yaml && ! test -e \$R/system/oem/93_hadron_extensions.yaml"
     check "agent: no unit starts hadron-update" \
@@ -117,6 +118,9 @@ check_image "hadron-update is installed" 'test -x /usr/bin/hadron-update'
 check "the polkit policy declares the extensions action" \
     'grep -q "<action id=\"io.kairos.hadron-update.extensions\">" $R/usr/share/polkit-1/actions/io.kairos.hadron-update.policy'
 check_image "hadron-ext is a link to hadron-update" 'test "$(readlink /usr/bin/hadron-ext)" = hadron-update'
+check "the polkit policy declares the recovery action" \
+    'grep -q "<action id=\"io.kairos.hadron-update.recovery\">" $R/usr/share/polkit-1/actions/io.kairos.hadron-update.policy'
+check_image "hadron-recovery is a link to hadron-update" 'test "$(readlink /usr/bin/hadron-recovery)" = hadron-update'
 
 # polkitd answers the daemon's checks. It is D-Bus activated, so it needs its
 # activation file and unit, not an enable link.

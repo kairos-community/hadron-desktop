@@ -50,20 +50,53 @@ func rebootCommand() *exec.Cmd {
 // (whether or not the install worked), post checks the disk. All three are
 // nil for a choice without encryption, for --progress-only (the agent
 // appliance) and for a seeded config.
+//
+// A Trusted Boot install with a recovery key has no passphrase file: pre does
+// nothing, post adds the key to the TPM-sealed containers kairos-agent left
+// (enrollRecoveryKey writes and deletes its own 0600 file around that), and
+// cleanup makes sure that file is gone.
 func encryptionSteps(c *Choice) (pre func() error, cleanup func() error, post postInstall) {
+	if c != nil && c.RecoveryKey && !c.Encrypt {
+		disk, key := c.Disk, c.RecoveryKeyValue
+		pre = func() error { return nil }
+		cleanup = func() error { return removePassphraseFile(recoveryKeyFile) }
+		post = func(log func(string)) error { return enrollRecoveryKey(execRunner, disk, key, log) }
+		return pre, cleanup, post
+	}
 	if c == nil || !c.Encrypt {
 		return nil, nil, nil
 	}
 	disk, passphrase := c.Disk, c.Passphrase
+	withKey, key := c.RecoveryKey, c.RecoveryKeyValue
 	pre = func() error { return writePassphraseFile(passphraseFile, passphrase) }
-	cleanup = func() error { return removePassphraseFile(passphraseFile) }
-	post = func(log func(string)) error {
-		// The file goes before the check, so it is gone even when the
-		// check fails and the person walks away from the failure screen.
-		if err := cleanup(); err != nil {
-			return fmt.Errorf("deleting %s: %w", passphraseFile, err)
+	cleanup = func() error {
+		err := removePassphraseFile(passphraseFile)
+		if rerr := removePassphraseFile(recoveryKeyFile); err == nil {
+			err = rerr
 		}
-		return verifyEncryption(execRunner, disk, passphrase, log)
+		return err
+	}
+	post = func(log func(string)) error {
+		if !withKey {
+			// The file goes before the check, so it is gone even when
+			// the check fails and the person walks away from the
+			// failure screen.
+			if err := cleanup(); err != nil {
+				return fmt.Errorf("deleting %s: %w", passphraseFile, err)
+			}
+			return verifyEncryption(execRunner, disk, passphrase, log)
+		}
+		// With a recovery key the passphrase file is the existing key
+		// cryptsetup unlocks with to add it. It goes right after, and on
+		// any failure.
+		err := verifyEncryption(execRunner, disk, passphrase, log)
+		if err == nil {
+			err = enrollRecoveryKeyWith(execRunner, disk, key, &passphraseFile, log)
+		}
+		if cerr := cleanup(); cerr != nil && err == nil {
+			err = fmt.Errorf("deleting %s: %w", passphraseFile, cerr)
+		}
+		return err
 	}
 	return pre, cleanup, post
 }

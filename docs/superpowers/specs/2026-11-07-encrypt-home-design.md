@@ -150,3 +150,15 @@ so its own check passed. Then:
   one, and came up to the login screen with the right one;
   `/etc/hadron-desktop/encryption` held `mode=passphrase` and `/home` was on
   `/dev/mapper/vda5`.
+
+## Recovery key (2026-11-08)
+
+After the passphrase the installer asks "Also create a recovery key?", off by
+default. With it, the container gets a second keyslot: a generated key in
+systemd's recovery key format, with a `systemd-recovery` token, added after
+the install with the 0600 `/run` passphrase file as the existing key and never
+written to `/oem`. The boot prompt then reads "Enter the disk passphrase or
+recovery key" and takes either. `hadron-recovery new-key` replaces the key
+later; a reset that recreates the container (kairos-io/kairos#6025) drops it,
+and `new-key` adds a new one. Details in
+2026-11-07-trusted-boot-edition-design.md ("Recovery key management").

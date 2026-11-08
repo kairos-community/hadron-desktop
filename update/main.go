@@ -75,6 +75,10 @@ func main() {
 	if filepath.Base(os.Args[0]) == "hadron-ext" {
 		os.Exit(cmdExt(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
+	// So is hadron-recovery.
+	if filepath.Base(os.Args[0]) == "hadron-recovery" {
+		os.Exit(cmdRecovery(os.Args[1:], os.Stdout, os.Stderr))
+	}
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
@@ -101,6 +105,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdNotify(args, stderr)
 	case "ext":
 		return cmdExt(args, stdin, stdout, stderr)
+	case "recovery":
+		return cmdRecovery(args, stdout, stderr)
 	case "daemon":
 		return cmdDaemon(args, stderr)
 	case "help", "-h", "--help":

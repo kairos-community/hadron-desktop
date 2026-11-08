@@ -4842,6 +4842,8 @@ COPY --from=update-build /out/hadron-update /usr/bin/hadron-update
 # hadron-ext is the same binary: run under that name it is `hadron-update ext`
 # (system extensions, see update/ext.go).
 RUN ln -sf hadron-update /usr/bin/hadron-ext
+# And hadron-recovery, the disk recovery key (`hadron-update recovery`).
+RUN ln -sf hadron-update /usr/bin/hadron-recovery
 
 
 # ===========================================================================
