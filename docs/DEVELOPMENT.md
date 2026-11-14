@@ -75,8 +75,9 @@ kairos-init from the Kairos monorepo (`ghcr.io/kairos-io/kairos/kairos-init:mast
   from a GSettings vendor override (`color-scheme='prefer-dark'`, GTK3 theme
   `Adwaita-dark`); on COSMIC the COSMIC portal reports COSMIC's own theme.
 - **Two images per desktop:** the standard one, for desktops and laptops, has
-  Mesa's Intel (`iris`) and AMD (`radeonsi`) drivers and a curated
-  `linux-firmware` subset (`GPU=full FIRMWARE=true`). The VM one has only
+  Mesa's Intel (`iris`) and AMD (`radeonsi`) drivers, a chosen part of
+  `linux-firmware`, Intel SOF audio firmware and CPU microcode
+  (`GPU=full FIRMWARE=true`). The VM one has only
   `llvmpipe`, `virgl` and the other virtual drivers, and no firmware
   (`GPU=vm`, the default of a local build). Both run in a VM; the VM one is
   smaller. See [Releases](#releases).
@@ -208,8 +209,8 @@ Every desktop flavor is released in two lines:
 
 | Line | Build | ISO and upgrade image | For |
 | --- | --- | --- | --- |
-| full | `GPU=full FIRMWARE=true` | `hadron-desktop-<flavor>-<tag>-amd64.iso`, `:<flavor>-<tag>` | desktops and laptops: Intel and AMD GPU drivers, Wi-Fi, Bluetooth and GPU firmware. Also runs in a VM (llvmpipe, virgl) |
-| vm | `GPU=vm` | `hadron-desktop-<flavor>-vm-<tag>-amd64.iso`, `:<flavor>-vm-<tag>` | virtual machines: about 0.5 GB smaller, no hardware GPU drivers, no firmware |
+| full | `GPU=full FIRMWARE=true` | `hadron-desktop-<flavor>-<tag>-amd64.iso`, `:<flavor>-<tag>` | desktops and laptops: Intel and AMD GPU drivers, Wi-Fi, Bluetooth, GPU and audio firmware, CPU microcode. Also runs in a VM (llvmpipe, virgl) |
+| vm | `GPU=vm` | `hadron-desktop-<flavor>-vm-<tag>-amd64.iso`, `:<flavor>-vm-<tag>` | virtual machines: about 0.3 GB smaller, no hardware GPU drivers, no firmware |
 
 The agent is a VM appliance and has one line, built with `GPU=vm`:
 `hadron-desktop-agent-<tag>-amd64.iso` and `:agent-<tag>`.
@@ -439,7 +440,7 @@ those are hardware-validated):
 | M3 | PipeWire + WirePlumber | user services up, `wpctl` sink from emulated HDA |
 | M4 | BlueZ bluetooth | virtual adapter via `hci_vhci`+`btvirt`, `bluetoothctl`, bluez5 plugin |
 | M5 | Desktop polish | swaybar, mako, fuzzel, wl-clipboard, slurp, swayidle |
-| M6 | Real-hardware firmware | `regulatory.db` present; vendor blobs via `--build-arg FIRMWARE=true` (manual HW validation) |
+| M6 | Real-hardware firmware | `regulatory.db` present; vendor blobs, SOF and microcode via `--build-arg FIRMWARE=true` (manual HW validation) |
 
 ### Real hardware
 
@@ -450,13 +451,27 @@ docker build --build-arg FIRMWARE=true -t sway-desktop:hw .
 docker build --build-arg DESKTOP=i3 --build-arg FIRMWARE=true -t i3-desktop:hw .
 ```
 
-This bundles a curated subset of a pinned `linux-firmware` release (Intel,
-Qualcomm Atheros, Realtek, Broadcom, Marvell and MediaTek Wi-Fi and Bluetooth;
-Intel, AMD and NVIDIA graphics) into `/usr/lib/firmware`, compressed with zstd:
-about 1 GB of blobs as about 500 MB. They must not go to
-`/usr/local/lib/firmware`, which an installed system mounts its persistent
-partition over. Wi-Fi, Bluetooth and GPU firmware loading is checked by booting
-on a physical machine; CI does not test it.
+This bundles a chosen part of a pinned `linux-firmware` release, what common
+laptops and desktops need to show a display and to have Wi-Fi, Bluetooth,
+Ethernet and sound: AMD, Intel and nouveau GSP (Turing and later) graphics;
+Intel, Qualcomm laptop, Realtek, MediaTek laptop and USB, Broadcom and Marvell
+PCIe Wi-Fi and Bluetooth; Realtek Ethernet; Cirrus and TI speaker amplifiers.
+It adds Intel's SOF audio DSP firmware from a pinned `sof-bin` release, and
+the AMD and Intel CPU microcode, which dracut puts in the early cpio of the
+initramfs (the kernel loads microcode only there). The Dockerfile `firmware`
+stage lists the parts and what it leaves out. The blobs go to
+`/usr/lib/firmware`, compressed with zstd: about 290 MB, against about 960 MB
+for all of `linux-firmware`. They must not go to `/usr/local/lib/firmware`,
+which an installed system mounts its persistent partition over.
+
+`tools/install-firmware.sh` also makes the links `linux-firmware` declares to
+the installed files: drivers often ask for the link (iwlwifi asks for
+`iwlwifi-<card>.ucode` at the top of the directory). The build fails when a
+firmware name that the base image's kernel modules declare, and that the
+chosen parts provide, is not installed. `test/firmware/check-install-firmware.sh`
+checks the scripts on a fake tree. Firmware loading on real Wi-Fi, Bluetooth,
+GPU and audio hardware is checked by booting on a physical machine; CI does
+not test it.
 
 ### Hardware GPU (accelerated GL)
 

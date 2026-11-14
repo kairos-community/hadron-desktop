@@ -74,8 +74,8 @@ installed machine to another desktop and keeps your files.
 
    | File | Use it on |
    |---|---|
-   | `hadron-desktop-<desktop>-<version>-amd64.iso` | Laptops and desktops. Includes the Intel and AMD graphics drivers, and the Wi-Fi, Bluetooth and GPU firmware. |
-   | `hadron-desktop-<desktop>-vm-<version>-amd64.iso` | Virtual machines. About 0.5 GB smaller. |
+   | `hadron-desktop-<desktop>-<version>-amd64.iso` | Laptops and desktops. Includes the Intel and AMD graphics drivers, the Wi-Fi, Bluetooth, GPU and audio firmware, and CPU microcode. |
+   | `hadron-desktop-<desktop>-vm-<version>-amd64.iso` | Virtual machines. About 0.3 GB smaller. |
 
    Each ISO comes with a `.sha256` checksum, an SPDX SBOM and a build manifest
    that names every source it was built from.
