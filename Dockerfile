@@ -4126,12 +4126,34 @@ RUN make && make install DESTDIR=/snixembed PREFIX=/usr && \
     ! ldd /snixembed/usr/bin/snixembed | grep 'not found'
 
 # ===========================================================================
-# M6: real-hardware firmware (optional)
+# M6: real-hardware firmware (the full GPU line)
 #
-# Real wifi / bluetooth / GPU hardware needs firmware blobs. This is OFF by
-# default (the QEMU test path and slim images need no blobs); build with
-# --build-arg FIRMWARE=true to bundle a curated linux-firmware subset for
-# common laptop and desktop hardware. Not tested in CI: QEMU has none of it.
+# Real GPU, Wi-Fi, Bluetooth and audio hardware needs firmware blobs, and the
+# CPU needs its microcode updates. This is OFF by default (the vm line and the
+# QEMU test path need no blobs); the full line builds with
+# --build-arg FIRMWARE=true. Not tested in CI: QEMU has none of the hardware.
+#
+# It is a chosen part of linux-firmware, not all of it (about 960 MB with
+# zstd): what common laptops and desktops need to show a display and to have
+# Wi-Fi, Bluetooth, wired Ethernet and sound.
+#   GPU: amdgpu, radeon (GCN 1 and 2, older Radeons), i915, xe (Intel from
+#     Lunar Lake on), and nouveau's GSP firmware (Turing and later need it to
+#     drive the display; nouveau uses GSP by default). Only the GSP-RM release
+#     the kernel prefers (NOUVEAU_GSP_RM); no pre-Turing nvidia blobs, which
+#     only accelerate, and Mesa here has no NVIDIA driver.
+#   Wi-Fi and Bluetooth: Intel (iwlwifi, the 2 newest APIs of each card; ibt),
+#     the Qualcomm laptop chips (ath10k QCA6174/QCA9377/QCA988X, ath11k
+#     WCN6855/QCA6390/QCA2066, ath12k WCN7850/QCC2072, ath9k_htc, qca),
+#     Realtek (rtw88, rtw89, rtlwifi, rtl_bt), MediaTek (MT7921/22/25/27,
+#     MT76x0/x2/7601U/7615/7663), Broadcom (brcmfmac and the cypress files it
+#     links to), Marvell PCIe (Surface).
+#   Ethernet: rtl_nic (Realtek r8169).
+#   Sound: the laptop speaker amplifiers (cirrus cs35l*, ti/audio tas2781)
+#     here, and Intel's SOF DSP firmware from sof-bin below.
+#   Microcode: amd-ucode here, intel-ucode below.
+# Left out: router and access-point chips (mt7915/16/86/96, ath11k IPQ/QCN,
+# ath12k QCN9274/IPQ), Arm SoC and Chromebook firmware, Marvell switch and
+# SDIO firmware, server NICs and HBAs, TV tuners, NPUs.
 #
 # The blobs go to /usr/lib/firmware, never /usr/local/lib/firmware. In Hadron
 # (kairos-io/kairos#4290, in v0.6.4) the kernel finds /usr/local/lib/firmware
@@ -4139,51 +4161,98 @@ RUN make && make install DESTDIR=/snixembed PREFIX=/usr && \
 # COS_PERSISTENT is mounted over /usr/local, which hides every blob the image
 # put there. Only the live ISO could load them.
 #
-# tools/install-firmware.sh installs each directory the way upstream's
-# copy-firmware.sh --zstd installs all of them: it compresses the blobs with
-# zstd (about half the size; Hadron's kernel has CONFIG_FW_LOADER_COMPRESS_ZSTD
-# and Hadron's own blobs are .zst too) and creates the links WHENCE declares,
-# which the release tarball does not contain (most nvidia/<chip> directories
-# are links). A prefix that matches nothing fails the build, so a directory
-# upstream moves (iwlwifi-*.ucode moved to intel/iwlwifi/, and the old pattern
-# here then shipped no Intel Wi-Fi firmware at all) is noticed.
+# tools/install-firmware.sh installs the files the way upstream's
+# copy-firmware.sh --zstd does: compressed with zstd (Hadron's kernel has
+# CONFIG_FW_LOADER_COMPRESS_ZSTD), with every link WHENCE declares to them.
+# Drivers often ask for the link: iwlwifi asks for iwlwifi-<card>.ucode at the
+# top of the directory, which links into intel/iwlwifi/. --require checks every
+# firmware name the base image's kernel modules declare against the result, so
+# a missing link or an API that --newest dropped fails the build.
+#
+# The microcode stays uncompressed: dracut concatenates it into the early cpio
+# of the initramfs (kernel/x86/microcode/), and the kernel loads it only there
+# (CONFIG_MICROCODE_LATE_LOADING is off).
 # ===========================================================================
+FROM ${BASE_IMAGE} AS hadron-kernel
+
 FROM alpine:3 AS firmware
 ARG FIRMWARE=false
-# The tarball is checked against a pinned SHA256, so this is updated by hand
-# (scripts/check-renovate-pins.sh): take both values from
+# The tarballs are checked against pinned SHA256s, so these are updated by
+# hand (scripts/check-renovate-pins.sh). linux-firmware: take both values from
 # https://cdn.kernel.org/pub/linux/kernel/firmware/sha256sums.asc.
 ARG LINUX_FIRMWARE_VERSION=20261019
 ARG LINUX_FIRMWARE_SHA256=a10d1ab5baf2c74ba92e8c7cf313e691696c26bddfa6df00db795e48d70cd4ca
-RUN mkdir -p /firmware/usr/lib/firmware
-# intel/iwlwifi, intel/ibt-: Intel Wi-Fi and Bluetooth. ath*, qca: Qualcomm
-# Atheros. rtw*, rtl*: Realtek. brcm, mrvl, mediatek: Broadcom, Marvell,
-# MediaTek; cypress, because brcm links into it. i915, xe: Intel graphics (xe
-# from Lunar Lake on). amdgpu, radeon: AMD graphics (radeon for GCN 1 and 2 on
-# the radeon kernel driver). nvidia:
-# nouveau's display firmware; Mesa has no NVIDIA driver here, so those GPUs
-# render with llvmpipe. Hadron's base image already ships regulatory.db.
+# The newest GSP-RM release the kernel's nouveau declares; checked below.
+ARG NOUVEAU_GSP_RM=570.144
+# https://github.com/thesofproject/sof-bin/releases
+ARG SOF_BIN_VERSION=2026.09.2
+ARG SOF_BIN_SHA256=5f7bc30b2b5c1e6b0da55a33fc44e2b7f56ae9b06952edcde614f51ef6b943e1
+# https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files/tags
+ARG INTEL_UCODE_VERSION=20261110
+ARG INTEL_UCODE_SHA256=989a5cd345808babee491da69ed80ae5741697bc87743a71d0ba611f3fd6afa5
+RUN mkdir -p /firmware/usr/lib/firmware && \
+    if [ "$FIRMWARE" = "true" ]; then apk add --no-cache curl tar xz zstd coreutils; fi
 COPY tools/install-firmware.sh /usr/local/bin/install-firmware
-RUN if [ "$FIRMWARE" = "true" ]; then \
-      apk add --no-cache curl tar xz zstd coreutils && \
-      cd /tmp && \
-      curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
-        https://cdn.kernel.org/pub/linux/kernel/firmware/linux-firmware-${LINUX_FIRMWARE_VERSION}.tar.xz \
-        -o lf.tar.xz && \
-      echo "${LINUX_FIRMWARE_SHA256}  lf.tar.xz" | sha256sum -c - && \
-      prefixes="intel/iwlwifi/ intel/ibt- ath9k_htc/ ath10k/ ath11k/ ath12k/ qca/ \
-        rtw88/ rtw89/ rtlwifi/ rtl_bt/ rtl_nic/ brcm/ mrvl/ mediatek/ \
-        cypress/ i915/ xe/ amdgpu/ radeon/ nvidia/" && \
+RUN --mount=type=bind,from=hadron-kernel,source=/usr/lib/modules,target=/kmods \
+    if [ "$FIRMWARE" = "true" ]; then \
+      set -e && cd /tmp && \
+      find /kmods -name '*.ko*' | while read -r m; do \
+        case "$m" in *.zst) zstd -dcq "$m" ;; *.xz) xz -dc "$m" ;; *) cat "$m" ;; esac | \
+          tr '\0' '\n' | sed -n 's/^firmware=//p'; \
+      done | sort -u > kernel-firmware.txt && \
+      gsp="$(sed -n 's|^nvidia/tu102/gsp/gsp-\(.*\)\.bin$|\1|p' kernel-firmware.txt | sort -V | tail -n 1)" && \
+      if [ "$gsp" != "$NOUVEAU_GSP_RM" ]; then \
+        echo "nouveau prefers GSP-RM '$gsp', set NOUVEAU_GSP_RM to it" >&2; exit 1; \
+      fi && \
+      patterns="amdgpu/ radeon/ i915/ xe/ nvidia/*/gsp/*-${NOUVEAU_GSP_RM} \
+        intel/iwlwifi/ intel/ibt- \
+        ath9k_htc/ ath10k/QCA6174/ ath10k/QCA9377/ ath10k/QCA988X/ \
+        ath11k/WCN6855/ ath11k/QCA6390/ ath11k/QCA2066/ \
+        ath12k/WCN7850/ ath12k/QCC2072/ qca/ \
+        rtw88/ rtw89/ rtlwifi/ rtl_bt/ rtl_nic/ \
+        mediatek/WIFI_ mediatek/BT_RAM_CODE_ mediatek/mt7925/ mediatek/mt7927/ mediatek/mt76 \
+        brcm/brcmfmac cypress/ mrvl/pcie \
+        cirrus/ ti/audio/ \
+        amd-ucode/" && \
       top="linux-firmware-${LINUX_FIRMWARE_VERSION}" && \
+      curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+        https://cdn.kernel.org/pub/linux/kernel/firmware/${top}.tar.xz -o lf.tar.xz && \
+      echo "${LINUX_FIRMWARE_SHA256}  lf.tar.xz" | sha256sum -c - && \
       set -f && \
       tar -xJf lf.tar.xz --wildcards "$top/WHENCE" \
-        $(for p in $prefixes; do printf '%s/%s* ' "$top" "$p"; done) && \
-      set +f && \
+        $(for p in $patterns; do printf '%s/%s* ' "$top" "$p"; done) && \
       rm lf.tar.xz && \
-      install-firmware "$top" /firmware/usr/lib/firmware $prefixes && \
-      rm -rf "$top" ; \
+      install-firmware --newest intel/iwlwifi/=2 --require kernel-firmware.txt \
+        "$top" /firmware/usr/lib/firmware $patterns && \
+      set +f && \
+      rm -rf "$top" kernel-firmware.txt ; \
     fi
-
+COPY tools/install-sof.sh /usr/local/bin/install-sof
+RUN if [ "$FIRMWARE" = "true" ]; then \
+      set -e && cd /tmp && \
+      curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+        https://github.com/thesofproject/sof-bin/releases/download/v${SOF_BIN_VERSION}/sof-bin-${SOF_BIN_VERSION}.tar.gz \
+        -o sof.tar.gz && \
+      echo "${SOF_BIN_SHA256}  sof.tar.gz" | sha256sum -c - && \
+      tar -xzf sof.tar.gz && rm sof.tar.gz && \
+      install-sof "sof-bin-${SOF_BIN_VERSION}" /firmware/usr/lib/firmware && \
+      test -e /firmware/usr/lib/firmware/intel/sof-ipc4/mtl/intel-signed/sof-mtl.ri.zst && \
+      rm -rf "sof-bin-${SOF_BIN_VERSION}" ; \
+    fi
+RUN if [ "$FIRMWARE" = "true" ]; then \
+      set -e && cd /tmp && \
+      curl -fL --retry 5 --retry-delay 3 --retry-all-errors \
+        https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files/archive/refs/tags/microcode-${INTEL_UCODE_VERSION}.tar.gz \
+        -o ucode.tar.gz && \
+      echo "${INTEL_UCODE_SHA256}  ucode.tar.gz" | sha256sum -c - && \
+      tar -xzf ucode.tar.gz && rm ucode.tar.gz && \
+      mkdir -p /firmware/usr/lib/firmware/intel-ucode && \
+      cp Intel-Linux-Processor-Microcode-Data-Files-microcode-${INTEL_UCODE_VERSION}/intel-ucode/* \
+        /firmware/usr/lib/firmware/intel-ucode/ && \
+      test "$(ls /firmware/usr/lib/firmware/intel-ucode | wc -l)" -gt 100 && \
+      test -s /firmware/usr/lib/firmware/amd-ucode/microcode_amd_fam19h.bin && \
+      rm -rf Intel-Linux-Processor-Microcode-Data-Files-microcode-${INTEL_UCODE_VERSION} ; \
+    fi
 
 # ===========================================================================
 # Final assembly

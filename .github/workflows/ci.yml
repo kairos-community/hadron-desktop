@@ -83,6 +83,11 @@ jobs:
       - name: Emoji picker
         run: test/emoji/check-emoji.sh
 
+      # The firmware installers on a fake linux-firmware and sof-bin tree:
+      # top-level links, --newest, --require, SOF links.
+      - name: Firmware install scripts
+        run: test/firmware/check-install-firmware.sh
+
       - name: Session scripts and configs parse
         shell: bash
         run: |

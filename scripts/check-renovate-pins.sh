@@ -8,8 +8,9 @@ cd "$(dirname "$0")/.."
 
 # Updated by hand:
 #   HADRON: follow-hadron.yml moves it (scripts/bump-hadron.sh).
-#   FREETYPE, the GnuPG stack, SQLITE, LINUX_FIRMWARE: the tarball is checked
-#     against a pinned SHA256, which Renovate cannot update.
+#   FREETYPE, the GnuPG stack, SQLITE, LINUX_FIRMWARE, SOF_BIN, INTEL_UCODE:
+#     the tarball is checked against a pinned SHA256, which Renovate cannot
+#     update.
 #   ZIG: ly needs one exact Zig release.
 #   DEJAVU, LIBDBUSMENU, STARTUP_NOTIFICATION, ATK, LIBEV: no new releases,
 #     or no tags Renovate can read.
@@ -19,8 +20,8 @@ cd "$(dirname "$0")/.."
 #   UNICODE_EMOJI: unicode.org files, no tags Renovate can read.
 unmanaged="HADRON FREETYPE LIBGPGERROR LIBASSUAN GPGME LIBGCRYPT LIBKSBA NPTH
 SQLITE NTBTLS GNUPG ZIG DEJAVU LIBDBUSMENU STARTUP_NOTIFICATION ATK LIBEV LIBNL
-WPA HOSTAPD WIRELESS_REGDB GPERF NCURSES GETTEXT SBC GMP MPFR LINUX_FIRMWARE
-UNICODE_EMOJI"
+WPA HOSTAPD WIRELESS_REGDB GPERF NCURSES GETTEXT SBC GMP MPFR LINUX_FIRMWARE SOF_BIN
+INTEL_UCODE UNICODE_EMOJI"
 
 missing=$(awk -v unmanaged="$unmanaged" '
   BEGIN { n = split(unmanaged, u, /[ \n]+/); for (i = 1; i <= n; i++) skip[u[i]] = 1 }
