@@ -102,6 +102,11 @@ jobs:
       - name: Emoji picker
         run: test/emoji/check-emoji.sh
 
+      # The i3 launcher passes the X cookie file to Flatpak, so sandboxed apps
+      # can open a window.
+      - name: Flatpak X11 authorization
+        run: test/flatpak/check-x11-auth.sh
+
       # The firmware installers on a fake linux-firmware and sof-bin tree:
       # top-level links, --newest, --require, SOF links.
       - name: Firmware install scripts
