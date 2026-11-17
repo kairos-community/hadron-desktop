@@ -483,8 +483,9 @@ docker build --build-arg DESKTOP=i3 --build-arg FIRMWARE=true -t i3-desktop:hw .
 This bundles a chosen part of a pinned `linux-firmware` release, what common
 laptops and desktops need to show a display and to have Wi-Fi, Bluetooth,
 Ethernet and sound: AMD, Intel and nouveau GSP (Turing and later) graphics;
-Intel, Qualcomm laptop, Realtek, MediaTek laptop and USB, Broadcom and Marvell
-PCIe Wi-Fi and Bluetooth; Realtek Ethernet; Cirrus and TI speaker amplifiers.
+Intel, Qualcomm laptop, Realtek, MediaTek laptop and USB, Broadcom (brcmfmac and
+brcmsmac) and Marvell PCIe Wi-Fi and Bluetooth; Realtek Ethernet; Cirrus and TI
+speaker amplifiers.
 It adds Intel's SOF audio DSP firmware from a pinned `sof-bin` release, and
 the AMD and Intel CPU microcode, which dracut puts in the early cpio of the
 initramfs (the kernel loads microcode only there). The Dockerfile `firmware`

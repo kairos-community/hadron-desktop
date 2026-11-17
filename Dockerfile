@@ -4161,7 +4161,8 @@ RUN make && make install DESTDIR=/snixembed PREFIX=/usr && \
 #     WCN6855/QCA6390/QCA2066, ath12k WCN7850/QCC2072, ath9k_htc, qca),
 #     Realtek (rtw88, rtw89, rtlwifi, rtl_bt), MediaTek (MT7921/22/25/27,
 #     MT76x0/x2/7601U/7615/7663), Broadcom (brcmfmac and the cypress files it
-#     links to), Marvell PCIe (Surface).
+#     links to, and the two brcmsmac files that the bcma-bus chips of some
+#     2010-2012 laptops, such as MacBook Airs, load), Marvell PCIe (Surface).
 #   Ethernet: rtl_nic (Realtek r8169).
 #   Sound: the laptop speaker amplifiers (cirrus cs35l*, ti/audio tas2781)
 #     here, and Intel's SOF DSP firmware from sof-bin below.
@@ -4244,7 +4245,7 @@ RUN --mount=type=bind,from=hadron-kernel,source=/usr/lib/modules,target=/kmods \
         ath12k/WCN7850/ ath12k/QCC2072/ qca/ \
         rtw88/ rtw89/ rtlwifi/ rtl_bt/ rtl_nic/ \
         mediatek/WIFI_ mediatek/BT_RAM_CODE_ mediatek/mt7925/ mediatek/mt7927/ mediatek/mt76 \
-        brcm/brcmfmac cypress/ mrvl/pcie \
+        brcm/brcmfmac brcm/bcm43xx cypress/ mrvl/pcie \
         cirrus/ ti/audio/ \
         amd-ucode/" ; \
       fi && \
