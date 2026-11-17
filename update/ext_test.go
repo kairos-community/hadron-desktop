@@ -598,3 +598,30 @@ esac
 		t.Fatalf("dissect calls %q", got)
 	}
 }
+
+func TestStripANSI(t *testing.T) {
+	for in, want := range map[string]string{
+		"\x1b[90m2026-11-17T13:22:51+01:00\x1b[0m \x1b[32mINF\x1b[0m \x1b[1mCopying\x1b[0m": "2026-11-17T13:22:51+01:00 INF Copying",
+		"\x1b]0;title\x07plain":      "plain",
+		"\x1b[2K\x1b[1Aprogress 40%": "progress 40%",
+		"no escapes here":            "no escapes here",
+	} {
+		if got := stripANSI(in); got != want {
+			t.Errorf("stripANSI(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A command that colours its output, as kairos-agent does, must reach the
+// progress callback as plain text, and must be told not to colour.
+func TestStreamCommandPlainText(t *testing.T) {
+	var lines []string
+	err := streamCommand("sh", []string{"-c", `printf '\033[32mINF\033[0m copying\n'; echo "NO_COLOR=$NO_COLOR"`},
+		func(l string) { lines = append(lines, l) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(lines, "|"); got != "INF copying|NO_COLOR=1" {
+		t.Errorf("lines = %q", got)
+	}
+}

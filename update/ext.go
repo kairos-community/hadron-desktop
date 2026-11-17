@@ -647,6 +647,9 @@ func (kairosBackend) Dissect(path string) (ExtImage, error) {
 // the command in the error.
 func streamCommand(name string, args []string, progress func(string)) error {
 	cmd := exec.Command(name, args...)
+	// The lines go to a tray window and a log, not a terminal: ask for no
+	// colours, and strip any escape sequence that still comes through.
+	cmd.Env = append(os.Environ(), "NO_COLOR=1")
 	r, w, err := os.Pipe()
 	if err != nil {
 		return err
@@ -663,7 +666,7 @@ func streamCommand(name string, args []string, progress func(string)) error {
 	sc.Buffer(make([]byte, 64<<10), 1<<20)
 	sc.Split(scanLinesOrCR)
 	for sc.Scan() {
-		if l := strings.TrimSpace(sc.Text()); l != "" {
+		if l := strings.TrimSpace(stripANSI(sc.Text())); l != "" {
 			progress(l)
 		}
 	}
@@ -675,6 +678,13 @@ func streamCommand(name string, args []string, progress func(string)) error {
 	io.Copy(io.Discard, r)
 	return cmd.Wait()
 }
+
+// ansiSequence matches the terminal escape sequences a command writes even
+// when it is not on a terminal: CSI (colours, cursor moves) and OSC (titles,
+// links). A tray window cannot draw them; it shows the escape byte as a box.
+var ansiSequence = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
+
+func stripANSI(s string) string { return ansiSequence.ReplaceAllString(s, "") }
 
 // extCache keeps the merged catalog for releasesTTL, for the same reason the
 // release list is cached: every browse would otherwise fetch every catalog.
