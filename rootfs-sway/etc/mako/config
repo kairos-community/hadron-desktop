@@ -20,7 +20,7 @@ anchor=top-right
 invisible=1
 
 [urgency=high]
-border-color=#f7768e
+border-color=#ff857a
 default-timeout=0
 
 # Critical notifications still show in do not disturb.

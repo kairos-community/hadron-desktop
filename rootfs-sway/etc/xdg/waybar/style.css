@@ -11,8 +11,8 @@
 @define-color glow      #c6f36b;
 @define-color violet    #b49cf2;
 @define-color success   #3faf6e;
-@define-color warning   #e0af68;
-@define-color error     #f7768e;
+@define-color warning   #d87e18;
+@define-color error     #ff857a;
 @define-color on_accent #141411;
 
 /* Floating capsules: the bar itself is transparent and sits 6 px below the

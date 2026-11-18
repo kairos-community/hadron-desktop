@@ -18,9 +18,9 @@ import (
 var iconColors = map[string]color.NRGBA{
 	"idle":   rgb(0x8fd12e),
 	"update": rgb(0x3faf6e),
-	"busy":   rgb(0xe0af68),
+	"busy":   rgb(0xd87e18),
 	"reboot": rgb(0xb49cf2),
-	"error":  rgb(0xf7768e),
+	"error":  rgb(0xff857a),
 }
 
 var glyphColor = rgb(0x141411)

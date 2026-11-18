@@ -17,7 +17,7 @@ set $fg      #f4f5f2
 set $blue    #8fd12e
 set $cyan    #c6f36b
 set $magenta #b49cf2
-set $red     #f7768e
+set $red     #ff857a
 set $dim     #909287
 set $border  #393a34
 

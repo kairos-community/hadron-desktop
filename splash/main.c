@@ -363,7 +363,7 @@ static int text_run(double duration) {
 #define C_PANEL    0x1d1d1a
 #define C_FIELD    0x2a2b25
 #define C_LABEL    0x909287
-#define C_ERROR    0xf7768e
+#define C_ERROR    0xff857a
 
 /* A draw target: the mmapped framebuffer, or a heap buffer for --render.
    Pixels are composed in an XRGB back buffer and packed into the target's

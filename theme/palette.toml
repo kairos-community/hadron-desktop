@@ -29,8 +29,8 @@ accent    = "#8fd12e"  # focus, selection, brand
 glow      = "#c6f36b"  # secondary accent: clock, focus indicator
 violet    = "#b49cf2"  # tertiary accent: binding mode, matches
 success   = "#3faf6e"
-warning   = "#e0af68"
-error     = "#f7768e"
+warning   = "#d87e18"
+error     = "#ff857a"
 orange    = "#ff7442"
 on_accent = "#141411"  # text on accent, error and the other bright fills
 
