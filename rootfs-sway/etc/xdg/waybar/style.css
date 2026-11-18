@@ -5,6 +5,7 @@
 @define-color surface   #1d1d1a;
 @define-color overlay   #2a2b25;
 @define-color border    #393a34;
+@define-color subtext   #ced0c8;
 @define-color dim       #909287;
 @define-color text      #f4f5f2;
 @define-color accent    #8fd12e;
@@ -74,16 +75,18 @@ window#waybar {
 }
 
 #clock {
-    color: @glow;
+    color: @text;
     font-weight: bold;
 }
 
-#network        { color: @accent; }
-#bluetooth      { color: @glow; }
-#wireplumber    { color: @violet; }
-#cpu            { color: @success; }
-#memory         { color: @warning; }
-#battery        { color: @success; }
+/* One accent on the bar: modules are plain subtext, colour only for state
+   (low battery, muted, an icon that needs attention). */
+#network,
+#bluetooth,
+#wireplumber,
+#cpu,
+#memory,
+#battery        { color: @subtext; }
 
 #battery.warning  { color: @warning; }
 #battery.critical { color: @error; }
@@ -94,7 +97,7 @@ window#waybar {
 
 #tray > .needs-attention { color: @error; }
 
-#custom-power   { color: @error; padding: 0 12px 0 10px; }
+#custom-power   { color: @subtext; padding: 0 12px 0 10px; }
 #network:hover,
 #bluetooth:hover,
 #wireplumber:hover,
