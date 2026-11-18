@@ -994,15 +994,21 @@ static void draw_prompt(canvas_t *c, const layout_t *l, double t) {
 
 static layout_t layout(const canvas_t *c) {
     layout_t l;
-    /* The wordmark spans about half the width, capped by height, with whole-
-       pixel cells so the block art stays crisp. Cells are twice as tall as
-       wide, like a console cell. */
-    int cw = (c->w / 2) / ART_COLS;
-    int byh = (c->h / 4) / (ART_ROWS * 2);
-    if (byh < cw) cw = byh;
+    /* One whole-number scale for the screen, from its height: 1 below 1080
+       rows, 2 from 1080, 3 from 1800. Text, panel, spacing and the wordmark
+       all use it, so every screen keeps the proportions of the 1x design. */
+    int s = (c->h + 360) / 720;
+    if (s < 1) s = 1;
+    /* The wordmark: 7 px cells per unit of scale (twice as tall as wide, like
+       a console cell), but never more than half the width or a quarter of the
+       height, so a very wide or very short screen still fits. */
+    int cw = 7 * s;
+    int maxw = (c->w / 2) / ART_COLS, maxh = (c->h / 4) / (ART_ROWS * 2);
+    if (cw > maxw) cw = maxw;
+    if (cw > maxh) cw = maxh;
     if (cw < 2) cw = 2;
     l.cw = cw; l.ch = cw * 2;
-    l.ts = c->h >= 1400 ? 3 : c->h >= 900 ? 2 : 1;
+    l.ts = s;
     int art_w = ART_COLS * l.cw, art_h = ART_ROWS * l.ch;
     int line = FONT_H * l.ts;
     /* The mark above the wordmark: its hexagon a little taller than the
@@ -1022,9 +1028,9 @@ static layout_t layout(const canvas_t *c) {
     if (l.top < 0) l.top = 0;
     l.bottom = l.sts_y + line + 4 * l.ts;
 
-    /* Panel text: at least 16x32 from 700 rows up, so the question reads at
-       a glance; the hint under the field is one step smaller. */
-    l.ps = l.ts > 1 ? l.ts : c->h >= 700 ? 2 : 1;
+    /* The panel uses the same scale as everything else; the hint under the
+       field is one step smaller. */
+    l.ps = l.ts;
     int ps = l.ps, hs = ps > 1 ? ps - 1 : 1;
     l.pw = 36 * FONT_W * ps;
     if (l.pw > c->w - 32) l.pw = c->w - 32;
