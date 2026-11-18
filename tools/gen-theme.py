@@ -100,7 +100,7 @@ RULES = {
         (r"^selection={hex}ff$", "overlay"),
         (r"^selection-text={hex}ff$", "text"),
         (r"^selection-match={hex}ff$", "violet"),
-        (r"^border={hex}ff$", "accent"),
+        (r"^border={hex}ff$", "border"),
     ]),
     "rootfs-sway/etc/mako/config": ("hash", "hash", [
         (r"^background-color=#{hex}[0-9a-fA-F]{{2}}$", "base"),
