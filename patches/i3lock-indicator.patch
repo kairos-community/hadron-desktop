@@ -1,0 +1,58 @@
+--- a/unlock_indicator.c	2026-11-18 11:16:13.194951721 +0100
++++ b/unlock_indicator.c	2026-11-18 11:16:13.206701973 +0100
+@@ -23,7 +23,7 @@
+ #include "randr.h"
+ #include "dpi.h"
+ 
+-#define BUTTON_RADIUS 90
++#define BUTTON_RADIUS 70
+ #define BUTTON_SPACE (BUTTON_RADIUS + 5)
+ #define BUTTON_CENTER (BUTTON_RADIUS + 5)
+ #define BUTTON_DIAMETER (2 * BUTTON_SPACE)
+@@ -174,7 +174,18 @@
+  *
+  */
+ void draw_image(xcb_pixmap_t bg_pixmap, uint32_t *resolution) {
+-    const double scaling_factor = get_dpi_value() / 96.0;
++    /* One whole-number scale from the height of the smallest screen, the rule
++     * the boot splash uses: 1 below 1080 rows, 2 from 1080, 3 from 1800. The
++     * ring then keeps its share of the screen on a small laptop and a 4K
++     * monitor alike, where the DPI is 96 on both. */
++    int min_height = last_resolution[1];
++    for (int i = 0; i < xr_screens; i++) {
++        if (xr_resolutions[i].height < min_height) {
++            min_height = xr_resolutions[i].height;
++        }
++    }
++    int scale = (min_height + 360) / 720;
++    const double scaling_factor = scale < 1 ? 1 : scale;
+     int button_diameter_physical = ceil(scaling_factor * BUTTON_DIAMETER);
+     DEBUG("scaling_factor is %.f, physical diameter is %d px\n",
+           scaling_factor, button_diameter_physical);
+@@ -222,7 +233,7 @@
+     }
+ 
+     if (unlock_indicator &&
+-        (unlock_state >= STATE_KEY_PRESSED || auth_state > STATE_AUTH_IDLE)) {
++        true) {
+         cairo_scale(ctx, scaling_factor, scaling_factor);
+         /* Draw a (centered) circle with transparent background. */
+         cairo_set_line_width(ctx, 10.0);
+@@ -297,7 +308,7 @@
+ 
+         cairo_set_source_rgb(ctx, 0, 0, 0);
+         cairo_select_font_face(ctx, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+-        cairo_set_font_size(ctx, 28.0);
++        cairo_set_font_size(ctx, 22.0);
+         switch (auth_state) {
+             case STATE_AUTH_VERIFY:
+                 text = "Verifying…";
+@@ -323,7 +334,7 @@
+                         text = buf;
+                     }
+                     cairo_set_source_rgb(ctx, 1, 0, 0);
+-                    cairo_set_font_size(ctx, 32.0);
++                    cairo_set_font_size(ctx, 25.0);
+                 }
+                 break;
+         }

@@ -2887,6 +2887,15 @@ WORKDIR /build
 RUN curl --retry-all-errors -fL --retry 5 https://github.com/i3/i3lock/archive/refs/tags/${I3LOCK_VERSION}.tar.gz -o i3lock.tar.gz && \
     tar -xf i3lock.tar.gz && mv i3lock-* src
 WORKDIR /build/src
+# i3lock hides its unlock indicator until the first key press, so a locked
+# screen is a flat colour that looks like a sleeping display, and it sizes the
+# ring by DPI, which is 96 on a laptop panel and a 4K monitor alike, so it is
+# oversized on one and tiny on the other. The patch draws the ring from the
+# start and sizes it with the same whole-number scale the boot splash uses.
+# i3lock has no option for either. `patch` fails the build if a release moves
+# the code.
+COPY patches/i3lock-indicator.patch /build/i3lock-indicator.patch
+RUN patch -p1 < /build/i3lock-indicator.patch
 RUN pip3 install meson ninja
 RUN meson setup buildDir ${COMMON_MESON_FLAGS}
 RUN DESTDIR=/i3lock ninja -C buildDir install
