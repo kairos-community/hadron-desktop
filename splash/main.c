@@ -64,7 +64,7 @@
    console, so we use its palette indices, which the kernel command line sets
    from theme/palette.toml (tools/gen-theme.py, VT_ROLES): 4 and 12 = accent
    (lime), 8 = dim, 14 = glow (light lime), 15 = text, white-hot. */
-static const uint8_t TOKYO[8] = {4, 4, 8, 12, 12, 12, 14, 15};
+static const uint8_t RAMP[8] = {4, 4, 8, 12, 12, 12, 14, 15};
 #define A_CHROME 1   /* faint HUD brackets / leaders */
 #define A_DIM    2   /* tagline, version */
 #define A_BODY   4   /* logo at rest */
@@ -175,7 +175,7 @@ static void paint_logo(grid_t *g, int top, int left, int scan, int flick,
                 int cc = c;
                 if (gl > 0 && xu(rng) < gl * 0.12) cc += (int)(xs(rng) % 3) - 1;
                 if (flick && ci > 0) ci--;               /* phosphor flicker dip */
-                g_set(g, top + r, left + cc, put, TOKYO[ci]);
+                g_set(g, top + r, left + cc, put, RAMP[ci]);
             }
             p += a; c++;
         }
@@ -304,11 +304,11 @@ static int text_run(double duration) {
         int scan  = ((int)(t * 9.0)) % (ART_ROWS + 4) - 2;     /* sweep down, wrap */
         double gl = t < GLITCH_SEC ? (1.0 - t / GLITCH_SEC) : 0.0;
 
-        paint_brackets(&cur, fr_t, fr_l, fr_b, fr_r, TOKYO[A_CHROME]);
+        paint_brackets(&cur, fr_t, fr_l, fr_b, fr_r, RAMP[A_CHROME]);
         paint_logo(&cur, top, left, scan, flick, gl, &rng);
-        paint_center(&cur, tag_row, TAG, TOKYO[flick ? A_CHROME : A_DIM]);
-        if (g_ver[0]) paint_center(&cur, ver_row, g_ver, TOKYO[A_CHROME]);
-        if (g_hotkey && rows - 2 > fr_b) paint_center(&cur, rows - 2, HINT, TOKYO[A_DIM]);
+        paint_center(&cur, tag_row, TAG, RAMP[flick ? A_CHROME : A_DIM]);
+        if (g_ver[0]) paint_center(&cur, ver_row, g_ver, RAMP[A_CHROME]);
+        if (g_hotkey && rows - 2 > fr_b) paint_center(&cur, rows - 2, HINT, RAMP[A_DIM]);
 
         /* typewritten boot line, cycling through the phrases, blinking cursor */
         if (t > GLITCH_SEC * 0.5) {
@@ -318,9 +318,9 @@ static int text_run(double duration) {
             int shown = (int)((bt - bi * 1.40) * 24.0);
             int tot = (int)strlen(msg); if (shown > tot) shown = tot; if (shown < 0) shown = 0;
             int sl = (cols - (tot + 4)) / 2; if (sl < 0) sl = 0;
-            g_set(&cur, sts_row, sl, ">", TOKYO[A_DIM]);
-            for (int i = 0; i < shown; i++) { char ch[2] = { msg[i], 0 }; g_set(&cur, sts_row, sl + 2 + i, ch, TOKYO[A_BODY]); }
-            if (((int)(t * 2)) & 1) g_set(&cur, sts_row, sl + 2 + shown, "_", TOKYO[A_HOT]);
+            g_set(&cur, sts_row, sl, ">", RAMP[A_DIM]);
+            for (int i = 0; i < shown; i++) { char ch[2] = { msg[i], 0 }; g_set(&cur, sts_row, sl + 2 + i, ch, RAMP[A_BODY]); }
+            if (((int)(t * 2)) & 1) g_set(&cur, sts_row, sl + 2 + shown, "_", RAMP[A_HOT]);
         }
 
         /* Differential renderer: force a periodic full repaint so a stray
