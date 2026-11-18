@@ -4,8 +4,11 @@
 # configs that use it. CI runs `python3 tools/gen-theme.py --check`, which
 # fails when a config drifts from this file or a contrast floor is broken.
 #
-# The colours follow the Kairos design system (github.com/kairos-io/design):
-# its violet-ink neutrals, with Isotope lime as the accent. Night is what the
+# The colours follow the Kairos design system (github.com/kairos-io/design)
+# for roles and contrast, with Isotope's own neutrals: a warm graphite, leaning
+# slightly toward the lime, so the desktop does not read as a blue-violet
+# terminal theme. Isotope lime is the accent; Kairos orange stays as the family
+# tie. Night is what the
 # splash, GRUB, ly, sway and i3 use. Day is for Noctalia's light mode (and
 # later COSMIC and Flatpak apps); sway and i3 have no light mode yet.
 #
@@ -13,15 +16,15 @@
 # "inactive label" and not "grey".
 
 [night]
-crust     = "#0e0d13"  # darkest: terminal black, text on accent
-base      = "#15141c"  # desktop, terminal, bars, popups
-surface   = "#1f1e28"  # capsules, cards
-overlay   = "#2a2935"  # selection, hover
-border    = "#3c3a49"  # inactive borders, separators
-muted     = "#5c596a"  # decoration only (2.8:1 on base); never for text you must read
-dim       = "#8f8ba3"  # inactive labels, placeholders (4.1:1 on base)
-subtext   = "#cbc8d6"  # secondary text
-text      = "#f2f1f5"  # primary text
+crust     = "#0c0d0b"  # darkest: terminal black, text on accent
+base      = "#141411"  # desktop, terminal, bars, popups
+surface   = "#1d1d1a"  # capsules, cards
+overlay   = "#2a2b25"  # selection, hover
+border    = "#393a34"  # inactive borders, separators
+muted     = "#595b52"  # decoration only (2.8:1 on base); never for text you must read
+dim       = "#909287"  # inactive labels, placeholders (4.1:1 on base)
+subtext   = "#ced0c8"  # secondary text
+text      = "#f4f5f2"  # primary text
 accent    = "#8fd12e"  # focus, selection, brand
 glow      = "#c6f36b"  # secondary accent: clock, focus indicator
 violet    = "#b49cf2"  # tertiary accent: binding mode, matches
@@ -29,18 +32,18 @@ success   = "#3faf6e"
 warning   = "#e0af68"
 error     = "#f7768e"
 orange    = "#ff7442"
-on_accent = "#15141c"  # text on accent, error and the other bright fills
+on_accent = "#141411"  # text on accent, error and the other bright fills
 
 [day]
-crust     = "#d8d5e0"
-base      = "#f2f1f5"
+crust     = "#d8d9d3"
+base      = "#f4f5f2"
 surface   = "#ffffff"
-overlay   = "#e6e4ec"
-border    = "#c9c5d3"
-muted     = "#6e6a80"
-dim       = "#5c596a"
-subtext   = "#494656"
-text      = "#1c1b24"
+overlay   = "#e9eae6"
+border    = "#cbcdc6"
+muted     = "#76786d"
+dim       = "#61635a"
+subtext   = "#4a4c43"
+text      = "#1c1d19"
 accent    = "#3b7504"
 glow      = "#0b6e6e"
 violet    = "#6d3fd0"

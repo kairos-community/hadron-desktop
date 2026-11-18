@@ -67,7 +67,7 @@ static void fill_rect(cairo_t *cr, cairo_surface_t *image, double x, double y, d
 }
 
 int main(int argc, char **argv) {
-    const char *name = argc > 1 ? argv[1] : "#15141c";
+    const char *name = argc > 1 ? argv[1] : "#141411";
     const char *path = argc > 2 ? argv[2] : NULL;
     Display *display = XOpenDisplay(NULL);
     if (display == NULL) {

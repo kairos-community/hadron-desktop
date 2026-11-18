@@ -3,10 +3,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kairos-community/isotope/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/kairos-community/isotope?style=flat-square&color=8fd12e&labelColor=15141c"></a>
-  <a href="https://github.com/kairos-community/isotope/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/kairos-community/isotope/ci.yml?branch=main&style=flat-square&label=CI&labelColor=15141c"></a>
-  <img alt="musl" src="https://img.shields.io/badge/libc-musl-b49cf2?style=flat-square&labelColor=15141c">
-  <img alt="amd64" src="https://img.shields.io/badge/arch-amd64-c6f36b?style=flat-square&labelColor=15141c">
+  <a href="https://github.com/kairos-community/isotope/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/kairos-community/isotope?style=flat-square&color=8fd12e&labelColor=141411"></a>
+  <a href="https://github.com/kairos-community/isotope/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/kairos-community/isotope/ci.yml?branch=main&style=flat-square&label=CI&labelColor=141411"></a>
+  <img alt="musl" src="https://img.shields.io/badge/libc-musl-b49cf2?style=flat-square&labelColor=141411">
+  <img alt="amd64" src="https://img.shields.io/badge/arch-amd64-c6f36b?style=flat-square&labelColor=141411">
 </p>
 
 <p align="center">

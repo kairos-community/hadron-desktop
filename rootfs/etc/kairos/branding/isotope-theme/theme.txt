@@ -37,7 +37,7 @@ terminal-font: "Unifont Regular 16"
     left  = 0
     width = 100%
     align = "center"
-    color = "#5c596a"
+    color = "#595b52"
     font  = "Unifont Regular 16"
     text  = "@VARIANT_SUBTITLE@"
 }
@@ -49,7 +49,7 @@ terminal-font: "Unifont Regular 16"
     top                  = 38%
     height               = 38%
     item_font            = "Unifont Regular 16"
-    item_color           = "#cbc8d6"
+    item_color           = "#ced0c8"
     selected_item_color  = "#c6f36b"
     item_height          = 26
     item_padding         = 6
@@ -68,10 +68,10 @@ terminal-font: "Unifont Regular 16"
     height       = 16
     show_text    = true
     font         = "Unifont Regular 16"
-    text_color   = "#8f8ba3"
+    text_color   = "#909287"
     fg_color     = "#8fd12e"
-    bg_color     = "#15141c"
-    border_color = "#3c3a49"
+    bg_color     = "#141411"
+    border_color = "#393a34"
     text         = "@TIMEOUT_NOTIFICATION_MIDDLE@"
 }
 
@@ -81,7 +81,7 @@ terminal-font: "Unifont Regular 16"
     left  = 0
     width = 100%
     align = "center"
-    color = "#8f8ba3"
+    color = "#909287"
     font  = "Unifont Regular 16"
     text  = "up/down select   enter boot   e edit   c console"
 }

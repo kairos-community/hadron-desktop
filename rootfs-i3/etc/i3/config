@@ -11,15 +11,15 @@ set $right l
 # Isotope palette. Generated from theme/palette.toml by tools/gen-theme.py:
 # edit the palette, not these values. Inactive titles and workspace labels use
 # $dim, not the darker decoration grey, so they stay readable.
-set $bg      #15141c
-set $bg_alt  #1f1e28
-set $fg      #f2f1f5
+set $bg      #141411
+set $bg_alt  #1d1d1a
+set $fg      #f4f5f2
 set $blue    #8fd12e
 set $cyan    #c6f36b
 set $magenta #b49cf2
 set $red     #f7768e
-set $dim     #8f8ba3
-set $border  #3c3a49
+set $dim     #909287
+set $border  #393a34
 
 font pango:Inter Variable 10
 default_border pixel 2
@@ -43,7 +43,7 @@ client.background       $bg
 # The Isotope wallpaper, scaled to fill each monitor, on the base colour (which
 # also shows if the image is missing). exec_always repaints it when i3 restarts,
 # e.g. after a monitor is plugged in.
-exec_always --no-startup-id isotope-xroot '#15141c' /usr/share/backgrounds/isotope/isotope-tiles-night-3840x2160.png
+exec_always --no-startup-id isotope-xroot '#141411' /usr/share/backgrounds/isotope/isotope-tiles-night-3840x2160.png
 exec --no-startup-id /usr/bin/pipewire
 exec --no-startup-id /usr/bin/wireplumber
 exec --no-startup-id dunst
@@ -67,7 +67,7 @@ bindsym $mod+Return        exec --no-startup-id $term
 bindsym $mod+d             exec --no-startup-id $menu
 # The old PATH-only runner, for a command that has no .desktop file.
 # help: Run a command that has no app entry
-bindsym $mod+Shift+d       exec --no-startup-id dmenu_run -i -l 12 -p "Run" -fn "Inter Variable-11" -nb "#15141c" -nf "#f2f1f5" -sb "#8fd12e" -sf "#15141c"
+bindsym $mod+Shift+d       exec --no-startup-id dmenu_run -i -l 12 -p "Run" -fn "Inter Variable-11" -nb "#141411" -nf "#f4f5f2" -sb "#8fd12e" -sf "#141411"
 # help: Close the focused window
 bindsym $mod+Shift+q       kill
 bindsym $mod+Shift+c       reload
@@ -91,7 +91,7 @@ bindsym $mod+semicolon     exec --no-startup-id isotope-emoji
 # Screen lock. i3lock checks the password through /etc/pam.d/i3lock. xss-lock
 # runs the same command on idle and before suspend, from
 # config.d/10-screen-lock.conf (variables set here reach included files).
-set $lock i3lock --nofork --ignore-empty-password --show-failed-attempts --color=15141c
+set $lock i3lock --nofork --ignore-empty-password --show-failed-attempts --color=141411
 # help-section: System
 # help: Lock the screen
 bindsym $mod+Mod1+l        exec --no-startup-id $lock

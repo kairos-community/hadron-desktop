@@ -516,7 +516,7 @@ func TestIcons(t *testing.T) {
 			// on_accent colour that stays readable on the light discs.
 			if kind == "busy" {
 				r, g, b, _ := img.At(size/2, size/2).RGBA()
-				if uint8(r>>8) != 0x15 || uint8(g>>8) != 0x14 || uint8(b>>8) != 0x1c {
+				if uint8(r>>8) != 0x14 || uint8(g>>8) != 0x14 || uint8(b>>8) != 0x11 {
 					t.Errorf("busy/%d: glyph colour %02x%02x%02x", size, r>>8, g>>8, b>>8)
 				}
 			}

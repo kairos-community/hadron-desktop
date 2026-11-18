@@ -27,17 +27,17 @@
     mouse_left_click = do_action, close_current
 
 [urgency_low]
-    background = "#15141c"
-    foreground = "#cbc8d6"
+    background = "#141411"
+    foreground = "#ced0c8"
     highlight = "#8fd12e"
 
 [urgency_normal]
-    background = "#15141c"
-    foreground = "#f2f1f5"
+    background = "#141411"
+    foreground = "#f4f5f2"
     highlight = "#8fd12e"
 
 [urgency_critical]
-    background = "#15141c"
+    background = "#141411"
     foreground = "#f7768e"
     highlight = "#f7768e"
     frame_color = "#f7768e"

@@ -23,7 +23,7 @@ var iconColors = map[string]color.NRGBA{
 	"error":  rgb(0xf7768e),
 }
 
-var glyphColor = rgb(0x15141c)
+var glyphColor = rgb(0x141411)
 
 // rgb is the opaque colour 0xRRGGBB.
 func rgb(v uint32) color.NRGBA {

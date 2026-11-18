@@ -1,19 +1,19 @@
 /* Waybar: the Isotope palette. Matches the sway, foot, fuzzel and mako colours. */
 /* Colours: generated from theme/palette.toml by tools/gen-theme.py. Edit the
    palette, not these values. */
-@define-color base      #15141c;
-@define-color surface   #1f1e28;
-@define-color overlay   #2a2935;
-@define-color border    #3c3a49;
-@define-color dim       #8f8ba3;
-@define-color text      #f2f1f5;
+@define-color base      #141411;
+@define-color surface   #1d1d1a;
+@define-color overlay   #2a2b25;
+@define-color border    #393a34;
+@define-color dim       #909287;
+@define-color text      #f4f5f2;
 @define-color accent    #8fd12e;
 @define-color glow      #c6f36b;
 @define-color violet    #b49cf2;
 @define-color success   #3faf6e;
 @define-color warning   #e0af68;
 @define-color error     #f7768e;
-@define-color on_accent #15141c;
+@define-color on_accent #141411;
 
 /* Floating capsules: the bar itself is transparent and sits 6 px below the
    top edge (margins in the config); each module is a capsule with radius 8,
