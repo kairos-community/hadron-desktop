@@ -25,6 +25,7 @@ func TestRenderCloudConfigContainsRequiredFields(t *testing.T) {
 		"user = ada",
 		"session_index = 2",
 		"usermod -c ada ada",
+		"usermod -s /bin/bash ada",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("rendered config missing %q\n---\n%s", want, out)

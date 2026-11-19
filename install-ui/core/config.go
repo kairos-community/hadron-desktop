@@ -124,6 +124,15 @@ func RenderCloudConfig(c Choice, hash string) string {
 	b.WriteString("    - name: \"Isotope display name\"\n")
 	b.WriteString("      commands:\n")
 	fmt.Fprintf(&b, "        - usermod -c %s %s\n", c.Username, c.Username)
+	// The login shell. Kairos' users schema has no shell field, so the user is
+	// created with /bin/sh. As a login shell that is bash in sh mode: it reads
+	// neither ~/.profile nor ~/.bashrc, so ~/.local/bin never reaches PATH.
+	// chsh does not last, because /etc is rebuilt at every boot, so it is set
+	// again each boot like the display name. Running usermod twice changes
+	// nothing, so no guard is needed.
+	b.WriteString("    - name: \"Isotope login shell\"\n")
+	b.WriteString("      commands:\n")
+	fmt.Fprintf(&b, "        - usermod -s /bin/bash %s\n", c.Username)
 	return b.String()
 }
 
