@@ -4,11 +4,11 @@
 "Tiles": the Tessellate pattern of the Kairos design system
 (github.com/kairos-io/design). A hex grid whose tiles are split into three
 rhombi, the faces of a cube. Near the right of the frame some faces are filled
-in the three lime tones, and the fill thins out to a faint outline grid on the
+in the three brand tones, and the fill thins out to a faint outline grid on the
 left, which stays calm for the first tiled window and the desktop icons. The
-Isotope mark (a hexagon of six triangles, one pushed out) sits in the field as
+Isotope mark (M1: a hexagon shell, its sixth side lifted off, a core) sits in the field as
 its focal point. Under it all is the GRUB background's recipe: a vertical
-base -> crust gradient with a faint accent glow above the frame, a light
+base -> crust gradient with a faint brand glow above the frame, a light
 vignette, and triangular dithering, so the dark gradient does not band on
 8-bit panels. The "plain" variant is the same background without the tiles and
 the mark, for the lock and login screens.
@@ -85,44 +85,50 @@ def hex_round(fq, fr):
     return q, r
 
 
-def mark_triangles(cx, cy, R):
-    """The Isotope mark: six triangles of a pointy-top hexagon around
-    (cx, cy), each shrunk toward its own centre so a gap shows between them,
-    the first pushed out along its outward normal. Returns (points, tone)
-    with tone 0, 1 or 2 (light, mid, deep)."""
-    v = [(cx + R * math.cos(math.radians(-90 + 60 * i)),
-          cy + R * math.sin(math.radians(-90 + 60 * i))) for i in range(6)]
-    tris = []
-    for i in range(6):
-        a, b = v[i], v[(i + 1) % 6]
-        pts = [(cx, cy), a, b]
-        if i == 0:
-            mx, my = (a[0] + b[0]) / 2 - cx, (a[1] + b[1]) / 2 - cy
-            m = math.hypot(mx, my)
-            d = 0.2 * R
-            pts = [(p[0] + mx / m * d, p[1] + my / m * d) for p in pts]
-        gx = sum(p[0] for p in pts) / 3
-        gy = sum(p[1] for p in pts) / 3
-        k = 0.94
-        pts = [(gx + (p[0] - gx) * k, gy + (p[1] - gy) * k) for p in pts]
-        tris.append((pts, i % 3))
-    return tris
+# The Isotope mark, M1, in docs/assets/isotope-mark.svg's 512 box: the
+# hexagon's centre and corner radius, the shell's outer and inner corners
+# (from the top, clockwise; the side from the top to the upper right is the
+# one lifted off), the lifted side and the core.
+M1_C, M1_R = (245.76, 273.61), 204.80
+M1_OUT = [(245.76, 68.81), (423.12, 171.21), (423.12, 376.01), (245.76, 478.41), (68.40, 376.01), (68.40, 171.21)]
+M1_IN = [(245.76, 104.29), (392.40, 188.95), (392.40, 358.28), (245.76, 442.94), (99.12, 358.28), (99.12, 188.95)]
+M1_LID = [(266.24, 33.34), (443.60, 135.74), (412.88, 153.48), (266.24, 68.81)]
+M1_CORE = 34.82
 
 
-def tri_coverage(x, y, pts):
-    """Anti-aliased coverage of pixel (x, y) by a triangle: the signed
-    distance to its nearest edge, as a one-pixel ramp."""
-    d = 1e9
-    area = ((pts[1][0] - pts[0][0]) * (pts[2][1] - pts[0][1])
-            - (pts[1][1] - pts[0][1]) * (pts[2][0] - pts[0][0]))
+def mark_shapes(cx, cy, R):
+    """The mark centred on (cx, cy) with corner radius R, as convex shapes:
+    (points, tone) for the five sides of the shell and the lifted side, and
+    the core as ((x, y, r), tone). Tone 0 is the light tone, 1 the brand."""
+    k = R / M1_R
+    f = lambda p: (cx + (p[0] - M1_C[0]) * k, cy + (p[1] - M1_C[1]) * k)
+    shapes = []
+    for i in range(1, 6):
+        j = (i + 1) % 6
+        shapes.append(([f(M1_OUT[i]), f(M1_OUT[j]), f(M1_IN[j]), f(M1_IN[i])], 1))
+    shapes.append(([f(p) for p in M1_LID], 0))
+    shapes.append(((cx, cy, M1_CORE * k), 0))
+    return shapes
+
+
+def shape_coverage(x, y, shape):
+    """Anti-aliased coverage of pixel (x, y) by a convex polygon, or by a
+    circle given as (x, y, r): the signed distance to the edge, as a
+    one-pixel ramp."""
+    if len(shape) == 3 and not isinstance(shape[0], tuple):
+        sx, sy, r = shape
+        return max(0.0, min(1.0, r - math.hypot(x - sx, y - sy) + 0.5))
+    pts = shape
+    n = len(pts)
+    area = sum(pts[i][0] * pts[(i + 1) % n][1] - pts[(i + 1) % n][0] * pts[i][1] for i in range(n))
     sign = 1.0 if area > 0 else -1.0
-    for i in range(3):
+    d = 1e9
+    for i in range(n):
         ax, ay = pts[i]
-        bx, by = pts[(i + 1) % 3]
+        bx, by = pts[(i + 1) % n]
         ex, ey = bx - ax, by - ay
-        # Positive inside: the same side of every edge as the third vertex.
-        dd = sign * (ex * (y - ay) - ey * (x - ax)) / math.hypot(ex, ey)
-        d = min(d, dd)
+        # Positive inside: the same side of every edge as the rest.
+        d = min(d, sign * (ex * (y - ay) - ey * (x - ax)) / math.hypot(ex, ey))
     return max(0.0, min(1.0, d + 0.5))
 
 
@@ -134,6 +140,10 @@ def draw(P, mode, W, H, plain, night_palette=None):
     acc = rgb(P["brand"])
     N = night_palette or P
     tones = (rgb(N["brand_glow"]), rgb(N["brand"]), rgb(N["brand_deep"]))
+    # The mark's two tones, as in docs/assets: the light tone and the brand
+    # at night; on day, ink for the shell and the deep tone for the light,
+    # since the light tones vanish on a light ground.
+    mark_tones = (tones[0], tones[1]) if night else (rgb(N["brand_deep"]), rgb(P["text"]))
     line = rgb(P["border"])
     s = H / 1080.0
     glow_k = 0.10 if night else 0.06
@@ -148,7 +158,7 @@ def draw(P, mode, W, H, plain, night_palette=None):
     def bias(u, v):
         return max(0.0, 0.92 - math.hypot((u - 0.86) * W / H, v - 0.52) * 1.05)
     mcx, mcy, mR = W * 0.72, H * 0.50, 150.0 * s
-    mark = mark_triangles(mcx, mcy, mR)
+    mark = mark_shapes(mcx, mcy, mR)
     # Tiles stay clear of the mark: a hexagon a little larger than it.
     clear_R = mR * 1.55
 
@@ -197,10 +207,10 @@ def draw(P, mode, W, H, plain, night_palette=None):
                         la = line_a * (0.25 + 0.75 * min(1.0, bias(x / W, ty) * 1.6)) * max(0.0, min(1.0, lw + 0.5 - e))
                         r += (line[0] - r) * la; g += (line[1] - g) * la; b += (line[2] - b) * la
                 if near_mark and abs(x - mcx) < mR * 1.4:
-                    for pts, tone in mark:
-                        c = tri_coverage(x, y, pts)
+                    for shape, tone in mark:
+                        c = shape_coverage(x + 0.5, y + 0.5, shape)
                         if c > 0:
-                            col = tones[tone]
+                            col = mark_tones[tone]
                             r += (col[0] - r) * c; g += (col[1] - g) * c; b += (col[2] - b) * c
             # vignette
             vx = (x / W - 0.5) * 2; vy = (ty - 0.5) * 2
