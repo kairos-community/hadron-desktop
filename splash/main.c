@@ -869,10 +869,10 @@ static void prompt_tick(void) {
    per pixel, so it is the same at any size.
 
    Mark units: the hexagon's corner radius is 1, y points up, the core is at
-   0,0. Shell thickness 0.150, lift 0.120, core radius 0.170. */
+   0,0. Shell thickness 0.150, lift 0.200, core radius 0.170. */
 #define K30     0.8660254037844386
 #define M_T     0.150
-#define M_LIFT  0.120
+#define M_LIFT  0.200
 #define M_CORE  0.170
 #define M_AIN   (K30 - M_T)        /* centre to the shell's inner faces */
 #define SHAFT_GAIN   0.36   /* a shaft's light where it leaves the slit */
