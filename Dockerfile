@@ -5340,17 +5340,18 @@ RUN chmod 1777 /tmp; \
     # the accent came out cyan and the navy background black. Instead ly asks
     # for the console's own colours, which the kernel command line sets to the
     # Isotope palette (vt.default_* in grubmenu.cfg): the default background is
-    # colour 0 (base), bright white is 15 (text), bright blue is 12 (accent),
-    # red is 1 (error). The values are 0xSSRRGGBB: styling 0x40 is TB_BRIGHT,
-    # 0x01 is bold, and the low byte is a termbox colour (2 red, 5 blue,
-    # 8 white). No animation: decision 8 dropped the "Black Hole" one, whose
+    # colour 0 (base), bright white is 15 (text), bright yellow is 11 (brand:
+    # the login box is a brand moment, like the splash), red is 1 (error).
+    # Not bright blue: that is the terminal's own blue. The values are
+    # 0xSSRRGGBB: styling 0x40 is TB_BRIGHT, 0x01 is bold, and the low byte is
+    # a termbox colour (2 red, 4 yellow, 8 white). No animation: decision 8 dropped the "Black Hole" one, whose
     # licence is not stated.
     sed -i \
       -e 's/^animation = .*/animation = none/' \
       -e 's/^full_color = .*/full_color = false/' \
       -e 's/^bg = .*/bg = 0x00000000/' \
       -e 's/^fg = .*/fg = 0x40000008/' \
-      -e 's/^border_fg = .*/border_fg = 0x40000005/' \
+      -e 's/^border_fg = .*/border_fg = 0x40000004/' \
       -e 's/^error_fg = .*/error_fg = 0x01000002/' \
       -e 's/^error_bg = .*/error_bg = 0x00000000/' \
       -e 's/^box_title = .*/box_title = Isotope/' \
