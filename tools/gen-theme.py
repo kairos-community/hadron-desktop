@@ -153,22 +153,20 @@ RULES = {
     # The boot splash's framebuffer colours (its text-mode fallback uses the
     # console palette below by index).
     "splash/main.c": (None, "hash", [
-        (r"^#define C_BG_TOP\s+0x{hex}$", "base"),
-        (r"^#define C_BG_BOT\s+0x{hex}$", "crust"),
-        # The splash is a brand surface: it never follows the theme accent.
-        (r"^#define C_(?:GLOW|BODY)\s+0x{hex}$", "brand"),
-        (r"^#define C_CYAN\s+0x{hex}$", "brand_glow"),
-        (r"^#define C_MARK_L\s+0x{hex}$", "brand_glow"),
-        (r"^#define C_MARK_M\s+0x{hex}$", "brand"),
-        (r"^#define C_MARK_D\s+0x{hex}$", "brand_deep"),
-        (r"^#define C_HOT\s+0x{hex}$", "text"),
-        (r"^#define C_SHADOW\s+0x{hex}$", "border"),
-        (r"^#define C_DIM\s+0x{hex}$", "muted"),
-        (r"^#define C_TEXT\s+0x{hex}$", "subtext"),
-        # The disk passphrase panel.
-        (r"^#define C_PANEL\s+0x{hex}$", "surface"),
-        (r"^#define C_FIELD\s+0x{hex}$", "overlay"),
+        (r"^#define C_CRUST\s+0x{hex}$", "crust"),
+        (r"^#define C_BASE\s+0x{hex}$", "base"),
+        (r"^#define C_SURFACE\s+0x{hex}$", "surface"),
+        (r"^#define C_OVERLAY\s+0x{hex}$", "overlay"),
+        (r"^#define C_BORDER\s+0x{hex}$", "border"),
+        (r"^#define C_MUTED\s+0x{hex}$", "muted"),
         (r"^#define C_LABEL\s+0x{hex}$", "dim"),
+        (r"^#define C_SUBTEXT\s+0x{hex}$", "subtext"),
+        (r"^#define C_HOT\s+0x{hex}$", "text"),
+        # The splash is a brand surface: it never follows the theme accent.
+        (r"^#define C_BRAND\s+0x{hex}$", "brand"),
+        (r"^#define C_BGLOW\s+0x{hex}$", "brand_glow"),
+        (r"^#define C_BDEEP\s+0x{hex}$", "brand_deep"),
+        (r"^#define C_WARN\s+0x{hex}$", "warning"),
         (r"^#define C_ERROR\s+0x{hex}$", "error"),
     ]),
     # st: the sed that sets its default colours (the rest of the Dockerfile
