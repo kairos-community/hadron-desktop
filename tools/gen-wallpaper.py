@@ -17,7 +17,7 @@ The image is a pure function of the palette, the variant and the size: the
 tile choice and the dither noise come from fixed seeds, and the PNG has no
 timestamp, so two runs write the same bytes. The Dockerfile runs this at build
 time (stdlib only, no network), so an edit to theme/palette.toml reaches the
-wallpapers too. tools/gen-grub-bg.py draws the GRUB background with draw().
+wallpapers too.
 
     gen-wallpaper.py OUTDIR NAME...
 
@@ -126,11 +126,9 @@ def tri_coverage(x, y, pts):
     return max(0.0, min(1.0, d + 0.5))
 
 
-def draw(P, mode, W, H, plain, layout="desktop", night_palette=None):
-    """Rows of RGB bytes. layout "desktop" is the wallpaper; "grub" keeps the
-    tiles to the right edge and puts a small mark at the top centre, above
-    the theme's title, so the centred boot menu stays readable. night_palette gives the brand tones of the
-    tiles and the mark; it defaults to P."""
+def draw(P, mode, W, H, plain, night_palette=None):
+    """Rows of RGB bytes. night_palette gives the brand tones of the tiles
+    and the mark; it defaults to P."""
     night = mode == "night"
     top, bot = rgb(P["base"]), rgb(P["crust"])
     acc = rgb(P["brand"])
@@ -147,17 +145,10 @@ def draw(P, mode, W, H, plain, layout="desktop", night_palette=None):
     apo = r_t * S3 / 2                  # tile apothem
     spokes = [(math.cos(math.radians(a)), math.sin(math.radians(a))) for a in (-150, -30, 90)]
 
-    if layout == "grub":
-        def bias(u, v):
-            return max(0.0, 0.85 - math.hypot((u - 1.02) * W / H, v - 0.55) * 1.55)
-        # A small mark centred above the theme's title (theme.txt).
-        mcx, mcy, mR = W * 0.5, H * 0.115, 60.0 * s
-        mark = mark_triangles(mcx, mcy, mR)
-    else:
-        def bias(u, v):
-            return max(0.0, 0.92 - math.hypot((u - 0.86) * W / H, v - 0.52) * 1.05)
-        mcx, mcy, mR = W * 0.72, H * 0.50, 150.0 * s
-        mark = mark_triangles(mcx, mcy, mR)
+    def bias(u, v):
+        return max(0.0, 0.92 - math.hypot((u - 0.86) * W / H, v - 0.52) * 1.05)
+    mcx, mcy, mR = W * 0.72, H * 0.50, 150.0 * s
+    mark = mark_triangles(mcx, mcy, mR)
     # Tiles stay clear of the mark: a hexagon a little larger than it.
     clear_R = mR * 1.55
 

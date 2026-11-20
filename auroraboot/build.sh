@@ -48,12 +48,12 @@ sed -e "s|{{NOMODESET}}|${NOMODESET}|g" \
     auroraboot/live-grub.cfg.tmpl > "$OVERLAY_DIR/boot/grub2/grub.cfg"
 
 # Ship the Isotope theme alongside the menu so the LIVE boot is themed too.
-# Same three files the installed system gets from the 09_isotope_grub_theme oem
-# stage — one source of truth for both. The font must travel with the theme:
-# theme.txt references "Unifont Regular 16", which only exists once our vendored
-# unicode.pf2 is loaded. The background is TGA because GRUB's png.mod rejects
-# valid PNGs with "unsupported format".
-cp "$THEME_SRC/theme.txt" "$THEME_SRC/unicode.pf2" "$THEME_SRC/background.tga" \
+# The same files the installed system gets from the 09_isotope_grub_theme oem
+# stage, one source of truth for both. The fonts must travel with the theme:
+# theme.txt names "Inter Regular 18/24" and the terminal "Unifont Regular 16",
+# which only exist once live-grub.cfg loads the .pf2 files. The images are TGA
+# because GRUB's png.mod rejects valid PNGs with "unsupported format".
+cp "$THEME_SRC/theme.txt" "$THEME_SRC"/*.pf2 "$THEME_SRC"/*.tga \
    "$OVERLAY_DIR/boot/grub2/themes/isotope/"
 
 # theme.txt carries an @VARIANT_SUBTITLE@ placeholder that the Dockerfile

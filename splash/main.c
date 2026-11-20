@@ -1512,6 +1512,14 @@ int main(int argc, char **argv) {
         /* The scene on its own, for the grounds the build draws with the same
            light (GRUB, the lock screen, the installer's desktop). */
         else if (!strcmp(a, "--bare")) g_bare = 1;
+        /* The GRUB background tools/gen-grub-bg.py writes: the mark asleep, a
+           dark shell lit only on its inner edge. */
+        else if (!strcmp(a, "--grub")) {
+            g_bare = 1;
+            g_mark[0] = .29; g_mark[1] = .54; g_mark[2] = .27;
+            g_scene_set.power = .52; g_scene_set.shell = 0; g_scene_set.lift = 1; g_scene_set.core = 1;
+            g_have_scene = 1;
+        }
         else if (!strncmp(a, "--bench=", 8)) g_bench = atoi(a + 8);
         else if (!strncmp(a, "--ground=", 9)) g_ground = strtol(a + 9, NULL, 16);
         else if (!strncmp(a, "--mark=", 7)) sscanf(a + 7, "%lf,%lf,%lf", &g_mark[0], &g_mark[1], &g_mark[2]);

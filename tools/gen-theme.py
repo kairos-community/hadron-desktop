@@ -139,16 +139,16 @@ RULES = {
         (r"^\s+inactive-color \"#{hex}\"$", "border"),
         (r"^\s+urgent-color \"#{hex}\"$", "error"),
     ]),
-    # GRUB menu theme (live and installed). The footer and countdown are text
-    # to read, so dim; the subtitle under the wordmark is decoration, so muted.
+    # GRUB menu theme (live and installed). Brand: the countdown line and the
+    # selected entry are the brand's light; the rest is the theme's greys.
     "rootfs/etc/kairos/branding/isotope-theme/theme.txt": ("hash", "hash", [
-        (r'^\s+color\s+= "#{hex}"$', ["brand", "muted", "dim"]),  # wordmark, subtitle, footer
-        (r'^\s+item_color\s+= "#{hex}"$', "subtext"),
+        (r'^desktop-color: "#{hex}"$', "crust"),
+        (r'^\s+color\s+= "#{hex}"$', ["muted", "dim", "muted"]),  # subtitle, countdown, keys
+        (r'^\s+item_color\s+= "#{hex}"$', "dim"),
         (r'^\s+selected_item_color\s+= "#{hex}"$', "brand_glow"),
-        (r'^\s+text_color\s+= "#{hex}"$', "dim"),
         (r'^\s+fg_color\s+= "#{hex}"$', "brand"),
-        (r'^\s+bg_color\s+= "#{hex}"$', "base"),
-        (r'^\s+border_color\s+= "#{hex}"$', "border"),
+        (r'^\s+bg_color\s+= "#{hex}"$', "overlay"),
+        (r'^\s+border_color\s+= "#{hex}"$', "overlay"),
     ]),
     # The boot splash's framebuffer colours (its text-mode fallback uses the
     # console palette below by index).
