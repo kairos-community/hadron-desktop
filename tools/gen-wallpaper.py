@@ -140,6 +140,12 @@ def draw(P, mode, W, H, plain, night_palette=None):
     acc = rgb(P["brand"])
     N = night_palette or P
     tones = (rgb(N["brand_glow"]), rgb(N["brand"]), rgb(N["brand_deep"]))
+    # One light: the tiles are graphite, the cube's three faces three greys,
+    # and the only colour is the light of the mark's core, which they catch
+    # the nearer they are to it. Yellow is light here, never paint.
+    faces = (rgb(P["muted"]), rgb(P["border"]), rgb(P["overlay"])) if night else \
+        (rgb(P["border"]), rgb(P["dim"]), rgb(P["overlay"]))
+    light = rgb(N["brand"])
     # The mark's two tones, as in docs/assets: the light tone and the brand
     # at night; on day, ink for the shell and the deep tone for the light,
     # since the light tones vanish on a light ground.
@@ -147,7 +153,7 @@ def draw(P, mode, W, H, plain, night_palette=None):
     line = rgb(P["border"])
     s = H / 1080.0
     glow_k = 0.10 if night else 0.06
-    fill_a = 0.30 if night else 0.34
+    fill_a = 0.55 if night else 0.40
     line_a = 0.55 if night else 0.65
 
     r_t = 56.0 * s                      # tile radius
@@ -161,6 +167,9 @@ def draw(P, mode, W, H, plain, night_palette=None):
     mark = mark_shapes(mcx, mcy, mR)
     # Tiles stay clear of the mark: a hexagon a little larger than it.
     clear_R = mR * 1.55
+    # How far the core's light reaches, and how strong it is on the ground.
+    reach = mR * 3.2
+    halo_k = 0.16 if night else 0.07
 
     gcx, gcy, grad = W * 0.5, -H * 0.15, H * 0.95
     seed = 0x9E3779B9
@@ -173,6 +182,14 @@ def draw(P, mode, W, H, plain, night_palette=None):
         near_mark = mark and abs(y - mcy) < mR * 1.3
         for x in range(W):
             r, g, b = base
+            if not plain:
+                ld = math.hypot(x - mcx, y - mcy) / reach
+                lit = math.exp(-ld * ld * 2.2)
+                if lit > 0.002:
+                    hk = halo_k * lit
+                    r += (light[0] - r) * hk; g += (light[1] - g) * hk; b += (light[2] - b) * hk
+            else:
+                lit = 0.0
             dx = x - gcx
             k = 1.0 - math.sqrt(dx * dx + dy0 * dy0) / grad
             if k > 0:
@@ -196,7 +213,11 @@ def draw(P, mode, W, H, plain, night_palette=None):
                     face = 0 if -150 <= a < -30 else (2 if -30 <= a < 90 else 1)
                     if tile_hash(q, rr, face) < t:
                         fa = fill_a * min(1.0, 0.35 + t)
-                        col = tones[face]
+                        lt = math.exp(-((tx - mcx) ** 2 + (tyy - mcy) ** 2) / reach ** 2 * 2.2)
+                        f = faces[face]
+                        # The face toward the light (the top one) catches most of it.
+                        cat = lt * (0.55, 0.30, 0.18)[face]
+                        col = mix(f, light, cat)
                         r += (col[0] - r) * fa; g += (col[1] - g) * fa; b += (col[2] - b) * fa
                     # Outline: the hexagon's edge and the three spokes.
                     e = apo - max(abs(ex), abs(ex * 0.5 + ey * S3 / 2), abs(-ex * 0.5 + ey * S3 / 2))
