@@ -2831,8 +2831,8 @@ RUN curl --retry-all-errors -fL --retry 5 https://dl.suckless.org/st/st-${ST_VER
     sed -i -e 's|Liberation Mono:pixelsize=12:antialias=true:autohint=true|JetBrains Mono:pixelsize=15:antialias=true:autohint=true|' \
            -e 's|static int borderpx = 2;|static int borderpx = 10;|' \
            -e 's|char \*termname = "st-256color";|char *termname = "xterm-256color";|' \
-           -e 's|"gray90", /\* default foreground colour \*/|"#f2f1f5", /* default foreground colour */|' \
-           -e 's|"black", /\* default background colour \*/|"#15141c", /* default background colour */|' config.def.h && \
+           -e 's|"gray90", /\* default foreground colour \*/|"#f4f5f2", /* default foreground colour */|' \
+           -e 's|"black", /\* default background colour \*/|"#141411", /* default background colour */|' config.def.h && \
     grep -q '"JetBrains Mono:pixelsize=15:' config.def.h && \
     make -j"$(nproc)" CC=cc && install -m0755 st /x11-desktop-tools/usr/bin/st
 

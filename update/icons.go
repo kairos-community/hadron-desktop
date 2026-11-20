@@ -16,14 +16,14 @@ import (
 // Colours: generated from theme/palette.toml by tools/gen-theme.py.
 
 var iconColors = map[string]color.NRGBA{
-	"idle":   rgb(0x8fd12e),
-	"update": rgb(0x3faf6e),
-	"busy":   rgb(0xe0af68),
-	"reboot": rgb(0xb49cf2),
-	"error":  rgb(0xf7768e),
+	"idle":   rgb(0xe4de48),
+	"update": rgb(0x37be95),
+	"busy":   rgb(0xea8a18),
+	"reboot": rgb(0xd896db),
+	"error":  rgb(0xff7172),
 }
 
-var glyphColor = rgb(0x15141c)
+var glyphColor = rgb(0x141411)
 
 // rgb is the opaque colour 0xRRGGBB.
 func rgb(v uint32) color.NRGBA {

@@ -162,8 +162,8 @@ jobs:
 
       # The image build draws the wallpapers; a non-deterministic generator
       # would make every build ship different bytes. The committed GRUB
-      # background must still be what the palette draws.
-      - name: Wallpapers are deterministic, GRUB background matches the palette
+      # pictures must still be what the palette and the splash draw.
+      - name: Wallpapers are deterministic, GRUB pictures match the palette
         run: |
           set -euo pipefail
           for d in a b; do
@@ -171,8 +171,20 @@ jobs:
           done
           cmp "$RUNNER_TEMP/a/isotope-tiles-night-480x270.png" "$RUNNER_TEMP/b/isotope-tiles-night-480x270.png"
           cmp "$RUNNER_TEMP/a/isotope-plain-day-480x270.png" "$RUNNER_TEMP/b/isotope-plain-day-480x270.png"
-          python3 tools/gen-grub-bg.py "$RUNNER_TEMP/background.tga"
-          cmp "$RUNNER_TEMP/background.tga" rootfs/etc/kairos/branding/isotope-theme/background.tga
+          make -C splash isotope-splash
+          mkdir -p "$RUNNER_TEMP/grub"
+          python3 tools/gen-grub-bg.py "$RUNNER_TEMP/grub"
+          # The background is the splash's float arithmetic; another compiler
+          # or libm may round a pixel differently, so allow one step.
+          python3 - "$RUNNER_TEMP/grub" rootfs/etc/kairos/branding/isotope-theme <<'PY'
+          import sys, pathlib
+          new, old = map(pathlib.Path, sys.argv[1:])
+          for f in sorted(new.glob("*.tga")):
+              a, b = f.read_bytes(), (old / f.name).read_bytes()
+              assert len(a) == len(b) and a[:18] == b[:18], f"{f.name}: size or header differs"
+              worst = max(abs(x - y) for x, y in zip(a, b))
+              assert worst <= 1, f"{f.name} differs from the committed one (by {worst}): run tools/gen-grub-bg.py"
+          PY
 
       - name: Prebuilt stage keys
         run: |

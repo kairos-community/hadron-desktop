@@ -6,26 +6,26 @@ import "image/color"
 // table, which are theme/palette.toml's night palette, the same as the
 // splash and GRUB.
 var (
-	ColDesk1     = RGB(0x2c3a1c) // the glow at the top of the desktop
-	ColDesk2     = RGB(0x15141c)
-	ColDesk3     = RGB(0x0e0d13)
-	ColWindow    = RGB(0x1f1e28)
-	ColSidebar   = RGB(0x191820)
-	ColFooter    = RGB(0x1c1b24)
-	ColField     = RGB(0x2a2935)
-	ColAccent    = RGB(0x8fd12e)
-	ColOnAccent  = RGB(0x15141c)
-	ColGlow      = RGB(0xc6f36b)
-	ColCheck     = RGB(0x4e9a06)
-	ColText      = RGB(0xf2f1f5)
-	ColText2     = RGB(0xcbc8d6)
-	ColDim       = RGB(0x8f8ba3)
-	ColRing      = RGB(0x5c596a)
-	ColError     = RGB(0xf7768e)
-	ColErrorText = RGB(0xf7a3b3)
-	ColDisabled  = RGB(0x3c3a49)
-	ColKeyBox    = RGB(0x15141c)
-	ColWarn      = RGB(0xe0af68) // the palette's yellow: a warning, not an error
+	ColDesk1     = RGB(0x2e2c17) // the brand glow at the top of the desktop
+	ColDesk2     = RGB(0x141411)
+	ColDesk3     = RGB(0x0c0d0b)
+	ColWindow    = RGB(0x1d1d1a)
+	ColSidebar   = RGB(0x181915)
+	ColFooter    = RGB(0x1b1b18)
+	ColField     = RGB(0x2a2b25)
+	ColAccent    = RGB(0xe4de48) // brand: the installer is seen before any theme
+	ColOnAccent  = RGB(0x141411)
+	ColGlow      = RGB(0xf9f1af)
+	ColCheck     = RGB(0x9f9615)
+	ColText      = RGB(0xf4f5f2)
+	ColText2     = RGB(0xced0c8)
+	ColDim       = RGB(0x909287)
+	ColRing      = RGB(0x595b52)
+	ColError     = RGB(0xff7172)
+	ColErrorText = RGB(0xffaaa9)
+	ColDisabled  = RGB(0x393a34)
+	ColKeyBox    = RGB(0x141411)
+	ColWarn      = RGB(0xea8a18) // the palette's amber: a warning, not an error
 )
 
 // FocusRing is the accent ring of the mocks, shown around a focused input.

@@ -12,7 +12,9 @@
 #
 # What goes on COS_STATE:
 #   grubmenu                     our grubmenu.cfg, which /etc/cos/grub.cfg sources
-#   themes/isotope/              theme.txt and background.tga
+#   themes/isotope/              theme.txt, its TGA images (background,
+#                                wordmark, the nine select_* slices) and its
+#                                two Inter fonts, which grubmenu.cfg loads
 #   grub2/fonts/unicode.pf2      the font theme.txt names, "Unifont Regular 16".
 #                                On EFI this is $prefix/fonts, which
 #                                `loadfont unicode` in /etc/cos/grub.cfg reads.
@@ -60,7 +62,9 @@ copy() {
 
 copy "$BR/grubmenu.cfg" "$ST/grubmenu"
 copy "$THEME/theme.txt" "$ST/themes/isotope/theme.txt"
-copy "$THEME/background.tga" "$ST/themes/isotope/background.tga"
+for f in "$THEME"/*.tga "$THEME"/inter-medium-*.pf2; do
+    copy "$f" "$ST/themes/isotope/${f##*/}"
+done
 copy "$THEME/unicode.pf2" "$ST/grub2/fonts/unicode.pf2"
 
 for src in /usr/lib/grub/*-efi; do

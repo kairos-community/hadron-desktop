@@ -9,7 +9,7 @@ window itself, so `go test ./...` here needs no cgo and no GPU.
 
 - The night palette (`theme/palette.toml`, as in the installer design note's
   "Visual system" table) and the colour helpers.
-- The embedded fonts (Space Grotesk, Inter, JetBrains Mono, with their
+- The embedded fonts (Urbanist, Inter, JetBrains Mono, with their
   licences in `fonts/`) and the shared text styles.
 - Widgets that know nothing about an app: buttons, text fields, labelled
   fields, radio and checkbox, cards, panels, warnings, links, headings, a

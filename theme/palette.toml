@@ -4,8 +4,12 @@
 # configs that use it. CI runs `python3 tools/gen-theme.py --check`, which
 # fails when a config drifts from this file or a contrast floor is broken.
 #
-# The colours follow the Kairos design system (github.com/kairos-io/design):
-# its violet-ink neutrals, with Isotope lime as the accent. Night is what the
+# The colours follow the Kairos design system (github.com/kairos-io/design)
+# for roles and contrast, with Isotope's own neutrals: a warm graphite.
+# Brand and theme are separate: the brand roles (Autunite yellow) colour what
+# names Isotope (the mark, splash, GRUB, the idle tray icon); the theme roles
+# ("Carbon", a warm ivory accent) colour what you use for hours. Kairos orange
+# stays as the family tie. Night is what the
 # splash, GRUB, ly, sway and i3 use. Day is for Noctalia's light mode (and
 # later COSMIC and Flatpak apps); sway and i3 have no light mode yet.
 #
@@ -13,39 +17,49 @@
 # "inactive label" and not "grey".
 
 [night]
-crust     = "#0e0d13"  # darkest: terminal black, text on accent
-base      = "#15141c"  # desktop, terminal, bars, popups
-surface   = "#1f1e28"  # capsules, cards
-overlay   = "#2a2935"  # selection, hover
-border    = "#3c3a49"  # inactive borders, separators
-muted     = "#5c596a"  # decoration only (2.8:1 on base); never for text you must read
-dim       = "#8f8ba3"  # inactive labels, placeholders (4.1:1 on base)
-subtext   = "#cbc8d6"  # secondary text
-text      = "#f2f1f5"  # primary text
-accent    = "#8fd12e"  # focus, selection, brand
-glow      = "#c6f36b"  # secondary accent: clock, focus indicator
-violet    = "#b49cf2"  # tertiary accent: binding mode, matches
-success   = "#3faf6e"
-warning   = "#e0af68"
-error     = "#f7768e"
-orange    = "#ff7442"
-on_accent = "#15141c"  # text on accent, error and the other bright fills
+crust      = "#0c0d0b"
+base       = "#141411"
+surface    = "#1d1d1a"
+overlay    = "#2a2b25"
+border     = "#393a34"
+muted      = "#595b52"
+dim        = "#909287"
+subtext    = "#ced0c8"
+text       = "#f4f5f2"
+accent     = "#e9e7c1"  # THEME: focus, selection, buttons, links
+glow       = "#f4f5f2"  # THEME: lighter tone of the accent
+violet     = "#d896db"  # tertiary: binding mode, matches, "reboot" tray state
+success    = "#37be95"
+warning    = "#ea8a18"
+error      = "#ff7172"
+orange     = "#ff7442"  # Kairos orange, the family tie
+on_accent  = "#141411"
+blue       = "#79b8ed"  # terminal blue
+cyan       = "#89dae3"  # terminal cyan
+brand      = "#e4de48"  # BRAND: the mark, splash, GRUB, the idle tray icon
+brand_glow = "#f9f1af"  # BRAND: pushed side and core of the mark
+brand_deep = "#9f9615"  # BRAND: deep tone (shading; the mark on light grounds)
 
 [day]
-crust     = "#d8d5e0"
-base      = "#f2f1f5"
-surface   = "#ffffff"
-overlay   = "#e6e4ec"
-border    = "#c9c5d3"
-muted     = "#6e6a80"
-dim       = "#5c596a"
-subtext   = "#494656"
-text      = "#1c1b24"
-accent    = "#3b7504"
-glow      = "#0b6e6e"
-violet    = "#6d3fd0"
-success   = "#2a7548"
-warning   = "#875700"
-error     = "#c4194f"
-orange    = "#a33600"
-on_accent = "#ffffff"
+crust      = "#d8d9d3"
+base       = "#f4f5f2"
+surface    = "#ffffff"
+overlay    = "#e9eae6"
+border     = "#cbcdc6"
+muted      = "#76786d"
+dim        = "#61635a"
+subtext    = "#4a4c43"
+text       = "#1c1d19"
+accent     = "#3e3e32"
+glow       = "#2a2921"
+violet     = "#6432a9"
+success    = "#167a69"
+warning    = "#832d00"
+error      = "#b00e50"
+orange     = "#a33600"
+on_accent  = "#ffffff"
+blue       = "#1666aa"
+cyan       = "#0e6f81"
+brand      = "#766f08"  # BRAND on light: readable tone (night-only files do not use the day brand roles)
+brand_glow = "#5e5303"  # BRAND on light: deepest tone
+brand_deep = "#9f9615"  # BRAND on light: piece and core of the ink-shell mark

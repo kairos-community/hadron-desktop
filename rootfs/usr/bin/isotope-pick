@@ -33,4 +33,4 @@ if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v fuzzel >/dev/null 2>&1; then
     exit 0
 fi
 cut -f1 | dmenu -i -l "$lines" -p "$prompt" -fn 'Inter Variable-11' \
-    -nb '#15141c' -nf '#f2f1f5' -sb '#8fd12e' -sf '#15141c'
+    -nb '#141411' -nf '#f4f5f2' -sb '#e9e7c1' -sf '#141411'

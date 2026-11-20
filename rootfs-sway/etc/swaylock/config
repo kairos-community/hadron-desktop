@@ -4,29 +4,29 @@
 # The plain Isotope background, scaled to fill; `color` shows if it is missing.
 image=/usr/share/backgrounds/isotope/isotope-plain-night-1920x1080.png
 scaling=fill
-color=15141c
+color=141411
 font=Inter Variable
 indicator-radius=90
 indicator-thickness=8
 show-failed-attempts
 ignore-empty-password
 
-inside-color=15141c
-inside-clear-color=15141c
-inside-caps-lock-color=15141c
-inside-ver-color=15141c
-inside-wrong-color=15141c
+inside-color=141411
+inside-clear-color=141411
+inside-caps-lock-color=141411
+inside-ver-color=141411
+inside-wrong-color=141411
 
-ring-color=3c3a49
-ring-clear-color=c6f36b
-ring-caps-lock-color=e0af68
-ring-ver-color=8fd12e
-ring-wrong-color=f7768e
+ring-color=393a34
+ring-clear-color=f4f5f2
+ring-caps-lock-color=ea8a18
+ring-ver-color=e9e7c1
+ring-wrong-color=ff7172
 
-key-hl-color=8fd12e
-bs-hl-color=f7768e
-caps-lock-key-hl-color=e0af68
-caps-lock-bs-hl-color=f7768e
+key-hl-color=e9e7c1
+bs-hl-color=ff7172
+caps-lock-key-hl-color=ea8a18
+caps-lock-bs-hl-color=ff7172
 
 line-color=00000000
 line-clear-color=00000000
@@ -35,11 +35,11 @@ line-ver-color=00000000
 line-wrong-color=00000000
 separator-color=00000000
 
-text-color=f2f1f5
-text-clear-color=c6f36b
-text-caps-lock-color=e0af68
-text-ver-color=8fd12e
-text-wrong-color=f7768e
-layout-text-color=f2f1f5
-layout-bg-color=15141c
+text-color=f4f5f2
+text-clear-color=f4f5f2
+text-caps-lock-color=ea8a18
+text-ver-color=e9e7c1
+text-wrong-color=ff7172
+layout-text-color=f4f5f2
+layout-bg-color=141411
 layout-border-color=00000000

@@ -13,7 +13,7 @@ power() { systemctl "$1" 2>/dev/null || sudo -n /usr/bin/systemctl "$1"; }
 sel=$(printf '%s\t%s\n' Lock 󰌾 "Log out" 󰍃 Suspend 󰒲 Restart 󰜉 "Power off" 󰐥 |
     isotope-pick Power 5) || exit 0
 case "$sel" in
-    Lock)        i3lock --ignore-empty-password --show-failed-attempts --color=15141c ;;
+    Lock)        i3lock --ignore-empty-password --show-failed-attempts --color=141411 ;;
     "Log out")   i3-msg exit ;;
     Suspend)     power suspend ;;
     Restart)     power reboot ;;

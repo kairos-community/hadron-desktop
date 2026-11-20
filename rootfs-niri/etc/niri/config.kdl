@@ -188,13 +188,13 @@ layout {
 
         // Color of the ring on the active monitor. Isotope accent; the colours
         // here are generated from theme/palette.toml by tools/gen-theme.py.
-        active-color "#8fd12e"
+        active-color "#e9e7c1"
 
         // Color of the ring on inactive monitors.
         //
         // The focus ring only draws around the active window, so the only place
         // where you can see its inactive-color is on other monitors.
-        inactive-color "#3c3a49"
+        inactive-color "#393a34"
 
         // You can also use gradients. They take precedence over solid colors.
         // Gradients are rendered the same as CSS linear-gradient(angle, from, to).
@@ -219,11 +219,11 @@ layout {
         off
 
         width 4
-        active-color "#8fd12e"
-        inactive-color "#3c3a49"
+        active-color "#e9e7c1"
+        inactive-color "#393a34"
 
         // Color of the border around windows that request your attention.
-        urgent-color "#f7768e"
+        urgent-color "#ff7172"
 
         // Gradients can use a few different interpolation color spaces.
         // For example, this is a pastel rainbow gradient via in="oklch longer hue".

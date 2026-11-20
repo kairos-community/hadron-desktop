@@ -33,14 +33,6 @@ func (u *UI) Layout(gtx layout.Context) layout.Dimensions {
 	}
 
 	var behind func(layout.Context, image.Rectangle)
-	if u.page == pWelcome {
-		// The large faint mark behind the welcome window.
-		behind = func(gtx layout.Context, win image.Rectangle) {
-			o := op.Offset(win.Min.Add(guikit.Pt(gtx, -90, -170))).Push(gtx.Ops)
-			guikit.Mark(gtx, 1100, false, 0.06, 0)
-			o.Pop()
-		}
-	}
 	dims := u.win.Layout(gtx, behind, func(gtx layout.Context) layout.Dimensions {
 		switch {
 		case u.w == nil && u.page < pInstalling:
@@ -110,7 +102,13 @@ func (u *UI) footer(gtx layout.Context) layout.Dimensions {
 	if u.page == pWelcome {
 		return u.Footer(gtx,
 			[]guikit.Action{{Click: &u.shutdown, Kind: guikit.ButtonGhost, Label: "Shut down"}},
-			nil,
+			func(gtx layout.Context) layout.Dimensions {
+				return layout.E.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return layout.Inset{Right: 20}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return u.Label(gtx, guikit.StSmall, guikit.ColDim, "About five minutes")
+					})
+				})
+			},
 			[]guikit.Action{{Click: &u.cont, Kind: guikit.ButtonPrimary, Label: "Continue"}})
 	}
 	kind, txt, enabled := guikit.ButtonPrimary, "Continue", true
@@ -134,33 +132,80 @@ func (u *UI) footer(gtx layout.Context) layout.Dimensions {
 
 func (u *UI) welcome(gtx layout.Context) layout.Dimensions {
 	return layout.Inset{Top: 40, Bottom: 40, Left: 64, Right: 64}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, guikit.Dp(gtx, 460))
-			return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
+		return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, guikit.Dp(gtx, 560))
+			gtx.Constraints.Min.X = gtx.Constraints.Max.X
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					o := op.Offset(guikit.Pt(gtx, -46, -16)).Push(gtx.Ops)
-					guikit.Glow(gtx, 240, guikit.ColAccent, 0.12)
-					o.Pop()
-					// The mark breathes, as on the splash: the first
-					// triangle moves out a little and back.
-					return guikit.Mark(gtx, 148, false, 1, 0.15*(1+guikit.Breath(u.now())))
+					// The mark lit, as the splash leaves it; its side
+					// breathes a little out and back.
+					return guikit.Mark(gtx, 112, true, 1, 0.5*(1+guikit.Breath(u.now())))
 				}),
-				guikit.VGap(22),
+				guikit.VGap(36),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return u.Label(gtx, guikit.StHero, guikit.ColText, "Welcome to Isotope")
 				}),
-				guikit.VGap(22),
+				guikit.VGap(14),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return u.Centered(gtx, guikit.StLead, guikit.ColText2, 1.55, "An immutable Linux desktop, built on Hadron. The system stays read-only and updates as a whole image, so a bad update rolls back by itself.")
+					gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, guikit.Dp(gtx, 500))
+					return u.LabelLines(gtx, guikit.StLead, guikit.ColText2, 1.55, "An immutable Linux desktop, built on Hadron. The system is a read-only image. An update arrives as a whole new image, and a bad one rolls back by itself.")
 				}),
-				guikit.VGap(22),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					gtx.Constraints.Max.X = guikit.Dp(gtx, 560)
-					return u.Centered(gtx, guikit.StBody, guikit.ColDim, 1.3, "This takes about five minutes. You can go back at any step before the summary.")
-				}),
+				guikit.VGap(40),
+				layout.Rigid(u.images),
 			)
 		})
 	})
+}
+
+// images is the welcome page's row of the three system images, the row the
+// splash draws while booting: the one you run, the one that takes the next
+// update, and the way back.
+func (u *UI) images(gtx layout.Context) layout.Dimensions {
+	names := [3][2]string{{"ACTIVE", "runs your desktop"}, {"PASSIVE", "takes the next update"}, {"RECOVERY", "the way back"}}
+	var kids []layout.FlexChild
+	for i, n := range names {
+		i, n := i, n
+		if i > 0 {
+			kids = append(kids, layout.Rigid(layout.Spacer{Width: 14}.Layout))
+		}
+		kids = append(kids, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			gtx.Constraints.Min.X = gtx.Constraints.Max.X
+			line, name, sub := guikit.ColRing, guikit.ColDim, guikit.ColDim
+			if i == 0 {
+				line, name, sub = guikit.ColAccent, guikit.ColText, guikit.ColText2
+			}
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					h := guikit.Dp(gtx, 2)
+					guikit.FillRect(gtx, image.Rect(0, 0, gtx.Constraints.Max.X, h), line)
+					return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, h)}
+				}),
+				guikit.VGap(10),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.Label(gtx, guikit.StCaps, name, spaced(n[0]))
+				}),
+				guikit.VGap(4),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.Label(gtx, guikit.StSmall, sub, n[1])
+				}),
+			)
+		}))
+	}
+	return layout.Flex{}.Layout(gtx, kids...)
+}
+
+// spaced letter-spaces caps with thin spaces, as the splash does: Gio has no
+// tracking.
+func spaced(s string) string {
+	r := []rune(s)
+	out := make([]rune, 0, 2*len(r))
+	for i, c := range r {
+		if i > 0 {
+			out = append(out, '\u2009')
+		}
+		out = append(out, c)
+	}
+	return string(out)
 }
 
 // --- 2. Keyboard and time zone ----------------------------------------------

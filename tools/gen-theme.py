@@ -60,6 +60,12 @@ WM_VARS = [
     (r"^set \$dim\s+#{hex}$", "dim"),
     (r"^set \$border\s+#{hex}$", "border"),
 ]
+# The terminal's six hues, red to cyan: regular, then bright. Blue and cyan are
+# their own roles, and the terminal does not follow the theme accent. Bright
+# yellow is the brand yellow. Bright black is dim, so shell autosuggestions
+# stay readable.
+ANSI = ["error", "success", "warning", "blue", "violet", "cyan"]
+ANSI_BRIGHT = ["error", "success", "brand", "blue", "violet", "cyan"]
 # dmenu: normal background/foreground, selected background/foreground.
 DMENU = (r"""-nb ["']#{hex}["'] -nf ["']#{hex}["'] -sb ["']#{hex}["'] -sf ["']#{hex}["']""",
          ("base", "text", "accent", "on_accent"))
@@ -68,8 +74,8 @@ FOOT = [
     (r"^background={hex}$", "base"),
     (r"^foreground={hex}$", "text"),
 ] + [(rf"^{kind}{i}={{hex}}$", role)
-     for kind, black, white in (("regular", "crust", "subtext"), ("bright", "border", "text"))
-     for i, role in enumerate([black, "error", "success", "warning", "accent", "violet", "glow", white])]
+     for kind, roles in (("regular", ["crust"] + ANSI + ["subtext"]), ("bright", ["dim"] + ANSI_BRIGHT + ["text"]))
+     for i, role in enumerate(roles)]
 
 # file -> (literal kind or None for "not strict", comment kind, rules)
 RULES = {
@@ -100,7 +106,7 @@ RULES = {
         (r"^selection={hex}ff$", "overlay"),
         (r"^selection-text={hex}ff$", "text"),
         (r"^selection-match={hex}ff$", "violet"),
-        (r"^border={hex}ff$", "accent"),
+        (r"^border={hex}ff$", "border"),
     ]),
     "rootfs-sway/etc/mako/config": ("hash", "hash", [
         (r"^background-color=#{hex}[0-9a-fA-F]{{2}}$", "base"),
@@ -133,32 +139,34 @@ RULES = {
         (r"^\s+inactive-color \"#{hex}\"$", "border"),
         (r"^\s+urgent-color \"#{hex}\"$", "error"),
     ]),
-    # GRUB menu theme (live and installed). The footer and countdown are text
-    # to read, so dim; the subtitle under the wordmark is decoration, so muted.
+    # GRUB menu theme (live and installed). Brand: the countdown line and the
+    # selected entry are the brand's light; the rest is the theme's greys.
     "rootfs/etc/kairos/branding/isotope-theme/theme.txt": ("hash", "hash", [
-        (r'^\s+color\s+= "#{hex}"$', ["accent", "muted", "dim"]),  # wordmark, subtitle, footer
-        (r'^\s+item_color\s+= "#{hex}"$', "subtext"),
-        (r'^\s+selected_item_color\s+= "#{hex}"$', "glow"),
-        (r'^\s+text_color\s+= "#{hex}"$', "dim"),
-        (r'^\s+fg_color\s+= "#{hex}"$', "accent"),
-        (r'^\s+bg_color\s+= "#{hex}"$', "base"),
-        (r'^\s+border_color\s+= "#{hex}"$', "border"),
+        (r'^desktop-color: "#{hex}"$', "crust"),
+        (r'^\s+color\s+= "#{hex}"$', ["muted", "dim", "muted"]),  # subtitle, countdown, keys
+        (r'^\s+item_color\s+= "#{hex}"$', "dim"),
+        (r'^\s+selected_item_color\s+= "#{hex}"$', "brand_glow"),
+        (r'^\s+fg_color\s+= "#{hex}"$', "brand"),
+        (r'^\s+bg_color\s+= "#{hex}"$', "overlay"),
+        (r'^\s+border_color\s+= "#{hex}"$', "overlay"),
     ]),
     # The boot splash's framebuffer colours (its text-mode fallback uses the
     # console palette below by index).
     "splash/main.c": (None, "hash", [
-        (r"^#define C_BG_TOP\s+0x{hex}$", "base"),
-        (r"^#define C_BG_BOT\s+0x{hex}$", "crust"),
-        (r"^#define C_(?:GLOW|BODY)\s+0x{hex}$", "accent"),
-        (r"^#define C_CYAN\s+0x{hex}$", "glow"),
-        (r"^#define C_HOT\s+0x{hex}$", "text"),
-        (r"^#define C_SHADOW\s+0x{hex}$", "border"),
-        (r"^#define C_DIM\s+0x{hex}$", "muted"),
-        (r"^#define C_TEXT\s+0x{hex}$", "subtext"),
-        # The disk passphrase panel.
-        (r"^#define C_PANEL\s+0x{hex}$", "surface"),
-        (r"^#define C_FIELD\s+0x{hex}$", "overlay"),
+        (r"^#define C_CRUST\s+0x{hex}$", "crust"),
+        (r"^#define C_BASE\s+0x{hex}$", "base"),
+        (r"^#define C_SURFACE\s+0x{hex}$", "surface"),
+        (r"^#define C_OVERLAY\s+0x{hex}$", "overlay"),
+        (r"^#define C_BORDER\s+0x{hex}$", "border"),
+        (r"^#define C_MUTED\s+0x{hex}$", "muted"),
         (r"^#define C_LABEL\s+0x{hex}$", "dim"),
+        (r"^#define C_SUBTEXT\s+0x{hex}$", "subtext"),
+        (r"^#define C_HOT\s+0x{hex}$", "text"),
+        # The splash is a brand surface: it never follows the theme accent.
+        (r"^#define C_BRAND\s+0x{hex}$", "brand"),
+        (r"^#define C_BGLOW\s+0x{hex}$", "brand_glow"),
+        (r"^#define C_BDEEP\s+0x{hex}$", "brand_deep"),
+        (r"^#define C_WARN\s+0x{hex}$", "warning"),
         (r"^#define C_ERROR\s+0x{hex}$", "error"),
     ]),
     # st: the sed that sets its default colours (the rest of the Dockerfile
@@ -169,7 +177,7 @@ RULES = {
     ]),
     # The update tray icon: a disc per daemon state, the glyph in on_accent.
     "update/icons.go": (None, "kdl", [
-        (r'^\t"idle":\s+rgb\(0x{hex}\),$', "accent"),
+        (r'^\t"idle":\s+rgb\(0x{hex}\),$', "brand"),  # idle is Isotope at rest: brand
         (r'^\t"update":\s+rgb\(0x{hex}\),$', "success"),
         (r'^\t"busy":\s+rgb\(0x{hex}\),$', "warning"),
         (r'^\t"reboot":\s+rgb\(0x{hex}\),$', "violet"),
@@ -186,8 +194,7 @@ NOCTALIA = "rootfs-niri/usr/share/isotope/noctalia-palettes/Isotope.json"
 # colour 0 is also the console's background, so it is base, not crust; and
 # colour 8 is the installer's and systemd's grey text, so it is dim, not the
 # border grey (2:1 on base).
-VT_ROLES = (["base", "error", "success", "warning", "accent", "violet", "glow", "subtext"]
-            + ["dim", "error", "success", "warning", "accent", "violet", "glow", "text"])
+VT_ROLES = ["base"] + ANSI + ["subtext"] + ["dim"] + ANSI_BRIGHT + ["text"]
 VT_PARAMS = re.compile(r"vt\.default_red=\S+ vt\.default_grn=\S+ vt\.default_blu=[0-9a-fx,]+")
 VT_PALETTE = ["rootfs/etc/kairos/branding/grubmenu.cfg", "auroraboot/live-grub.cfg.tmpl"]
 
@@ -197,9 +204,9 @@ VT_PALETTE = ["rootfs/etc/kairos/branding/grubmenu.cfg", "auroraboot/live-grub.c
 CONTRAST = [
     (["text"], ["base", "surface", "overlay"], 4.5),
     (["subtext"], ["base", "surface"], 4.5),
-    (["accent", "glow", "violet", "success", "warning", "error"], ["base"], 4.5),
+    (["accent", "glow", "violet", "success", "warning", "error", "brand", "brand_glow"], ["base"], 4.5),
     (["dim"], ["base", "surface"], 3.0),
-    (["on_accent"], ["accent", "glow", "violet", "error", "warning", "success"], 4.5),
+    (["on_accent"], ["accent", "glow", "violet", "error", "warning", "success", "brand"], 4.5),
 ]
 
 
@@ -281,10 +288,9 @@ def noctalia_palette(pal):
     """Noctalia's custom palette JSON (docs/user/theming/palette.mdx, v5)."""
     out = {}
     for mode, p in (("dark", pal["night"]), ("light", pal["day"])):
-        ansi = lambda black, white: {
-            "black": p[black], "red": p["error"], "green": p["success"],
-            "yellow": p["warning"], "blue": p["accent"], "magenta": p["violet"],
-            "cyan": p["glow"], "white": p[white]}
+        ansi = lambda black, hues, white: dict(zip(
+            ("black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"),
+            [p[r] for r in [black] + hues + [white]]))
         out[mode] = {
             "mPrimary": p["accent"], "mOnPrimary": p["on_accent"],
             "mSecondary": p["glow"], "mOnSecondary": p["on_accent"],
@@ -298,8 +304,8 @@ def noctalia_palette(pal):
                 "background": p["base"], "foreground": p["text"],
                 "cursor": p["text"], "cursorText": p["base"],
                 "selectionBg": p["overlay"], "selectionFg": p["text"],
-                "normal": ansi("crust", "subtext"),
-                "bright": ansi("border", "text"),
+                "normal": ansi("crust", ANSI, "subtext"),
+                "bright": ansi("dim", ANSI_BRIGHT, "text"),
             },
         }
     return json.dumps(out, indent=2) + "\n"

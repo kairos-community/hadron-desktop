@@ -3,8 +3,10 @@ all: isotope-splash
 
 CFLAGS_COMMON = -std=c99 -Wall -Wextra -Wpedantic
 
-isotope-splash: main.c agent.c agent.h font.h
-	@gcc -Os $(CFLAGS_COMMON) \
+# -O2, not -Os: the light is arithmetic per pixel, and -O2 draws a frame in two
+# thirds of the time for 10 KB more.
+isotope-splash: main.c agent.c agent.h masks.h
+	@gcc -O2 $(CFLAGS_COMMON) \
 		-fno-asynchronous-unwind-tables -fno-unwind-tables -fno-stack-protector \
 		-ffunction-sections -fdata-sections -fno-plt -fno-pie -no-pie -flto \
 		-Wl,--gc-sections -Wl,--build-id=none -Wl,-z,noseparate-code -Wl,-z,norelro \
@@ -17,9 +19,9 @@ test_agent: test_agent.c agent.c agent.h
 
 test: test_agent isotope-splash
 	@./test_agent
-	@# A settled frame shows the mark: its deep tone, isotope-deep #4e9a06.
+	@# A settled frame shows the mark: the palette's brand yellow #e4de48.
 	@./isotope-splash --render=test-frame.ppm --at=3 && \
-		LC_ALL=C grep -q "$$(printf '\116\232\006')" test-frame.ppm && \
+		LC_ALL=C grep -q "$$(printf '\344\336\110')" test-frame.ppm && \
 		echo "splash frame has the mark" || { echo "splash frame has no mark"; exit 1; }
 	@rm -f test-frame.ppm
 

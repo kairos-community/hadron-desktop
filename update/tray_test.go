@@ -492,8 +492,8 @@ func TestTerminalArgv(t *testing.T) {
 
 func TestIcons(t *testing.T) {
 	want := map[string][3]uint8{
-		"idle": {0x8f, 0xd1, 0x2e}, "update": {0x3f, 0xaf, 0x6e}, "busy": {0xe0, 0xaf, 0x68},
-		"reboot": {0xb4, 0x9c, 0xf2}, "error": {0xf7, 0x76, 0x8e},
+		"idle": {0xe4, 0xde, 0x48}, "update": {0x37, 0xbe, 0x95}, "busy": {0xea, 0x8a, 0x18},
+		"reboot": {0xd8, 0x96, 0xdb}, "error": {0xff, 0x71, 0x72},
 	}
 	for kind, rgb := range want {
 		for _, size := range []int{22, 44} {
@@ -516,7 +516,7 @@ func TestIcons(t *testing.T) {
 			// on_accent colour that stays readable on the light discs.
 			if kind == "busy" {
 				r, g, b, _ := img.At(size/2, size/2).RGBA()
-				if uint8(r>>8) != 0x15 || uint8(g>>8) != 0x14 || uint8(b>>8) != 0x1c {
+				if uint8(r>>8) != 0x14 || uint8(g>>8) != 0x14 || uint8(b>>8) != 0x11 {
 					t.Errorf("busy/%d: glyph colour %02x%02x%02x", size, r>>8, g>>8, b>>8)
 				}
 			}

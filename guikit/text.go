@@ -15,18 +15,18 @@ import (
 )
 
 // The fonts are embedded, so a window looks the same on every variant
-// whatever fontconfig has: Space Grotesk for titles, Inter for the rest,
-// JetBrains Mono for device paths, codes and keys. All three are SIL OFL 1.1;
-// the licences are in fonts/. Static cuts, because Gio's shaper uses a
-// variable font's default instance only. Space Grotesk publishes no 600
-// cut, so the 600 titles use its Bold.
+// whatever fontconfig has: Urbanist SemiBold for titles (the wordmark's face,
+// as on the splash), Inter for the rest, JetBrains Mono for device paths,
+// codes and keys. Inter is under its own licence, the others SIL OFL 1.1; the
+// licences are in fonts/. Static cuts, because Gio's shaper uses a variable
+// font's default instance only.
 //
 //go:embed fonts/*.ttf
 var fontFiles embed.FS
 
 // The typefaces of the embedded fonts.
 const (
-	FaceTitle font.Typeface = "Space Grotesk"
+	FaceTitle font.Typeface = "Urbanist"
 	FaceBody  font.Typeface = "Inter"
 	FaceMono  font.Typeface = "JetBrains Mono"
 )
@@ -71,9 +71,10 @@ func (s Style) Font() font.Font { return font.Font{Typeface: s.Face, Weight: s.W
 // The text styles the tools share. An app defines its own Style for a text
 // only it has (a large key, a counter).
 var (
-	StTitle     = Style{FaceTitle, font.Bold, 28} // a page heading
-	StHero      = Style{FaceTitle, font.Bold, 40} // a welcome page's title
-	StBrand     = Style{FaceTitle, font.Bold, 17} // the sidebar's title
+	StTitle     = Style{FaceTitle, font.SemiBold, 28} // a page heading
+	StHero      = Style{FaceTitle, font.SemiBold, 44} // a welcome page's title
+	StBrand     = Style{FaceTitle, font.SemiBold, 17} // the sidebar's title
+	StCaps      = Style{FaceBody, font.SemiBold, 11}  // small spaced capitals
 	StBody      = Style{FaceBody, font.Normal, 14}
 	StBody600   = Style{FaceBody, font.SemiBold, 14}
 	StLead      = Style{FaceBody, font.Normal, 16} // an introduction paragraph

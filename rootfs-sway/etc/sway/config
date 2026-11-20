@@ -13,15 +13,15 @@ set $right l
 # Isotope palette. Generated from theme/palette.toml by tools/gen-theme.py:
 # edit the palette, not these values. Inactive titles and workspace labels use
 # $dim, not the darker decoration grey, so they stay readable.
-set $bg      #15141c
-set $bg_alt  #1f1e28
-set $fg      #f2f1f5
-set $blue    #8fd12e
-set $cyan    #c6f36b
-set $magenta #b49cf2
-set $red     #f7768e
-set $dim     #8f8ba3
-set $border  #3c3a49
+set $bg      #141411
+set $bg_alt  #1d1d1a
+set $fg      #f4f5f2
+set $blue    #e9e7c1
+set $cyan    #f4f5f2
+set $magenta #d896db
+set $red     #ff7172
+set $dim     #909287
+set $border  #393a34
 
 ### Appearance ############################################################
 font pango:Inter Variable 10

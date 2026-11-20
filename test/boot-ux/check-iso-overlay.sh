@@ -36,6 +36,10 @@ check "grub.cfg staged"                 "test -f '$CFG'"
 check "theme.txt staged"                "test -f '$DIR/boot/grub2/themes/isotope/theme.txt'"
 check "font staged"                     "test -f '$DIR/boot/grub2/themes/isotope/unicode.pf2'"
 check "background staged"               "test -f '$DIR/boot/grub2/themes/isotope/background.tga'"
+check "wordmark staged"                 "test -f '$DIR/boot/grub2/themes/isotope/wordmark.tga'"
+check "selected-entry slices staged"    "test \$(ls '$DIR'/boot/grub2/themes/isotope/select_*.tga | wc -l) -eq 9"
+check "menu fonts staged"               "test -f '$DIR/boot/grub2/themes/isotope/inter-medium-18.pf2' -a -f '$DIR/boot/grub2/themes/isotope/inter-medium-24.pf2'"
+check "live menu loads the menu fonts"  "grep -q 'loadfont .*inter-medium-24.pf2' '$CFG'"
 check "no unrendered placeholders in grub.cfg" \
     "test -f '$CFG' && ! grep -q '{{' '$CFG'"
 check "no unrendered placeholder in theme.txt" \

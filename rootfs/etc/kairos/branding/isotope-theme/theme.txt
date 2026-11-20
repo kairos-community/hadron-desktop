@@ -1,87 +1,108 @@
-# Isotope GRUB theme.
+# Isotope GRUB theme, "One light".
 #
-# gfxterm theme matching the ly login + waybar palette. Used by the installed
-# system's boot menu (grubmenu.cfg switches to gfxterm and `set theme=` to this
-# file, which the 09_isotope_grub_theme oem stage places on COS_STATE alongside
-# background.tga). desktop-image is resolved relative to this file, so the bare
-# filename works once the whole isotope-theme dir lands in themes/isotope/.
+# gfxterm theme for the installed system's boot menu (grubmenu.cfg switches to
+# gfxterm, loads the fonts and `set theme=`s this file, which the
+# 09_isotope_grub_theme oem stage places on COS_STATE) and the live ISO
+# (auroraboot/live-grub.cfg.tmpl). Paths are relative to this file.
+#
+# background.tga is the splash's scene asleep: the mark's shell dark, lit only
+# on its inner edge by the core. It is drawn by the splash binary
+# (tools/gen-grub-bg.py), scaled to the screen's height and anchored left, so
+# the mark sits in the left third on any shape of screen. wordmark.tga and the
+# nine select_*.tga slices are drawn by the same tool. Everything is in
+# percent of the screen, so the wordmark stays over the menu column.
 #
 # The subtitle is a build-time placeholder: this file lives in the COMMON rootfs
 # overlay but the subtitle is per-variant, so the Dockerfile substitutes
-# @VARIANT_SUBTITLE@ from /etc/isotope/session after kairos-init. Before
-# that substitution existed the i3 variant's boot menu claimed to be sway.
+# @VARIANT_SUBTITLE@ from /etc/isotope/session after kairos-init.
 #
-# Image is TGA, not PNG: GRUB's png.mod rejects valid PNGs with "unsupported
+# Images are TGA, not PNG: GRUB's png.mod rejects valid PNGs with "unsupported
 # format", which makes gfxmenu discard the entire theme; tga.mod decodes cleanly.
-# Font: "Unifont Regular 16" is the unicode.pf2 that `loadfont unicode` loads on
-# the installed system. The live ISO loads our vendored copy from the theme dir.
+# Fonts: GRUB fonts are 1-bit bitmaps at fixed sizes. inter-medium-18.pf2 and
+# -24.pf2 are made from install-gui/fonts/Inter-Medium.ttf with
+#   grub-mkfont -s 18 -o inter-medium-18.pf2 Inter-Medium.ttf
+# and grub-mkfont names them "Inter Regular 18" and "Inter Regular 24". The
+# terminal (e, c) keeps "Unifont Regular 16", the unicode.pf2 GRUB loads anyway.
+
 
 desktop-image: "background.tga"
+desktop-image-scale-method: "fitheight"
+desktop-image-h-align: "left"
+desktop-color: "#0c0d0b"
 title-text: ""
 terminal-font: "Unifont Regular 16"
 
-# Brand wordmark (accent lime / muted), under the mark that background.tga
-# carries at the top centre (tools/gen-grub-bg.py).
-+ label {
-    id    = "__brand__"
-    top   = 21%
-    left  = 0
-    width = 100%
-    align = "center"
-    color = "#8fd12e"
-    font  = "Unifont Regular 16"
-    text  = "I S O T O P E"
+# The wordmark, over the menu column, and under it the variant.
++ image {
+    left = 58%
+    top  = 35%-36
+    width  = 201
+    height = 56
+    file   = "wordmark.tga"
 }
 + label {
-    top   = 21%+26
-    left  = 0
-    width = 100%
-    align = "center"
-    color = "#5c596a"
-    font  = "Unifont Regular 16"
+    left  = 58%+2
+    top   = 35%+30
+    width = 30%
+    align = "left"
+    color = "#595b52"
+    font  = "Inter Regular 18"
     text  = "@VARIANT_SUBTITLE@"
 }
 
-# Boot menu: foreground text dim, selected entry light lime.
+# The selected entry is a bar of light at the left with its glow fading to the
+# right (select_*.tga, with alpha), and the brand's light tone for its text.
 + boot_menu {
-    left                 = 28%
-    width                = 44%
-    top                  = 38%
-    height               = 38%
-    item_font            = "Unifont Regular 16"
-    item_color           = "#cbc8d6"
-    selected_item_color  = "#c6f36b"
-    item_height          = 26
-    item_padding         = 6
-    item_spacing         = 6
+    left                 = 58%
+    width                = 30%
+    top                  = 44%
+    height               = 30%
+    item_font            = "Inter Regular 24"
+    item_color           = "#909287"
+    selected_item_color  = "#f9f1af"
+    item_height          = 52
+    item_padding         = 0
+    item_spacing         = 2
     icon_width           = 0
     icon_height          = 0
+    item_icon_space      = 24
+    selected_item_pixmap_style = "select_*.tga"
     scrollbar            = false
 }
 
-# Timeout countdown as a lime progress bar.
+# The countdown: one thin line in the brand yellow, and a short sentence. GRUB
+# draws a progress bar at least 28 px high, so the bar is 28 px and its pixmaps
+# carry the 3 px line at their foot (tools/gen-grub-bg.py).
 + progress_bar {
     id           = "__timeout__"
-    left         = 28%
-    width        = 44%
-    top          = 80%
-    height       = 16
-    show_text    = true
-    font         = "Unifont Regular 16"
-    text_color   = "#8f8ba3"
-    fg_color     = "#8fd12e"
-    bg_color     = "#15141c"
-    border_color = "#3c3a49"
-    text         = "@TIMEOUT_NOTIFICATION_MIDDLE@"
+    left         = 58%
+    width        = 30%
+    top          = 44%+271
+    height       = 28
+    show_text    = false
+    bar_style       = "progress_bar_*.tga"
+    highlight_style = "progress_highlight_*.tga"
+    fg_color     = "#e4de48"
+    bg_color     = "#2a2b25"
+    border_color = "#2a2b25"
+}
++ label {
+    id    = "__timeout__"
+    left  = 58%+2
+    top   = 44%+312
+    width = 30%
+    align = "left"
+    color = "#909287"
+    font  = "Inter Regular 18"
+    text  = "Starts in %d s"
 }
 
-# Footer hint.
 + label {
-    top   = 90%
-    left  = 0
-    width = 100%
-    align = "center"
-    color = "#8f8ba3"
-    font  = "Unifont Regular 16"
-    text  = "up/down select   enter boot   e edit   c console"
+    left  = 58%+2
+    top   = 90%-8
+    width = 40%
+    align = "left"
+    color = "#595b52"
+    font  = "Inter Regular 18"
+    text  = "↑ ↓  select      Enter  boot      E  edit      C  console"
 }
