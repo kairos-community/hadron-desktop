@@ -78,7 +78,7 @@ installed machine to another desktop and keeps your files.
   installer and the desktop all use the same Isotope mark and colors.
 
 <p align="center">
-  <img src="docs/assets/boot-splash.gif" alt="The Isotope boot animation: six triangles close into a hexagon, one is pushed out, and the ISOTOPE wordmark resolves under it" width="80%">
+  <img src="docs/assets/boot-splash.webp" alt="The Isotope boot animation: the core of the mark lights, the hexagon shell takes the light, the sixth side lifts and the light gets out, over the isotope wordmark" width="80%">
 </p>
 
 ## Install
