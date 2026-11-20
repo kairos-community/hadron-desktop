@@ -3,8 +3,8 @@
 font=Inter Variable 10.5
 background-color=#141411f2
 text-color=#f4f5f2
-border-color=#8fd12e
-progress-color=over #8fd12e55
+border-color=#e9e7c1
+progress-color=over #e9e7c155
 border-size=2
 border-radius=10
 width=360
@@ -20,7 +20,7 @@ anchor=top-right
 invisible=1
 
 [urgency=high]
-border-color=#ff857a
+border-color=#ff7172
 default-timeout=0
 
 # Critical notifications still show in do not disturb.

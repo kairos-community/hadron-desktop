@@ -28,7 +28,7 @@ terminal-font: "Unifont Regular 16"
     left  = 0
     width = 100%
     align = "center"
-    color = "#8fd12e"
+    color = "#e4de48"
     font  = "Unifont Regular 16"
     text  = "I S O T O P E"
 }
@@ -50,7 +50,7 @@ terminal-font: "Unifont Regular 16"
     height               = 38%
     item_font            = "Unifont Regular 16"
     item_color           = "#ced0c8"
-    selected_item_color  = "#c6f36b"
+    selected_item_color  = "#f9f1af"
     item_height          = 26
     item_padding         = 6
     item_spacing         = 6
@@ -69,7 +69,7 @@ terminal-font: "Unifont Regular 16"
     show_text    = true
     font         = "Unifont Regular 16"
     text_color   = "#909287"
-    fg_color     = "#8fd12e"
+    fg_color     = "#e4de48"
     bg_color     = "#141411"
     border_color = "#393a34"
     text         = "@TIMEOUT_NOTIFICATION_MIDDLE@"

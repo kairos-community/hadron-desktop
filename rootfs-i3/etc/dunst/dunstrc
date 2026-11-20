@@ -15,7 +15,7 @@
     padding = 12
     horizontal_padding = 14
     frame_width = 2
-    frame_color = "#8fd12e"
+    frame_color = "#e9e7c1"
     separator_color = frame
     font = Inter Variable 10.5
     markup = full
@@ -29,16 +29,16 @@
 [urgency_low]
     background = "#141411"
     foreground = "#ced0c8"
-    highlight = "#8fd12e"
+    highlight = "#e9e7c1"
 
 [urgency_normal]
     background = "#141411"
     foreground = "#f4f5f2"
-    highlight = "#8fd12e"
+    highlight = "#e9e7c1"
 
 [urgency_critical]
     background = "#141411"
-    foreground = "#ff857a"
-    highlight = "#ff857a"
-    frame_color = "#ff857a"
+    foreground = "#ff7172"
+    highlight = "#ff7172"
+    frame_color = "#ff7172"
     timeout = 0

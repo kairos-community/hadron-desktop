@@ -347,23 +347,23 @@ static int text_run(double duration) {
 /* The Isotope palette in truecolor, which the framebuffer can show. */
 #define C_BG_TOP   0x141411
 #define C_BG_BOT   0x0c0d0b
-#define C_GLOW     0x8fd12e
-#define C_BODY     0x8fd12e
-#define C_CYAN     0xc6f36b
+#define C_GLOW     0xe4de48
+#define C_BODY     0xe4de48
+#define C_CYAN     0xf9f1af
 #define C_HOT      0xf4f5f2
 #define C_SHADOW   0x393a34
 #define C_DIM      0x595b52
 #define C_TEXT     0xced0c8
 /* The Isotope mark's three tones (isotope-light, -lime, -deep in
    @kairos-io/design). */
-#define C_MARK_L   0xc6f36b
-#define C_MARK_M   0x8fd12e
-#define C_MARK_D   0x4e9a06
+#define C_MARK_L   0xf9f1af
+#define C_MARK_M   0xe4de48
+#define C_MARK_D   0x9f9615
 /* The passphrase panel. */
 #define C_PANEL    0x1d1d1a
 #define C_FIELD    0x2a2b25
 #define C_LABEL    0x909287
-#define C_ERROR    0xff857a
+#define C_ERROR    0xff7172
 
 /* A draw target: the mmapped framebuffer, or a heap buffer for --render.
    Pixels are composed in an XRGB back buffer and packed into the target's

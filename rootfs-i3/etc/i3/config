@@ -14,10 +14,10 @@ set $right l
 set $bg      #141411
 set $bg_alt  #1d1d1a
 set $fg      #f4f5f2
-set $blue    #8fd12e
-set $cyan    #c6f36b
-set $magenta #b49cf2
-set $red     #ff857a
+set $blue    #e9e7c1
+set $cyan    #f4f5f2
+set $magenta #d896db
+set $red     #ff7172
 set $dim     #909287
 set $border  #393a34
 
@@ -67,7 +67,7 @@ bindsym $mod+Return        exec --no-startup-id $term
 bindsym $mod+d             exec --no-startup-id $menu
 # The old PATH-only runner, for a command that has no .desktop file.
 # help: Run a command that has no app entry
-bindsym $mod+Shift+d       exec --no-startup-id dmenu_run -i -l 12 -p "Run" -fn "Inter Variable-11" -nb "#141411" -nf "#f4f5f2" -sb "#8fd12e" -sf "#141411"
+bindsym $mod+Shift+d       exec --no-startup-id dmenu_run -i -l 12 -p "Run" -fn "Inter Variable-11" -nb "#141411" -nf "#f4f5f2" -sb "#e9e7c1" -sf "#141411"
 # help: Close the focused window
 bindsym $mod+Shift+q       kill
 bindsym $mod+Shift+c       reload

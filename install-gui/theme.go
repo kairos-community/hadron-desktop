@@ -17,26 +17,26 @@ import (
 // The colours of the design note's "Visual system" table, which are
 // theme/palette.toml's night palette, the same as the splash and GRUB.
 var (
-	colDesk1     = rgb(0x2c3a1c) // the glow at the top of the desktop
+	colDesk1     = rgb(0x2e2c17) // the brand glow at the top of the desktop
 	colDesk2     = rgb(0x141411)
 	colDesk3     = rgb(0x0c0d0b)
 	colWindow    = rgb(0x1d1d1a)
 	colSidebar   = rgb(0x181915)
 	colFooter    = rgb(0x1b1b18)
 	colField     = rgb(0x2a2b25)
-	colAccent    = rgb(0x8fd12e)
+	colAccent    = rgb(0xe4de48) // brand: the installer is seen before any theme
 	colOnAccent  = rgb(0x141411)
-	colGlow      = rgb(0xc6f36b)
-	colCheck     = rgb(0x4e9a06)
+	colGlow      = rgb(0xf9f1af)
+	colCheck     = rgb(0x9f9615)
 	colText      = rgb(0xf4f5f2)
 	colText2     = rgb(0xced0c8)
 	colDim       = rgb(0x909287)
 	colRing      = rgb(0x595b52)
-	colError     = rgb(0xff857a)
-	colErrorText = rgb(0xffb3a9)
+	colError     = rgb(0xff7172)
+	colErrorText = rgb(0xffaaa9)
 	colDisabled  = rgb(0x393a34)
 	colKeyBox    = rgb(0x141411)
-	colWarn      = rgb(0xd87e18) // the palette's yellow: a warning, not an error
+	colWarn      = rgb(0xea8a18) // the palette's yellow: a warning, not an error
 )
 
 func rgb(v uint32) color.NRGBA {

@@ -16,11 +16,11 @@ import (
 // Colours: generated from theme/palette.toml by tools/gen-theme.py.
 
 var iconColors = map[string]color.NRGBA{
-	"idle":   rgb(0x8fd12e),
-	"update": rgb(0x3faf6e),
-	"busy":   rgb(0xd87e18),
-	"reboot": rgb(0xb49cf2),
-	"error":  rgb(0xff857a),
+	"idle":   rgb(0xe4de48),
+	"update": rgb(0x37be95),
+	"busy":   rgb(0xea8a18),
+	"reboot": rgb(0xd896db),
+	"error":  rgb(0xff7172),
 }
 
 var glyphColor = rgb(0x141411)

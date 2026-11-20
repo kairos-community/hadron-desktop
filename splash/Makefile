@@ -17,9 +17,9 @@ test_agent: test_agent.c agent.c agent.h
 
 test: test_agent isotope-splash
 	@./test_agent
-	@# A settled frame shows the mark: its deep tone, isotope-deep #4e9a06.
+	@# A settled frame shows the mark: its deep tone, the palette's brand_deep #9f9615.
 	@./isotope-splash --render=test-frame.ppm --at=3 && \
-		LC_ALL=C grep -q "$$(printf '\116\232\006')" test-frame.ppm && \
+		LC_ALL=C grep -q "$$(printf '\237\226\025')" test-frame.ppm && \
 		echo "splash frame has the mark" || { echo "splash frame has no mark"; exit 1; }
 	@rm -f test-frame.ppm
 

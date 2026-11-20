@@ -37,10 +37,8 @@ from pathlib import Path
 PALETTE = Path(__file__).resolve().parent.parent / "theme" / "palette.toml"
 NAME = re.compile(r"isotope-(tiles|plain)-(night|day)-([1-9][0-9]{2,4})x([1-9][0-9]{2,4})")
 S3 = math.sqrt(3.0)
-# The deep tile of the Isotope mark (isotope-deep in @kairos-io/design). The
-# light and mid tiles are the night palette's glow and accent; the mark keeps
-# its colours in the day theme, as a brand mark does, so it has no role.
-MARK_DEEP = "#4e9a06"
+# The tiles and the mark are brand, not theme: they take the night palette's
+# brand roles in both modes, as a brand mark does, and never the theme accent.
 
 
 def rgb(h):
@@ -131,13 +129,13 @@ def tri_coverage(x, y, pts):
 def draw(P, mode, W, H, plain, layout="desktop", night_palette=None):
     """Rows of RGB bytes. layout "desktop" is the wallpaper; "grub" keeps the
     tiles to the right edge and puts a small mark at the top centre, above
-    the theme's title, so the centred boot menu stays readable. night_palette gives the lime tones of the
+    the theme's title, so the centred boot menu stays readable. night_palette gives the brand tones of the
     tiles and the mark; it defaults to P."""
     night = mode == "night"
     top, bot = rgb(P["base"]), rgb(P["crust"])
-    acc = rgb(P["accent"])
+    acc = rgb(P["brand"])
     N = night_palette or P
-    tones = (rgb(N["glow"]), rgb(N["accent"]), rgb(MARK_DEEP))
+    tones = (rgb(N["brand_glow"]), rgb(N["brand"]), rgb(N["brand_deep"]))
     line = rgb(P["border"])
     s = H / 1080.0
     glow_k = 0.10 if night else 0.06
