@@ -1,0 +1,5 @@
+# The wallpaper renderers. Pinned: the pictures are a function of these
+# versions as well as of the scripts.
+numpy==2.5.3
+scipy==1.18.1
+pillow==12.3.0
