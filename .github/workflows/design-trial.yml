@@ -32,7 +32,7 @@ jobs:
         # test image: a tag is never reused.
         include:
           - desktop: sway
-            tag: sway-v0.0.22-onelight-1
+            tag: sway-v0.0.22-onelight-2
     env:
       DESKTOP: ${{ matrix.desktop }}
       TEST_TAG: ${{ matrix.tag }}
@@ -81,7 +81,7 @@ jobs:
       - name: Use the containerd image store
         run: scripts/ci-containerd-store.sh
       - name: Build
-        run: make DESKTOP="$DESKTOP" GPU="$GPU" FIRMWARE="$FIRMWARE" IMAGE="${IMAGE_REPO}:${TEST_TAG}" image
+        run: make DESKTOP="$DESKTOP" GPU="$GPU" FIRMWARE="$FIRMWARE" WALLPAPER_COMMIT="$GITHUB_SHA" IMAGE="${IMAGE_REPO}:${TEST_TAG}" image
       - name: Check desktop OpenGL
         run: test/graphics/check-desktop-gl.sh "${IMAGE_REPO}:${TEST_TAG}"
       - name: Check boot units

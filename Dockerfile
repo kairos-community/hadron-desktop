@@ -5583,6 +5583,27 @@ FROM desktop-default AS cosmic-default
 FROM desktop-default AS niri-default
 FROM ${DESKTOP}-default AS default
 
+# A development build's wallpaper: drawn from the build's commit by
+# tools/wallpapers/build_wallpaper.py, and the stable names
+# isotope-desktop-{night,day}.png pointed at it, in place of the release's
+# Hydrogen. A release build passes no WALLPAPER_COMMIT and this stage is
+# empty, so the link keeps pointing at Hydrogen. Only the pictures are made
+# here (numpy and SciPy wheels need glibc, which the Hadron base does not
+# have), so any Python image will do; the libraries are pinned in
+# tools/wallpapers/requirements.txt.
+FROM python:3.12-slim-bookworm AS build-wallpaper
+ARG WALLPAPER_COMMIT=
+COPY tools/wallpapers /w
+RUN mkdir -p /out/usr/share/backgrounds/isotope && \
+    if [ -n "${WALLPAPER_COMMIT}" ]; then \
+      pip install --no-cache-dir -r /w/requirements.txt && \
+      d=/out/usr/share/backgrounds/isotope && short="$(printf %s "${WALLPAPER_COMMIT}" | cut -c1-12)" && \
+      for mode in night day; do \
+        python3 /w/build_wallpaper.py --seed "${WALLPAPER_COMMIT}" --mode "$mode" --out "$d" && \
+        ln -sf "isotope-build-${short}-${mode}-3840x2160.png" "$d/isotope-desktop-${mode}.png"; \
+      done && ls -l "$d"; \
+    fi
+
 
 # ===========================================================================
 # Kairos init layer — makes the image bootable/installable.
@@ -5598,6 +5619,8 @@ FROM ${KAIROS_INIT_IMAGE} AS kairos-init
 
 FROM default AS kairos
 ARG MODEL=generic
+# The development build's wallpaper, when there is one (see build-wallpaper).
+COPY --from=build-wallpaper /out/ /
 ARG TRUSTED_BOOT=false
 ARG VERSION=v0.0.0
 ARG FIPS=no-fips

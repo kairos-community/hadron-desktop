@@ -67,6 +67,11 @@ BUILD_ARGS := --build-arg HADRON_VERSION=$(HADRON_VERSION) --build-arg BASE_IMAG
 ifdef GPU
 BUILD_ARGS += --build-arg GPU=$(GPU)
 endif
+# A development build draws its wallpaper from this commit (see the Dockerfile's
+# build-wallpaper stage); a release leaves it unset and keeps Hydrogen.
+ifdef WALLPAPER_COMMIT
+BUILD_ARGS += --build-arg WALLPAPER_COMMIT=$(WALLPAPER_COMMIT)
+endif
 ifdef FIRMWARE
 BUILD_ARGS += --build-arg FIRMWARE=$(FIRMWARE)
 endif
