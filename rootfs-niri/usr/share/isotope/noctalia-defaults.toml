@@ -41,7 +41,7 @@ custom_palette = "Isotope"
 directory = "/usr/share/backgrounds/isotope"
 
 [wallpaper.default]
-path = "/usr/share/backgrounds/isotope/isotope-tiles-night-3840x2160.png"
+path = "/usr/share/backgrounds/isotope/isotope-desktop-night.png"
 
 # Night light: the same as isotope-night-light on the other variants, 4500 K
 # from 20:00 to 07:00. It starts off; Super+Alt+N and the Isotope menu turn it

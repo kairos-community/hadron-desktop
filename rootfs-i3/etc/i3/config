@@ -43,7 +43,7 @@ client.background       $bg
 # The Isotope wallpaper, scaled to fill each monitor, on the base colour (which
 # also shows if the image is missing). exec_always repaints it when i3 restarts,
 # e.g. after a monitor is plugged in.
-exec_always --no-startup-id isotope-xroot '#141411' /usr/share/backgrounds/isotope/isotope-tiles-night-3840x2160.png
+exec_always --no-startup-id isotope-xroot '#141411' /usr/share/backgrounds/isotope/isotope-desktop-night.png
 exec --no-startup-id /usr/bin/pipewire
 exec --no-startup-id /usr/bin/wireplumber
 exec --no-startup-id dunst

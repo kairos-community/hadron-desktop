@@ -48,7 +48,7 @@ client.urgent           $red     $red     $fg    $red      $red
 # paints the fallback colour only if a file it found will not load), so either
 # way the desktop stays $bg rather than sway's grey.
 output * bg $bg solid_color
-output * bg /usr/share/backgrounds/isotope/isotope-tiles-night-3840x2160.png fill $bg
+output * bg /usr/share/backgrounds/isotope/isotope-desktop-night.png fill $bg
 
 ### Input #################################################################
 input type:touchpad {

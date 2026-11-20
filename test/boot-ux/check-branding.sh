@@ -68,10 +68,15 @@ check "isotope-grub-theme keeps its modules out of the EFI \$prefix" \
 check "grubmenu.cfg loads the theme modules from \$prefix first" \
     "grep -q 'if \[ -f \"\${prefix}/\${grub_cpu}-\${grub_platform}/tga.mod\" \]' $G && \
      grep -q 'set prefix=\"(\${menu_blk})/isotope/grub2\"' $G && ! grep -q 'set prefix=(\${menu_blk})/grub2' $G"
-check "grubmenu.cfg leaves the font to loadfont unicode" "! grep -q '^ *loadfont' $G"
+# The terminal font is loadfont unicode's; grubmenu.cfg loads only the
+# theme's own menu fonts (Inter), from the theme directory.
+check "grubmenu.cfg loads only the theme's fonts" "! grep '^ *loadfont' $G | grep -qv 'themes/isotope/'"
 
-# The Isotope wallpapers are drawn at build time; every variant points at these.
+# The desktop wallpaper is isotope-desktop-night.png, a link to the release
+# wallpaper (Isotope 1, Hydrogen) or, on a development build, to the commit
+# wallpaper. The tiles and the plain image are drawn at build time.
 WP=/usr/share/backgrounds/isotope
+check "the desktop wallpaper is a PNG" "[ \"\$(head -c 4 $WP/isotope-desktop-night.png | tail -c 3)\" = PNG ]"
 for w in isotope-tiles-night-3840x2160 isotope-plain-night-1920x1080; do
     check "wallpaper $w.png is a PNG" "[ \"\$(head -c 4 $WP/$w.png | tail -c 3)\" = PNG ]"
 done

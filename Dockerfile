@@ -1552,12 +1552,15 @@ RUN n=https://raw.githubusercontent.com/googlefonts/noto-emoji/v${NOTO_EMOJI_VER
     grep -qx '😀 grinning face' /emoji/usr/share/isotope/emoji.txt && \
     rm -f NotoColorEmoji.ttf OFL.txt emoji-test.txt
 
-# The Isotope wallpapers, drawn at build time from theme/palette.toml by
-# tools/gen-wallpaper.py (stdlib Python, fixed dither seed, no network), so a
-# palette edit reaches them and the repository carries no multi-megabyte PNGs.
-# Every variant gets the night tiles (the desktop) and the plain night image
-# (swaylock); niri and COSMIC, whose shells have a light mode, also get the day
-# tiles. The 4K images are scaled down to fit smaller screens.
+# The desktop wallpaper is the release's (Isotope 1, Hydrogen), committed in
+# rootfs/usr/share/backgrounds/isotope/ and reached through the stable name
+# isotope-desktop-night.png; tools/wallpapers/ renders it and the build
+# wallpaper a development build points that link at instead. Drawn here at
+# build time, from theme/palette.toml by tools/gen-wallpaper.py (stdlib
+# Python, fixed dither seed, no network): the tiles, the fallback, and the
+# plain night image swaylock uses; niri and COSMIC, whose shells have a light
+# mode, also get the day tiles. The 4K images are scaled down to fit smaller
+# screens.
 FROM toolchain AS isotope-wallpapers
 COPY theme/palette.toml /build/theme/palette.toml
 COPY tools/gen-wallpaper.py /build/tools/gen-wallpaper.py
