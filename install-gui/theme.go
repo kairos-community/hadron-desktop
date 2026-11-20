@@ -50,17 +50,17 @@ func alpha(c color.NRGBA, a float32) color.NRGBA {
 }
 
 // The fonts are embedded, so the window looks the same on every variant
-// whatever fontconfig has: Space Grotesk for titles, Inter for the rest,
-// JetBrains Mono for device paths, layout codes and the recovery key. All
-// three are SIL OFL 1.1; the licences are in fonts/. Static cuts, because
-// Gio's shaper uses a variable font's default instance only. Space Grotesk
-// publishes no 600 cut, so the 600 titles use its Bold.
+// whatever fontconfig has: Urbanist SemiBold for titles (the wordmark's face,
+// as on the splash), Inter for the rest, JetBrains Mono for device paths,
+// layout codes and the recovery key. Inter is under its own licence, the
+// others SIL OFL 1.1; the licences are in fonts/. Static cuts, because Gio's
+// shaper uses a variable font's default instance only.
 //
 //go:embed fonts/*.ttf
 var fontFiles embed.FS
 
 const (
-	faceTitle = "Space Grotesk"
+	faceTitle = "Urbanist"
 	faceBody  = "Inter"
 	faceMono  = "JetBrains Mono"
 )
@@ -97,12 +97,13 @@ type style struct {
 }
 
 var (
-	stTitle     = style{faceTitle, font.Bold, 28}
-	stHero      = style{faceTitle, font.Bold, 40}
-	stDoneTitle = style{faceTitle, font.Bold, 38}
-	stInstTitle = style{faceTitle, font.Bold, 26}
-	stBrand     = style{faceTitle, font.Bold, 17}
-	stAvatar    = style{faceTitle, font.Bold, 40}
+	stTitle     = style{faceTitle, font.SemiBold, 28}
+	stHero      = style{faceTitle, font.SemiBold, 44}
+	stDoneTitle = style{faceTitle, font.SemiBold, 38}
+	stInstTitle = style{faceTitle, font.SemiBold, 26}
+	stBrand     = style{faceTitle, font.SemiBold, 17}
+	stAvatar    = style{faceTitle, font.SemiBold, 40}
+	stCaps      = style{faceBody, font.SemiBold, 11}
 	stBody      = style{faceBody, font.Normal, 14}
 	stBody500   = style{faceBody, font.Medium, 14}
 	stBody600   = style{faceBody, font.SemiBold, 14}

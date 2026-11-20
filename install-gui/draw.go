@@ -110,36 +110,23 @@ func polygon(gtx layout.Context, pts []f32.Point, scale float32, off f32.Point, 
 	paint.FillShape(gtx.Ops, c, clip.Outline{Path: p.End()}.Op())
 }
 
-// The six-triangle Isotope mark, from tools/gen-wallpaper.py by way of the
-// mocks, in a 100x100 box.
-type tri struct {
-	pts []f32.Point
-	col color.NRGBA
-}
+// The Isotope mark, M1: a hexagon shell on its point, its sixth side lifted
+// off at the upper right, and a round core. The points are docs/assets/
+// isotope-mark.svg's, in its 512x512 box.
+var (
+	markShell = []f32.Point{{X: 423.12, Y: 171.21}, {X: 423.12, Y: 376.01}, {X: 245.76, Y: 478.41},
+		{X: 68.40, Y: 376.01}, {X: 68.40, Y: 171.21}, {X: 245.76, Y: 68.81}, {X: 245.76, Y: 104.29},
+		{X: 99.12, Y: 188.95}, {X: 99.12, Y: 358.28}, {X: 245.76, Y: 442.94}, {X: 392.40, Y: 358.28},
+		{X: 392.40, Y: 188.95}}
+	markLid = []f32.Point{{X: 266.24, Y: 33.34}, {X: 443.60, Y: 135.74}, {X: 412.88, Y: 153.48},
+		{X: 266.24, Y: 68.81}}
+	markCore = f32.Point{X: 245.76, Y: 273.61}
+)
 
-func markTris(lit bool, push float32) []tri {
-	t := []tri{
-		{[]f32.Point{{X: 54.7, Y: 41.9}, {X: 54.7, Y: 4.3}, {X: 87.3, Y: 23.1}}, colGlow},
-		{[]f32.Point{{X: 51.4, Y: 50.0}, {X: 83.9, Y: 31.2}, {X: 83.9, Y: 68.8}}, colAccent},
-		{[]f32.Point{{X: 50.7, Y: 51.2}, {X: 83.3, Y: 70.0}, {X: 50.7, Y: 88.8}}, colCheck},
-		{[]f32.Point{{X: 49.3, Y: 51.2}, {X: 49.3, Y: 88.8}, {X: 16.7, Y: 70.0}}, colGlow},
-		{[]f32.Point{{X: 48.6, Y: 50.0}, {X: 16.1, Y: 68.8}, {X: 16.1, Y: 31.2}}, colAccent},
-		{[]f32.Point{{X: 49.3, Y: 48.8}, {X: 16.7, Y: 30.0}, {X: 49.3, Y: 11.2}}, colCheck},
-	}
-	if lit {
-		// The installing page: the first triangle pushed out and lit, as
-		// the splash does at the flash.
-		t[0].col = colText
-	}
-	// The push moves the first triangle out along the line from the
-	// centre, (4, -2.3) per unit: the mocks' installing mark is one unit.
-	pts := make([]f32.Point, 3)
-	for i, p := range t[0].pts {
-		pts[i] = f32.Pt(p.X+4*push, p.Y-2.3*push)
-	}
-	t[0].pts = pts
-	return t
-}
+const markCoreR = 34.82
+
+// The lid's normal, outwards: a push of 1 moves it this far, in mark units.
+var markPush = f32.Pt(12*0.866, -12*0.5)
 
 // breath is the splash's breathing of the pushed triangle: a slow sine,
 // 2.4 s a cycle, at time t.
@@ -148,23 +135,32 @@ func breath(t time.Time) float32 {
 	return float32(math.Sin(s * 2 * math.Pi))
 }
 
-// mark draws the mark in a square of size dp. lit draws the installing
-// page's variant, whose viewBox is -8..108 so the pushed triangle fits;
-// push is how far out the first triangle is (1 on the installing page).
+// mark draws the mark in a square of size dp. lit puts the core's light
+// around it, as on the splash; push lifts the sixth side further out (the
+// breathing on the welcome and installing pages). opacity lays it on the
+// desktop colour.
 func mark(gtx layout.Context, size float32, lit bool, opacity, push float32) layout.Dimensions {
 	px := fdp(gtx, size)
-	scale, off := px/100, f32.Pt(0, 0)
+	scale := px / 512
+	shell, light := colAccent, colGlow
+	if opacity < 1 {
+		shell, light = over(colDesk2, shell, opacity), over(colDesk2, light, opacity)
+	}
 	if lit {
-		scale = px / 116
-		off = f32.Pt(8*scale, 8*scale)
+		g := size * 0.62
+		o := op.Offset(image.Pt(int(markCore.X*scale-fdp(gtx, g)/2), int(markCore.Y*scale-fdp(gtx, g)/2))).Push(gtx.Ops)
+		glow(gtx, g, colAccent, 0.35)
+		o.Pop()
 	}
-	for _, t := range markTris(lit, push) {
-		c := t.col
-		if opacity < 1 {
-			c = over(colDesk2, c, opacity)
-		}
-		polygon(gtx, t.pts, scale, off, c)
-	}
+	polygon(gtx, markShell, scale, f32.Pt(0, 0), shell)
+	polygon(gtx, markLid, scale, f32.Pt(markPush.X*push*scale, markPush.Y*push*scale), light)
+	r := markCoreR * scale
+	c := f32.Pt(markCore.X*scale, markCore.Y*scale)
+	var p clip.Path
+	p.Begin(gtx.Ops)
+	p.MoveTo(f32.Pt(c.X+r, c.Y))
+	p.ArcTo(c, c, 2*math.Pi)
+	paint.FillShape(gtx.Ops, light, clip.Outline{Path: p.End()}.Op())
 	s := int(px + 0.5)
 	return layout.Dimensions{Size: image.Pt(s, s)}
 }

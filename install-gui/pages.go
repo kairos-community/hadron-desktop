@@ -58,13 +58,6 @@ func (u *UI) Layout(gtx layout.Context) layout.Dimensions {
 	paint.NewImageOp(bg).Add(gtx.Ops)
 	paint.PaintOp{}.Add(gtx.Ops)
 
-	if u.page == pWelcome {
-		// The large faint mark behind the welcome window.
-		o := op.Offset(win.Min.Add(pt(gtx, -90, -170))).Push(gtx.Ops)
-		mark(gtx, 1100, false, 0.06, 0)
-		o.Pop()
-	}
-
 	rad := 0
 	if floating {
 		rad = dp(gtx, 16)
@@ -260,7 +253,15 @@ func (u *UI) footer(gtx layout.Context) layout.Dimensions {
 					return u.button(gtx, &u.shutdown, btnGhost, "Shut down", true)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return u.button(gtx, &u.cont, btnPrimary, "Continue", true)
+					return layout.Flex{Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return u.label(gtx, stSmall, colDim, "About five minutes")
+						}),
+						layout.Rigid(layout.Spacer{Width: 20}.Layout),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return u.button(gtx, &u.cont, btnPrimary, "Continue", true)
+						}),
+					)
 				}),
 			)
 		}
@@ -318,33 +319,76 @@ func vgap(h float32) layout.FlexChild { return layout.Rigid(layout.Spacer{Height
 
 func (u *UI) welcome(gtx layout.Context) layout.Dimensions {
 	return layout.Inset{Top: 40, Bottom: 40, Left: 64, Right: 64}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-		return layout.Center.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, dp(gtx, 460))
-			return layout.Flex{Axis: layout.Vertical, Alignment: layout.Middle}.Layout(gtx,
+		return layout.W.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, dp(gtx, 560))
+			gtx.Constraints.Min.X = gtx.Constraints.Max.X
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					o := op.Offset(pt(gtx, -46, -16)).Push(gtx.Ops)
-					glow(gtx, 240, colAccent, 0.12)
-					o.Pop()
-					// The mark breathes, as on the splash: the first
-					// triangle moves out a little and back.
-					return mark(gtx, 148, false, 1, 0.15*(1+breath(u.now())))
+					// The mark lit, as the splash leaves it; its side
+					// breathes a little out and back.
+					return mark(gtx, 112, true, 1, 0.5*(1+breath(u.now())))
 				}),
-				vgap(22),
+				vgap(36),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return u.label(gtx, stHero, colText, "Welcome to Isotope")
 				}),
-				vgap(22),
+				vgap(14),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return u.centered(gtx, stLead, colText2, 1.55, "An immutable Linux desktop, built on Hadron. The system stays read-only and updates as a whole image, so a bad update rolls back by itself.")
+					gtx.Constraints.Max.X = min(gtx.Constraints.Max.X, dp(gtx, 500))
+					return u.labelLines(gtx, stLead, colText2, 1.55, "An immutable Linux desktop, built on Hadron. The system is a read-only image. An update arrives as a whole new image, and a bad one rolls back by itself.")
 				}),
-				vgap(22),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					gtx.Constraints.Max.X = dp(gtx, 560)
-					return u.centered(gtx, stBody, colDim, 1.3, "This takes about five minutes. You can go back at any step before the summary.")
-				}),
+				vgap(40),
+				layout.Rigid(u.images),
 			)
 		})
 	})
+}
+
+// images is the welcome page's row of the three system images, the row the
+// splash draws while booting: the one you run, the one that takes the next
+// update, and the way back.
+func (u *UI) images(gtx layout.Context) layout.Dimensions {
+	names := [3][2]string{{"ACTIVE", "runs your desktop"}, {"PASSIVE", "takes the next update"}, {"RECOVERY", "the way back"}}
+	var kids []layout.FlexChild
+	for i, n := range names {
+		i, n := i, n
+		if i > 0 {
+			kids = append(kids, layout.Rigid(layout.Spacer{Width: 14}.Layout))
+		}
+		kids = append(kids, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			gtx.Constraints.Min.X = gtx.Constraints.Max.X
+			line, name, sub := colRing, colDim, colDim
+			if i == 0 {
+				line, name, sub = colAccent, colText, colText2
+			}
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					h := dp(gtx, 2)
+					fillRect(gtx, image.Rect(0, 0, gtx.Constraints.Max.X, h), line)
+					return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, h)}
+				}),
+				vgap(10),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return u.label(gtx, stCaps, name, spaced(n[0])) }),
+				vgap(4),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return u.label(gtx, stSmall, sub, n[1]) }),
+			)
+		}))
+	}
+	return layout.Flex{}.Layout(gtx, kids...)
+}
+
+// spaced letter-spaces caps with thin spaces, as the splash does: Gio has no
+// tracking.
+func spaced(s string) string {
+	r := []rune(s)
+	out := make([]rune, 0, 2*len(r))
+	for i, c := range r {
+		if i > 0 {
+			out = append(out, '\u2009')
+		}
+		out = append(out, c)
+	}
+	return string(out)
 }
 
 // --- 2. Keyboard and time zone ----------------------------------------------
