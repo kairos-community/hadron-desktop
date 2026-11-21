@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+<!-- The Isotope mark on the COSMIC login screen in a light theme: the shell in ink, the lifted side and core in the deep brand tone, as on the day wallpaper; tools/gen-theme.py sets its colours from the palette's day roles. -->
+<path fill="#1c1d19" d="M423.12 171.21L423.12 376.01L245.76 478.41L68.40 376.01L68.40 171.21L245.76 68.81L245.76 104.29L99.12 188.95L99.12 358.28L245.76 442.94L392.40 358.28L392.40 188.95Z"/>
+<path fill="#9f9615" d="M266.24 33.34L443.60 135.74L412.88 153.48L266.24 68.81Z"/>
+<circle fill="#9f9615" cx="245.76" cy="273.61" r="34.82"/>
+</svg>

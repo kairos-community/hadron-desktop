@@ -1,0 +1,58 @@
+# Isotope's own COSMIC panel applets, one crate per applet, built together by
+# the Dockerfile `isotope-applets` stage (`cosmic-build /src/applets`, see
+# tools/cosmic-build.sh). The `justfile` next to this file installs them.
+#
+# libcosmic is pinned by Cargo.lock to the revision cosmic-applets epoch-1.11.0
+# pins (430f3d48a97d), one of the revisions patches/cosmic/README.md lists, so
+# the libcosmic patches (the window buttons on the left) apply to it like to
+# every stock applet. It is named here without a rev, as cosmic-applets names
+# it: the COSMIC crates it pulls in (cosmic-panel-config, cosmic-settings-config)
+# name libcosmic's cosmic-config without one, and a `rev =` here would make
+# that a second source and build two cosmic-configs. The lock was seeded from
+# cosmic-applets' Cargo.lock at epoch-1.11.0, so every shared crate has the
+# version the stock applets are built with. On a COSMIC epoch bump, seed it
+# again from cosmic-applets' Cargo.lock at the new tag and run `cargo update -w`.
+# The [patch] sections are cosmic-applets' own.
+[workspace]
+members = ["isotope-mark", "isotope-quick"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+
+[workspace.dependencies]
+# The features cosmic-applets epoch-1.11.0 builds its applets with.
+libcosmic = { git = "https://github.com/pop-os/libcosmic", default-features = false, features = [
+    "applet",
+    "applet-token",
+    "dbus-config",
+    "multi-window",
+    "tokio",
+    "wayland",
+    "desktop-systemd-scope",
+    "winit",
+] }
+# The lines below are cosmic-applets' own.
+futures = "0.3"
+serde = { version = "1.0.228", features = ["derive"] }
+rustix = { version = "1.1", features = ["fs", "process"] }
+tokio = { version = "1.49.0", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+tracing-log = "0.2.0"
+zbus = { version = "5.14.0", default-features = false, features = ["tokio"] }
+zlink = "0.5.0"
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+lto = "thin"
+
+[patch."https://github.com/smithay/client-toolkit.git"]
+sctk = { package = "smithay-client-toolkit", version = "0.20.0" }
+
+[patch."https://github.com/pop-os/cosmic-protocols"]
+cosmic-protocols = { git = "https://github.com/pop-os/cosmic-protocols//", rev = "c0cff4d" }
+cosmic-client-toolkit = { git = "https://github.com/pop-os/cosmic-protocols//", rev = "c0cff4d" }

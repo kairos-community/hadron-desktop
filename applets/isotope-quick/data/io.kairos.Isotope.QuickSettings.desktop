@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Quick Settings
+Comment=Wi-Fi, Bluetooth, keyboard layout, dark style, do not disturb, brightness, volume and power in one popup
+Type=Application
+Exec=isotope-applet-quick
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Isotope;Network;Bluetooth;Sound;Volume;Brightness;Power;
+Icon=io.kairos.Isotope.QuickSettings-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto

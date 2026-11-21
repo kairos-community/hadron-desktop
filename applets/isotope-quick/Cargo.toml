@@ -1,0 +1,35 @@
+[package]
+name = "isotope-quick"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "isotope-applet-quick"
+path = "src/main.rs"
+
+# The crates the stock applets use for the same jobs, at the revisions
+# cosmic-applets epoch-1.11.0 pins (see the lock): xkb-data
+# (input-sources), cosmic-notifications-config (notifications), the
+# settings-daemon subscription (battery's brightness), the settings-daemon
+# audio client (audio). NetworkManager and BlueZ are read and set with zbus
+# directly (the stock applets wrap them in nmrs and bluer, whole managers
+# this popup does not need; bluer also links libdbus).
+[dependencies]
+cosmic-notifications-config = { git = "https://github.com/pop-os/cosmic-notifications" }
+cosmic-settings-audio-client = { git = "https://github.com/pop-os/cosmic-settings-daemon", features = ["codec"] }
+cosmic-settings-daemon-subscription = { git = "https://github.com/pop-os/cosmic-settings" }
+futures.workspace = true
+libcosmic.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-log.workspace = true
+tracing-subscriber.workspace = true
+xkb-data = "0.2"
+zbus.workspace = true
+zlink.workspace = true
+
+[dev-dependencies]
+# The RON parser cosmic-config reads its files with (the version in the lock).
+ron = "0.12"

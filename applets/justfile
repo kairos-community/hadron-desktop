@@ -1,0 +1,33 @@
+# Installs Isotope's COSMIC applets, the way cosmic-applets' justfile installs
+# the stock ones. tools/cosmic-build.sh builds the workspace with
+# `cargo build --release --locked` and then runs `just rootdir=$COSMIC_OUT install`.
+#
+# An applet is a workspace member <dir> with:
+#   - a binary <bin>, installed to /usr/bin;
+#   - <dir>/data/<id>.desktop, the panel's applet entry (X-CosmicApplet), installed
+#     to /usr/share/applications, where cosmic-panel looks the ID up;
+#   - <dir>/data/icons/<size>/apps/*, installed to the hicolor icon theme.
+# Add a new applet as one more `_install_applet` dependency of `install`.
+
+rootdir := ''
+prefix := '/usr'
+targetdir := env('CARGO_TARGET_DIR', 'target')
+sharedir := rootdir + prefix + '/share'
+iconsdir := sharedir + '/icons/hicolor'
+bindir := rootdir + prefix + '/bin'
+
+default: build-release
+
+build-release *args:
+    cargo build --release --locked {{ args }}
+
+test *args:
+    cargo test --locked {{ args }}
+
+_install_applet id dir bin:
+    install -Dm0755 {{ targetdir }}/release/{{ bin }} {{ bindir }}/{{ bin }}
+    install -Dm0644 {{ dir }}/data/{{ id }}.desktop {{ sharedir }}/applications/{{ id }}.desktop
+    find {{ dir }}/data/icons -type f | while read -r f; do install -Dm0644 "$f" "{{ iconsdir }}/${f#{{ dir }}/data/icons/}"; done
+
+# Installs every applet under rootdir.
+install: (_install_applet 'io.kairos.Isotope.Mark' 'isotope-mark' 'isotope-applet-mark') (_install_applet 'io.kairos.Isotope.QuickSettings' 'isotope-quick' 'isotope-applet-quick')

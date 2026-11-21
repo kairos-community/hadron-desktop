@@ -1,0 +1,108 @@
+{
+  "dark": {
+    "builder": {
+      "accent": "#e9e7c1",
+      "bg_color": "#141411",
+      "destructive": "#ff7172",
+      "primary_container_bg": "#1d1d1a",
+      "secondary_container_bg": "#2a2b25",
+      "success": "#37be95",
+      "warning": "#ea8a18",
+      "window_hint": "#909287"
+    },
+    "look": {
+      "active_hint": 2,
+      "corner_radii": "Round",
+      "frosted": "Medium",
+      "frosted_applets": true,
+      "frosted_maximized_apps": false,
+      "frosted_panel": true,
+      "frosted_system_interface": true,
+      "frosted_windows": true,
+      "gaps": [
+        0,
+        12
+      ]
+    },
+    "on_accent": "#141411",
+    "palette": {
+      "accent_blue": "#79b8ed",
+      "accent_green": "#37be95",
+      "accent_indigo": "#79b8ed",
+      "accent_orange": "#ff7442",
+      "accent_pink": "#d896db",
+      "accent_purple": "#d896db",
+      "accent_red": "#ff7172",
+      "accent_warm_grey": "#595b52",
+      "accent_yellow": "#ea8a18",
+      "bright_green": "#37be95",
+      "bright_orange": "#ea8a18",
+      "bright_red": "#ff7172",
+      "name": "Isotope",
+      "neutral_0": "#0c0d0b",
+      "neutral_1": "#141411",
+      "neutral_10": "#f4f5f2",
+      "neutral_2": "#1d1d1a",
+      "neutral_3": "#2a2b25",
+      "neutral_4": "#393a34",
+      "neutral_5": "#595b52",
+      "neutral_6": "#75776d",
+      "neutral_7": "#909287",
+      "neutral_8": "#afb1a8",
+      "neutral_9": "#ced0c8"
+    }
+  },
+  "light": {
+    "builder": {
+      "accent": "#3e3e32",
+      "bg_color": "#f4f5f2",
+      "destructive": "#b00e50",
+      "primary_container_bg": "#ffffff",
+      "secondary_container_bg": "#e9eae6",
+      "success": "#167a69",
+      "warning": "#832d00",
+      "window_hint": "#61635a"
+    },
+    "look": {
+      "active_hint": 2,
+      "corner_radii": "Round",
+      "frosted": "Medium",
+      "frosted_applets": true,
+      "frosted_maximized_apps": false,
+      "frosted_panel": true,
+      "frosted_system_interface": true,
+      "frosted_windows": true,
+      "gaps": [
+        0,
+        12
+      ]
+    },
+    "on_accent": "#ffffff",
+    "palette": {
+      "accent_blue": "#1666aa",
+      "accent_green": "#167a69",
+      "accent_indigo": "#1666aa",
+      "accent_orange": "#a33600",
+      "accent_pink": "#6432a9",
+      "accent_purple": "#6432a9",
+      "accent_red": "#b00e50",
+      "accent_warm_grey": "#76786d",
+      "accent_yellow": "#832d00",
+      "bright_green": "#167a69",
+      "bright_orange": "#832d00",
+      "bright_red": "#b00e50",
+      "name": "Isotope",
+      "neutral_0": "#ffffff",
+      "neutral_1": "#f4f5f2",
+      "neutral_10": "#1c1d19",
+      "neutral_2": "#e9eae6",
+      "neutral_3": "#d8d9d3",
+      "neutral_4": "#cbcdc6",
+      "neutral_5": "#76786d",
+      "neutral_6": "#6c6e64",
+      "neutral_7": "#61635a",
+      "neutral_8": "#56584f",
+      "neutral_9": "#4a4c43"
+    }
+  }
+}

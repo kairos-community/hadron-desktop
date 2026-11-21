@@ -18,6 +18,8 @@
     frame_color = "#e9e7c1"
     separator_color = frame
     font = Inter Variable 10.5
+    icon_theme = Conflux
+    enable_recursive_icon_lookup = true
     markup = full
     format = "<b>%s</b>\n%b"
     corner_radius = 10

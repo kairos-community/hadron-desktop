@@ -1,0 +1,15 @@
+# <app-id> <Conflux icon name>
+# The Dockerfile `icon-themes` stage links apps/scalable/<app-id>.svg to
+# <Conflux icon name>.svg in the installed Conflux theme, for the app IDs
+# Isotope shows that Conflux does not name itself. An app with no fitting
+# Conflux icon goes in conflux-missing.txt instead.
+
+# COSMIC apps
+com.system76.CosmicFiles files
+com.system76.CosmicTerm utilities-terminal
+com.system76.CosmicSettings settings
+com.system76.CosmicStore software-store
+
+# First-run apps (first-run-apps.list)
+org.videolan.VLC vlc
+org.chromium.Chromium chrome

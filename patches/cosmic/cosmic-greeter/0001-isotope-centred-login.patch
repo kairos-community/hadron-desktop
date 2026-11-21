@@ -1,0 +1,1763 @@
+Isotope: a centred login screen in the desktop's look.
+
+What: re-lays out the greeter's menu (App::menu in src/greeter.rs) over the
+whole output instead of a two-column card 866 px wide:
+- top left, the Isotope mark and the "ISOTOPE" wordmark. The mark is
+  /usr/share/isotope/greeter-mark.svg (the night brand colours) under a dark
+  theme and greeter-mark-day.svg (an ink shell with a deep brand core, the
+  day palette's mark) under a light one, so it reads on both soft wallpapers;
+- top right, a strip with the keyboard layout chooser, the on-screen keyboard
+  toggle, the session chooser, and the network and battery icons;
+- top centre, the date and a large clock (about 8.5% of the screen width);
+- centre, the user's picture in a circle (or their initial), their name, a
+  pill-shaped password field, the caps-lock, authenticating and error lines
+  under it, and "Other users ›", which opens the user list (with "Enter name
+  manually...");
+- bottom, round glass buttons with labels for accessibility (its menu) and,
+  when logind is there, suspend, restart and shut down (with their
+  confirmation dialogs).
+Every action and chooser of the upstream layout is kept; only where they sit
+changes. The subsurface now covers the output from its top left (it was
+866 px wide, 32 px down), so the dividers and the MAX_WIDTH arithmetic that
+assumed the card go. The password field is the blurred region of the surface
+(Common::blur_rects), as the card was.
+
+The background (src/greeter/background.rs, std only): for Isotope's two
+desktop wallpapers, /usr/share/backgrounds/isotope/isotope-desktop-{night,day}.png
+(or the picture their link points at, which is what cosmic-bg records), the
+greeter shows the soft copy the image build makes next to them,
+isotope-desktop-{night,day}-blur.png (tools/gen-wallpaper.py --blur); any
+other picture is shown as it is under a scrim of the theme's background colour
+at 45%. Common gets an optional `background_rule` for this (the lock screen
+leaves it unset and is unchanged) and reads the soft copy itself, as the
+greeter user: it is a world-readable file in the image, not user data. The
+text and icons take the theme's colour on its background; the glass is that
+background colour, translucent, with a hairline edge, so the greeter follows
+the system theme like the desktop does.
+
+The fallback: for an output the user has no wallpaper for, and for every
+output before a user is chosen (or with no users), the greeter showed its
+built-in picture, res/background.jpg (COSMIC's nebula). A user who has never
+logged in has no cosmic-bg state, and the daemon's only fallback,
+/var/cache/systemd/home/<user>/login-background (systemd-homed), is listed
+under no output name, so it never matched. The greeter now shows the system
+default wallpaper instead: the `source` of
+/usr/share/cosmic/com.system76.CosmicBackground/v1/all (Isotope's night
+picture), the day picture under a light theme as on the desktop, through the
+same soft-copy rule (background::fallback_background, read by
+App::load_fallback_background at start and when the selected user's theme
+mode changes). Common::fallback_scrim says whether that picture needs the
+scrim; the built-in picture keeps it when the default cannot be read.
+
+New string: `other-users` in i18n/en (other languages fall back to it).
+
+Why: Isotope's look (docs/superpowers/specs/2026-11-20-isotope-look-design.md,
+"Login screen (cosmic-greeter)", and the login mock in
+docs/superpowers/specs/assets/isotope-look/mock.html): the login screen must
+look like the desktop it opens, and carries the branded login every variant
+has.
+
+Made against cosmic-greeter epoch-1.11.0 (80e8a104b75a), with libcosmic
+430f3d48a97d.
+
+diff -ruN a/i18n/en/cosmic_greeter.ftl b/i18n/en/cosmic_greeter.ftl
+--- a/i18n/en/cosmic_greeter.ftl
++++ b/i18n/en/cosmic_greeter.ftl
+@@ -10,6 +10,7 @@
+ type-username = Username:
+ keyboard-layout = Keyboard layout
+ on-screen-keyboard = On-screen keyboard
++other-users = Other users ›
+ restart = Restart
+ restart-now = Restart now?
+ restart-timeout = The system will restart automatically
+diff -ruN a/src/common.rs b/src/common.rs
+--- a/src/common.rs
++++ b/src/common.rs
+@@ -73,6 +73,15 @@
+     pub text_input_ids: HashMap<String, widget::Id>,
+     pub time: crate::time::Time,
+     pub window_size: HashMap<SurfaceId, Size>,
++    /// Isotope: maps the wallpaper's path to the picture to show and whether a
++    /// scrim covers it. The greeter sets it; the lock screen keeps `None`.
++    pub background_rule: Option<fn(&std::path::Path) -> (std::path::PathBuf, bool)>,
++    /// Isotope: the surfaces whose picture is shown under the scrim.
++    pub surface_scrims: HashSet<SurfaceId>,
++    /// Isotope: whether `fallback_background` is shown under the scrim. The
++    /// greeter replaces the built-in picture with the system default
++    /// wallpaper's soft copy, which needs none.
++    pub fallback_scrim: bool,
+ }
+ 
+ #[derive(Clone, Debug)]
+@@ -144,6 +153,9 @@
+             rectangle_tracker: None,
+             rectangles: HashMap::new(),
+             include_menu: false,
++            background_rule: None,
++            surface_scrims: HashSet::new(),
++            fallback_scrim: true,
+         };
+         (
+             app,
+@@ -170,10 +182,45 @@
+                 if wallpaper_output_name == output_name {
+                     match wallpaper_source {
+                         BgSource::Path(path) => {
+-                            match user_data.bg_path_data.get(path) {
++                            // Isotope: the greeter shows another picture for
++                            // Isotope's wallpapers (a soft copy in the image,
++                            // readable by the greeter user) and a scrim over
++                            // the rest.
++                            let (shown, scrim) = match self.background_rule {
++                                Some(rule) => rule(path),
++                                None => (path.clone(), false),
++                            };
++                            let replaced = if shown != *path {
++                                match std::fs::read(&shown) {
++                                    Ok(bytes) => Some(bytes),
++                                    Err(err) => {
++                                        tracing::warn!(
++                                            "output {}: failed to read {:?}: {}",
++                                            output_name,
++                                            shown,
++                                            err
++                                        );
++                                        None
++                                    }
++                                }
++                            } else {
++                                None
++                            };
++                            // The sharp picture gets the scrim when its soft
++                            // copy cannot be read.
++                            let scrim = scrim
++                                || (self.background_rule.is_some()
++                                    && shown != *path
++                                    && replaced.is_none());
++                            match replaced.or_else(|| user_data.bg_path_data.get(path).cloned()) {
+                                 Some(bytes) => {
+-                                    let image = widget::image::Handle::from_bytes(bytes.clone());
++                                    let image = widget::image::Handle::from_bytes(bytes);
+                                     self.surface_images.insert(*surface_id, image);
++                                    if scrim {
++                                        self.surface_scrims.insert(*surface_id);
++                                    } else {
++                                        self.surface_scrims.remove(surface_id);
++                                    }
+                                     //TODO: what to do about duplicates?
+                                 }
+                                 None => {
+diff -ruN a/src/greeter/background.rs b/src/greeter/background.rs
+--- a/src/greeter/background.rs
++++ b/src/greeter/background.rs
+@@ -0,0 +1,241 @@
++// SPDX-License-Identifier: GPL-3.0-only
++
++//! Isotope: the picture behind the login screen.
++//!
++//! The greeter shows the user's wallpaper. For Isotope's two desktop
++//! wallpapers it shows the soft copy the image build makes next to them
++//! (`isotope-desktop-{night,day}-blur.png`, tools/gen-wallpaper.py --blur),
++//! so the clock and the password field read on it. Any other picture is shown
++//! as it is, under a scrim of the theme's background colour.
++//!
++//! No dependencies beyond std, so `rustc --test` can test this file alone.
++
++use std::path::{Path, PathBuf};
++
++/// Where the image puts Isotope's wallpapers.
++pub const ISOTOPE_WALLPAPER_DIR: &str = "/usr/share/backgrounds/isotope";
++
++/// The stable names of the two desktop wallpapers. They are links to the
++/// release's (or a development build's) pictures, and cosmic-bg records the
++/// target, not the link, in its state, so a path is matched against both.
++pub const ISOTOPE_WALLPAPERS: [&str; 2] = ["isotope-desktop-night.png", "isotope-desktop-day.png"];
++
++/// The scrim's opacity over a picture that is not Isotope's.
++pub const SCRIM_ALPHA: f32 = 0.45;
++
++/// The picture to show for `wallpaper`, and whether to cover it with the scrim.
++pub fn greeter_background(wallpaper: &Path) -> (PathBuf, bool) {
++    greeter_background_with(wallpaper, |p| std::fs::canonicalize(p).ok())
++}
++
++/// [`greeter_background`] with the link resolution passed in, for the tests.
++pub fn greeter_background_with(
++    wallpaper: &Path,
++    resolve: impl Fn(&Path) -> Option<PathBuf>,
++) -> (PathBuf, bool) {
++    let dir = Path::new(ISOTOPE_WALLPAPER_DIR);
++    let resolved = resolve(wallpaper);
++    for name in ISOTOPE_WALLPAPERS {
++        let stable = dir.join(name);
++        let same = wallpaper == stable
++            || matches!((&resolved, resolve(&stable)), (Some(a), Some(b)) if *a == b);
++        if same {
++            let blur = format!("{}-blur.png", name.trim_end_matches(".png"));
++            return (dir.join(blur), false);
++        }
++    }
++    (wallpaper.to_path_buf(), true)
++}
++
++/// Isotope's system-wide cosmic-bg default (the `all` entry). A user who has
++/// never logged in has no cosmic-bg state, so the greeter shows this one.
++pub const SYSTEM_BACKGROUND_CONFIG: &str = "/usr/share/cosmic/com.system76.CosmicBackground/v1/all";
++
++/// The picture a cosmic-bg config entry names: its `source: Path("...")`.
++/// A colour source, or text that is not an entry, gives `None`.
++pub fn config_source(entry: &str) -> Option<PathBuf> {
++    let rest = &entry[entry.find("source:")? + "source:".len()..];
++    let rest = rest.trim_start().strip_prefix("Path")?.trim_start();
++    let rest = rest.strip_prefix('(')?.trim_start().strip_prefix('"')?;
++    let mut path = String::new();
++    let mut chars = rest.chars();
++    loop {
++        match chars.next()? {
++            '"' => break,
++            '\\' => match chars.next()? {
++                c @ ('"' | '\\') => path.push(c),
++                _ => return None,
++            },
++            c => path.push(c),
++        }
++    }
++    (!path.is_empty()).then(|| PathBuf::from(path))
++}
++
++/// The wallpaper for a user without one of their own (and before a user is
++/// chosen): the system default. When that is one of Isotope's two desktop
++/// wallpapers, the one that matches the theme, as `isotope wallpaper-follow`
++/// does on the desktop: night under a dark theme, day under a light one.
++pub fn default_wallpaper(system_default: Option<&Path>, is_dark: bool) -> Option<PathBuf> {
++    let source = system_default?;
++    let dir = Path::new(ISOTOPE_WALLPAPER_DIR);
++    let [night, day] = ISOTOPE_WALLPAPERS;
++    if source == dir.join(night) || source == dir.join(day) {
++        return Some(dir.join(if is_dark { night } else { day }));
++    }
++    Some(source.to_path_buf())
++}
++
++/// The fallback background: the picture to show, and whether it gets the
++/// scrim, for the system default config's text (`None` when it cannot be
++/// read). `None` means there is no system default; the greeter then keeps its
++/// built-in picture under the scrim.
++pub fn fallback_background(config: Option<&str>, is_dark: bool) -> Option<(PathBuf, bool)> {
++    let source = config.and_then(config_source);
++    default_wallpaper(source.as_deref(), is_dark).map(|p| greeter_background(&p))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// rootfs-cosmic/usr/share/cosmic/com.system76.CosmicBackground/v1/all
++    const ISOTOPE_ALL: &str = r#"(
++    output: "all",
++    source: Path("/usr/share/backgrounds/isotope/isotope-desktop-night.png"),
++    filter_by_theme: true,
++    rotation_frequency: 3600,
++    filter_method: Lanczos,
++    scaling_mode: Zoom,
++    sampling_method: Alphanumeric,
++)
++"#;
++
++    #[test]
++    fn the_system_config_names_the_night_wallpaper() {
++        assert_eq!(config_source(ISOTOPE_ALL), Some(PathBuf::from(NIGHT)));
++        assert_eq!(
++            config_source(r#"(output:"all",source:Path( "/a \"b\".png" ))"#),
++            Some(PathBuf::from(r#"/a "b".png"#))
++        );
++    }
++
++    #[test]
++    fn a_colour_or_broken_config_names_no_picture() {
++        assert_eq!(
++            config_source(r#"(output: "all", source: Color(Single((0.0, 0.0, 0.0))))"#),
++            None
++        );
++        assert_eq!(config_source(""), None);
++        assert_eq!(config_source(r#"(source: Path("/unterminated"#), None);
++        assert_eq!(config_source(r#"(source: Path(""))"#), None);
++    }
++
++    #[test]
++    fn a_user_without_a_wallpaper_gets_the_system_default_blurred() {
++        assert_eq!(
++            fallback_background(Some(ISOTOPE_ALL), true),
++            (Some((
++                PathBuf::from("/usr/share/backgrounds/isotope/isotope-desktop-night-blur.png"),
++                false
++            )))
++        );
++    }
++
++    #[test]
++    fn the_default_follows_a_light_theme_to_the_day_picture() {
++        assert_eq!(
++            fallback_background(Some(ISOTOPE_ALL), false),
++            Some((
++                PathBuf::from("/usr/share/backgrounds/isotope/isotope-desktop-day-blur.png"),
++                false
++            ))
++        );
++        assert_eq!(
++            default_wallpaper(Some(Path::new(DAY)), true),
++            Some(PathBuf::from(NIGHT))
++        );
++    }
++
++    #[test]
++    fn another_system_default_is_kept_under_the_scrim() {
++        let other = "(source: Path(\"/usr/share/backgrounds/cosmic/orion.jpg\"))";
++        assert_eq!(
++            fallback_background(Some(other), false),
++            Some((
++                PathBuf::from("/usr/share/backgrounds/cosmic/orion.jpg"),
++                true
++            ))
++        );
++    }
++
++    #[test]
++    fn no_system_default_means_no_fallback_picture() {
++        assert_eq!(fallback_background(None, true), None);
++        assert_eq!(fallback_background(Some("garbage"), true), None);
++    }
++
++    const NIGHT: &str = "/usr/share/backgrounds/isotope/isotope-desktop-night.png";
++    const DAY: &str = "/usr/share/backgrounds/isotope/isotope-desktop-day.png";
++
++    #[test]
++    fn isotope_wallpapers_get_their_blurred_copy_without_a_scrim() {
++        assert_eq!(
++            greeter_background(Path::new(NIGHT)),
++            (
++                PathBuf::from("/usr/share/backgrounds/isotope/isotope-desktop-night-blur.png"),
++                false
++            )
++        );
++        assert_eq!(
++            greeter_background(Path::new(DAY)),
++            (
++                PathBuf::from("/usr/share/backgrounds/isotope/isotope-desktop-day-blur.png"),
++                false
++            )
++        );
++    }
++
++    #[test]
++    fn another_picture_is_itself_with_a_scrim() {
++        assert_eq!(
++            greeter_background(Path::new("/home/x/pic.jpg")),
++            (PathBuf::from("/home/x/pic.jpg"), true)
++        );
++    }
++
++    #[test]
++    fn the_link_target_cosmic_bg_records_counts_as_the_wallpaper() {
++        // cosmic-bg canonicalizes its source: the state names the release
++        // picture the stable link points at.
++        let target = "/usr/share/backgrounds/isotope/isotope-1-hydrogen-day-3840x2160.png";
++        let resolve = |p: &Path| {
++            Some(if p == Path::new(DAY) {
++                PathBuf::from(target)
++            } else {
++                p.to_path_buf()
++            })
++        };
++        assert_eq!(
++            greeter_background_with(Path::new(target), resolve),
++            (
++                PathBuf::from("/usr/share/backgrounds/isotope/isotope-desktop-day-blur.png"),
++                false
++            )
++        );
++        // Another picture in the same directory is not one of the two.
++        let other = "/usr/share/backgrounds/isotope/isotope-tiles-night-3840x2160.png";
++        assert_eq!(
++            greeter_background_with(Path::new(other), resolve),
++            (PathBuf::from(other), true)
++        );
++    }
++
++    #[test]
++    fn an_unresolvable_path_is_not_a_match() {
++        assert_eq!(
++            greeter_background_with(Path::new("/gone.png"), |_| None),
++            (PathBuf::from("/gone.png"), true)
++        );
++    }
++}
+diff -ruN a/src/greeter.rs b/src/greeter.rs
+--- a/src/greeter.rs
++++ b/src/greeter.rs
+@@ -1,6 +1,7 @@
+ // Copyright 2023 System76 <info@system76.com>
+ // SPDX-License-Identifier: GPL-3.0-only
+ 
++mod background;
+ mod ipc;
+ 
+ use crate::wayland::{self, WaylandUpdate};
+@@ -53,7 +54,7 @@
+ use wayland_client::protocol::wl_output::WlOutput;
+ use zbus::{Connection, proxy};
+ 
+-use crate::common::{self, Common, DEFAULT_MENU_ITEM_HEIGHT, MAX_WIDTH};
++use crate::common::{self, Common, DEFAULT_MENU_ITEM_HEIGHT};
+ use crate::fl;
+ 
+ static USERNAME_ID: LazyLock<iced::id::Id> = LazyLock::new(|| iced::id::Id::new("username-id"));
+@@ -439,6 +440,8 @@
+     heartbeat_handle: Option<cosmic::iced::task::Handle>,
+     entering_name: bool,
+     theme_builder: cosmic_theme::ThemeBuilder,
++    /// Isotope: the theme mode `common.fallback_background` was loaded for.
++    fallback_is_dark: Option<bool>,
+     surface_id_pairs: Vec<(window::Id, window::Id)>,
+ 
+     randr_list: Option<cosmic_randr_shell::List>,
+@@ -493,534 +496,600 @@
+         .discard()
+     }
+ 
++    // Isotope: the login screen is laid out over the whole output, as the
++    // desktop's lock screen look: the mark and wordmark at the top left, the
++    // keyboard layout, session and status icons at the top right, the date
++    // and a large clock at the top centre, the user, a pill password field
++    // and its caps-lock, error and "Other users" lines in the centre, and the
++    // accessibility and power actions as round glass buttons at the bottom.
+     fn menu(&self, id: SurfaceId) -> Element<'_, Message> {
+         let window_width = self
+             .common
+             .window_size
+             .get(&id)
+             .map(|s| s.width)
+-            .unwrap_or(MAX_WIDTH);
+-        let menu_width = if window_width > MAX_WIDTH {
+-            MAX_WIDTH
+-        } else {
+-            window_width
+-        };
+-        let left_element = {
+-            let military_time = self
+-                .selected_username
+-                .data_idx
+-                .and_then(|i| self.flags.user_datas.get(i))
+-                .map(|user_data| user_data.time_applet_config.military_time)
+-                .unwrap_or_default();
+-            let date_time_column = self.common.time.date_time_widget(military_time);
+-
+-            let mut status_row = widget::row::with_capacity(2)
+-                .padding(16.0)
+-                .spacing(12.0)
+-                .align_y(Alignment::Center);
+-
+-            if let Some(network_icon) = self.common.network_icon_opt.as_ref() {
+-                status_row = status_row.push(network_icon.clone());
+-            }
+-
+-            if let Some((power_icon, power_percent)) = &self.common.power_info_opt {
+-                status_row = status_row.push(
+-                    iced::widget::row![
+-                        power_icon.clone(),
+-                        widget::text(format!("{:.0}%", power_percent)),
+-                    ]
+-                    .align_y(Alignment::Center),
+-                );
+-            }
+-
+-            //TODO: move code for custom dropdowns to libcosmic
+-            fn menu_checklist<'a>(
+-                label: impl Into<std::borrow::Cow<'a, str>> + 'a,
+-                value: bool,
+-                message: Message,
+-            ) -> Element<'a, Message> {
+-                Element::from(
+-                    widget::menu::menu_button(vec![
+-                        if value {
+-                            widget::icon::from_name("object-select-symbolic")
+-                                .size(16)
+-                                .icon()
+-                                .width(Length::Fixed(16.0))
+-                                .into()
+-                        } else {
+-                            widget::space::horizontal()
+-                                .width(Length::Fixed(17.0))
+-                                .into()
+-                        },
+-                        widget::space::horizontal().width(Length::Fixed(8.0)).into(),
+-                        widget::text(label)
+-                            .align_x(iced::alignment::Horizontal::Left)
+-                            .into(),
+-                    ])
+-                    .on_press(message),
+-                )
+-            }
+-            let dropdown_menu = |items: Vec<_>| {
+-                let item_cnt = items.len();
+-
+-                let items = widget::menu::menu_column::MenuColumn::with_children(items);
+-                let items = if item_cnt > 7 {
+-                    Element::from(
+-                        widget::scrollable(items)
+-                            .height(Length::Fixed(DEFAULT_MENU_ITEM_HEIGHT * 7.)),
+-                    )
+-                } else {
+-                    Element::from(items)
+-                };
+-
+-                let menu = widget::container(items)
+-                    .padding(1)
+-                    //TODO: move style to libcosmic
+-                    .class(theme::Container::custom(|theme| {
+-                        let cosmic = theme.cosmic();
+-                        let component = &cosmic.background(theme.transparent).component;
+-                        widget::container::Style {
+-                            icon_color: Some(component.on.into()),
+-                            text_color: Some(component.on.into()),
+-                            background: Some(Background::Color(component.base.into())),
+-                            border: Border {
+-                                radius: 8.0.into(),
+-                                width: 1.0,
+-                                color: component.divider.into(),
+-                            },
+-                            ..Default::default()
+-                        }
+-                    }))
+-                    .width(Length::Fixed(240.0));
+-
+-                if let Some(t) = self.common.rectangle_tracker.as_ref() {
+-                    Element::from(t.container((id, true), menu))
+-                } else {
+-                    menu.into()
+-                }
+-            };
+-
+-            let mut input_button = widget::popover(
+-                widget::container(
+-                    widget::button::custom(
+-                        widget::text(
+-                            self.common
+-                                .active_layouts
+-                                .get(self.common.current_keyboard_layout)
+-                                .map(|x| x.name())
+-                                .unwrap_or_default(),
+-                        )
+-                        .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
+-                        .height(16)
+-                        .center(),
+-                    )
+-                    .padding(12.0)
+-                    .on_press(Message::DropdownToggle(Dropdown::Keyboard)),
+-                )
+-                .max_width(80),
+-            )
+-            .position(widget::popover::Position::Bottom);
+-            if matches!(self.dropdown_opt, Some(Dropdown::Keyboard)) {
+-                let mut items = Vec::with_capacity(self.common.active_layouts.len());
+-                for (i, layout) in self.common.active_layouts.iter().enumerate() {
+-                    items.push(menu_checklist(
+-                        &layout.description,
+-                        i == self.common.current_keyboard_layout,
+-                        Message::KeyboardLayout(i),
+-                    ));
+-                }
+-                input_button = input_button.popup(dropdown_menu(items));
+-            }
++            .unwrap_or(1920.0);
++        let military_time = self
++            .selected_username
++            .data_idx
++            .and_then(|i| self.flags.user_datas.get(i))
++            .map(|user_data| user_data.time_applet_config.military_time)
++            .unwrap_or_default();
+ 
+-            let mut user_button = widget::popover(
+-                widget::button::custom(widget::icon::from_name("system-users-symbolic"))
+-                    .padding(12.0)
+-                    .on_press(Message::DropdownToggle(Dropdown::User)),
+-            )
+-            .position(widget::popover::Position::Bottom);
+-            if matches!(self.dropdown_opt, Some(Dropdown::User)) {
+-                let mut items = Vec::with_capacity(self.usernames.len());
+-                for (name, full_name) in self.usernames.iter() {
+-                    items.push(menu_checklist(
+-                        full_name,
+-                        name == &self.selected_username.username,
+-                        Message::Username(name.clone()),
+-                    ));
+-                }
+-                let item_cnt = items.len();
+-                let menu_button = widget::menu::menu_button(vec![
+-                    Element::from(widget::space::horizontal().width(Length::Fixed(10.0))),
+-                    widget::text(fl!("enter-user"))
++        //TODO: move code for custom dropdowns to libcosmic
++        fn menu_checklist<'a>(
++            label: impl Into<std::borrow::Cow<'a, str>> + 'a,
++            value: bool,
++            message: Message,
++        ) -> Element<'a, Message> {
++            Element::from(
++                widget::menu::menu_button(vec![
++                    if value {
++                        widget::icon::from_name("object-select-symbolic")
++                            .size(16)
++                            .icon()
++                            .width(Length::Fixed(16.0))
++                            .into()
++                    } else {
++                        widget::space::horizontal()
++                            .width(Length::Fixed(17.0))
++                            .into()
++                    },
++                    widget::space::horizontal().width(Length::Fixed(8.0)).into(),
++                    widget::text(label)
+                         .align_x(iced::alignment::Horizontal::Left)
+                         .into(),
+                 ])
+-                .on_press(Message::EnterUser(true, String::new()))
+-                .into();
+-                let items = if item_cnt >= 6 {
+-                    dropdown_menu(vec![
+-                        widget::scrollable(widget::column::with_children(items))
+-                            .height(Length::Fixed(DEFAULT_MENU_ITEM_HEIGHT * 6.))
+-                            .into(),
+-                        widget::divider::horizontal::light().into(),
+-                        menu_button,
+-                    ])
+-                } else {
+-                    items.push(menu_button);
+-                    dropdown_menu(items)
+-                };
++                .on_press(message),
++            )
++        }
++        let dropdown_menu = |items: Vec<_>| {
++            let item_cnt = items.len();
+ 
+-                user_button = user_button.popup(items);
++            let items = widget::menu::menu_column::MenuColumn::with_children(items);
++            let items = if item_cnt > 7 {
++                Element::from(
++                    widget::scrollable(items).height(Length::Fixed(DEFAULT_MENU_ITEM_HEIGHT * 7.)),
++                )
++            } else {
++                Element::from(items)
++            };
++
++            let menu = widget::container(items)
++                .padding(1)
++                //TODO: move style to libcosmic
++                .class(theme::Container::custom(|theme| {
++                    let cosmic = theme.cosmic();
++                    let component = &cosmic.background(theme.transparent).component;
++                    widget::container::Style {
++                        icon_color: Some(component.on.into()),
++                        text_color: Some(component.on.into()),
++                        background: Some(Background::Color(component.base.into())),
++                        border: Border {
++                            radius: 8.0.into(),
++                            width: 1.0,
++                            color: component.divider.into(),
++                        },
++                        ..Default::default()
++                    }
++                }))
++                .width(Length::Fixed(240.0));
++
++            if let Some(t) = self.common.rectangle_tracker.as_ref() {
++                Element::from(t.container((id, true), menu))
++            } else {
++                menu.into()
+             }
++        };
+ 
+-            let mut session_button = widget::popover(
+-                widget::button::custom(widget::icon::from_name("application-menu-symbolic"))
+-                    .padding(12.0)
+-                    .on_press(Message::DropdownToggle(Dropdown::Session)),
+-            )
+-            .position(widget::popover::Position::Bottom);
+-            if matches!(self.dropdown_opt, Some(Dropdown::Session)) {
+-                let mut items = Vec::with_capacity(self.session_names.len());
+-                for session_name in self.session_names.iter() {
+-                    items.push(menu_checklist(
+-                        session_name,
+-                        session_name == &self.selected_session,
+-                        Message::Session(session_name.clone()),
+-                    ));
+-                }
+-                session_button = session_button.popup(dropdown_menu(items));
++        // Glass: the theme's background colour, translucent, over the soft
++        // wallpaper, with a hairline edge. A pill or a circle.
++        fn glass(theme: &cosmic::Theme, alpha: f32, focused: bool) -> widget::button::Style {
++            let cosmic = theme.cosmic();
++            let mut background: iced::Color = cosmic.background(theme.transparent).base.into();
++            background.a = alpha;
++            let mut border: iced::Color = cosmic.background(theme.transparent).on.into();
++            border.a = 0.14;
++            let on: iced::Color = cosmic.background(theme.transparent).on.into();
++            widget::button::Style {
++                background: Some(Background::Color(background)),
++                border_radius: 999.0.into(),
++                border_width: 1.0,
++                border_color: border,
++                outline_width: if focused { 2.0 } else { 0.0 },
++                outline_color: cosmic.accent_color().into(),
++                icon_color: Some(on),
++                text_color: Some(on),
++                ..Default::default()
++            }
++        }
++        fn glass_class() -> theme::Button {
++            theme::Button::Custom {
++                active: Box::new(|focused, theme| glass(theme, 0.38, focused)),
++                disabled: Box::new(|theme| glass(theme, 0.2, false)),
++                hovered: Box::new(|focused, theme| glass(theme, 0.55, focused)),
++                pressed: Box::new(|focused, theme| glass(theme, 0.7, focused)),
+             }
++        }
++        // A round glass button with its label under it.
++        fn glass_action<'a>(
++            button: impl Into<Element<'a, Message>>,
++            label: String,
++        ) -> Element<'a, Message> {
++            widget::column::with_capacity(2)
++                .spacing(6.0)
++                .align_x(Alignment::Center)
++                .push(button)
++                .push(widget::text::caption(label))
++                .width(Length::Fixed(96.0))
++                .into()
++        }
++        let glass_button = |icon: &'static str| {
++            widget::button::custom(widget::icon::from_name(icon).size(20))
++                .padding(14.0)
++                .class(glass_class())
++        };
++        // The small buttons of the top-right strip: flat until hovered.
++        let strip_button = |content: Element<'static, Message>| {
++            widget::button::custom(content)
++                .padding([6.0, 10.0])
++                .class(theme::Button::Text)
++        };
+ 
+-            // Accessibility menu as a popup dialog
+-            let mut accessibility_dropdown = widget::popover(
+-                widget::button::custom(widget::icon::from_name(
+-                    "applications-accessibility-symbolic",
+-                ))
+-                .padding(12.0)
+-                .on_press(Message::DropdownToggle(Dropdown::Accessibility)),
++        // Top left: the Isotope mark and wordmark. The mark has a version
++        // for light themes (ink shell, deep brand core), as on the day
++        // wallpaper, so it reads on the light soft wallpaper.
++        let mark_path = if cosmic::theme::is_dark() {
++            "/usr/share/isotope/greeter-mark.svg"
++        } else {
++            "/usr/share/isotope/greeter-mark-day.svg"
++        };
++        let brand = widget::row::with_capacity(2)
++            .spacing(10.0)
++            .align_y(Alignment::Center)
++            .push(
++                widget::svg(widget::svg::Handle::from_path(mark_path))
++                    .width(Length::Fixed(22.0))
++                    .height(Length::Fixed(22.0)),
+             )
+-            .position(widget::popover::Position::Bottom);
+-
+-            if matches!(self.dropdown_opt, Some(Dropdown::Accessibility)) {
+-                let mut items = Vec::new();
+-                items.push(menu_checklist(
+-                    fl!("accessibility", "screen-reader"),
+-                    self.accessibility.screen_reader.is_some(),
+-                    Message::ScreenReader(self.accessibility.screen_reader.is_none()),
+-                ));
+-                items.push(menu_checklist(
+-                    fl!("accessibility", "magnifier"),
+-                    self.accessibility.magnifier,
+-                    Message::Magnifier(!self.accessibility.magnifier),
+-                ));
+-                items.push(menu_checklist(
+-                    fl!("accessibility", "high-contrast"),
+-                    self.accessibility.high_contrast,
+-                    Message::HighContrast(!self.accessibility.high_contrast),
+-                ));
++            .push(
++                widget::text("ISOTOPE")
++                    .font(cosmic::font::semibold())
++                    .size(14.0),
++            );
++
++        // Top right: keyboard layout, on-screen keyboard, session, status.
++        let mut input_button = widget::popover(
++            widget::container(
++                strip_button(
++                    widget::text(
++                        self.common
++                            .active_layouts
++                            .get(self.common.current_keyboard_layout)
++                            .map(|x| x.name())
++                            .unwrap_or_default(),
++                    )
++                    .ellipsize(Ellipsize::End(EllipsizeHeightLimit::Lines(1)))
++                    .height(16)
++                    .center()
++                    .into(),
++                )
++                .on_press(Message::DropdownToggle(Dropdown::Keyboard)),
++            )
++            .max_width(80),
++        )
++        .position(widget::popover::Position::Bottom);
++        if matches!(self.dropdown_opt, Some(Dropdown::Keyboard)) {
++            let mut items = Vec::with_capacity(self.common.active_layouts.len());
++            for (i, layout) in self.common.active_layouts.iter().enumerate() {
+                 items.push(menu_checklist(
+-                    fl!("accessibility", "invert-colors"),
+-                    self.accessibility.invert_colors,
+-                    Message::InvertColors(!self.accessibility.invert_colors),
++                    &layout.description,
++                    i == self.common.current_keyboard_layout,
++                    Message::KeyboardLayout(i),
+                 ));
+-                accessibility_dropdown = accessibility_dropdown.popup(dropdown_menu(items));
+             }
++            input_button = input_button.popup(dropdown_menu(items));
++        }
+ 
+-            let accessibility_button = accessibility_dropdown;
+-
+-            let mut button_row = iced::widget::row![
+-                widget::tooltip(
+-                    accessibility_button,
+-                    text(fl!("accessibility")),
+-                    widget::tooltip::Position::Top
+-                ),
+-                widget::tooltip(
+-                    widget::button::custom(widget::icon::from_name("input-keyboard-symbolic"))
+-                        .padding(12.0)
+-                        .on_press(Message::Common(common::Message::OnScreenKeyboard)),
+-                    text(fl!("on-screen-keyboard")),
+-                    widget::tooltip::Position::Top,
+-                ),
+-                widget::tooltip(
+-                    input_button,
+-                    text(fl!("keyboard-layout")),
+-                    widget::tooltip::Position::Top
+-                ),
+-                widget::tooltip(
+-                    user_button,
+-                    text(fl!("user")),
+-                    widget::tooltip::Position::Top
+-                ),
+-                widget::tooltip(
+-                    session_button,
+-                    text(fl!("session")),
+-                    widget::tooltip::Position::Top
+-                ),
+-            ];
+-            if self.flags.logind_available {
+-                button_row = button_row
+-                    .push(widget::tooltip(
+-                        widget::button::custom(widget::icon::from_name("system-suspend-symbolic"))
+-                            .padding(12.0)
+-                            .on_press(Message::Suspend),
+-                        text(fl!("suspend")),
+-                        widget::tooltip::Position::Top,
+-                    ))
+-                    .push(widget::tooltip(
+-                        widget::button::custom(widget::icon::from_name("system-reboot-symbolic"))
+-                            .padding(12.0)
+-                            .on_press(Message::Restart),
+-                        text(fl!("restart")),
+-                        widget::tooltip::Position::Top,
+-                    ))
+-                    .push(widget::tooltip(
+-                        widget::button::custom(widget::icon::from_name("system-shutdown-symbolic"))
+-                            .padding(12.0)
+-                            .on_press(Message::Shutdown),
+-                        text(fl!("shutdown")),
+-                        widget::tooltip::Position::Top,
+-                    ));
++        let mut session_button = widget::popover(
++            strip_button(widget::icon::from_name("application-menu-symbolic").into())
++                .on_press(Message::DropdownToggle(Dropdown::Session)),
++        )
++        .position(widget::popover::Position::Bottom);
++        if matches!(self.dropdown_opt, Some(Dropdown::Session)) {
++            let mut items = Vec::with_capacity(self.session_names.len());
++            for session_name in self.session_names.iter() {
++                items.push(menu_checklist(
++                    session_name,
++                    session_name == &self.selected_session,
++                    Message::Session(session_name.clone()),
++                ));
+             }
+-            let button_row = button_row.padding([16.0, 0.0, 0.0, 0.0]).spacing(8.0);
+-
+-            widget::container(iced::widget::column![
+-                date_time_column,
+-                widget::divider::horizontal::default().width(Length::Fixed(menu_width / 2. - 16.)),
+-                status_row,
+-                widget::divider::horizontal::default().width(Length::Fixed(menu_width / 2. - 16.)),
+-                button_row,
+-            ])
+-            .align_x(Alignment::Start)
+-        };
++            session_button = session_button.popup(dropdown_menu(items));
++        }
+ 
+-        let right_element = {
+-            let mut column = widget::column::with_capacity(5)
+-                .spacing(12.0)
+-                .max_width(280.0);
+-
+-            let military_time = self
+-                .selected_username
+-                .data_idx
+-                .and_then(|i| self.flags.user_datas.get(i))
+-                .map(|user_data| user_data.time_applet_config.military_time)
+-                .unwrap_or_default();
+-            let space_height = match military_time {
+-                true => 63.0,
+-                false => 10.0,
+-            };
++        let mut status_row = widget::row::with_capacity(6)
++            .spacing(4.0)
++            .align_y(Alignment::Center)
++            .push(widget::tooltip(
++                input_button,
++                text(fl!("keyboard-layout")),
++                widget::tooltip::Position::Bottom,
++            ))
++            .push(widget::tooltip(
++                strip_button(widget::icon::from_name("input-keyboard-symbolic").into())
++                    .on_press(Message::Common(common::Message::OnScreenKeyboard)),
++                text(fl!("on-screen-keyboard")),
++                widget::tooltip::Position::Bottom,
++            ))
++            .push(widget::tooltip(
++                session_button,
++                text(fl!("session")),
++                widget::tooltip::Position::Bottom,
++            ));
++        if let Some(network_icon) = self.common.network_icon_opt.as_ref() {
++            status_row =
++                status_row.push(widget::container(network_icon.clone()).padding([0.0, 6.0]));
++        }
++        if let Some((power_icon, power_percent)) = &self.common.power_info_opt {
++            status_row = status_row.push(
++                iced::widget::row![
++                    power_icon.clone(),
++                    widget::text(format!("{:.0}%", power_percent)),
++                ]
++                .spacing(4.0)
++                .align_y(Alignment::Center),
++            );
++        }
+ 
+-            // Add top spacing for better visual appearance
+-            // Bottom of the password text input field should align with bottom of time widget
+-            column = column.push(widget::space::vertical().height(Length::Fixed(space_height)));
+-
+-            match &self.socket_state {
+-                SocketState::Pending => {
+-                    column = column.push(widget::text("Opening GREETD_SOCK"));
+-                }
+-                SocketState::Open => {
+-                    for (user_data, user_icon) in self
+-                        .flags
+-                        .user_datas
+-                        .iter()
+-                        .zip(self.flags.user_icons.iter())
+-                    {
+-                        if !self.entering_name && user_data.name == self.selected_username.username
+-                        {
+-                            // Display user icon or empty transparent box
+-                            if let Some(icon_handle) = user_icon {
+-                                column = column.push(
+-                                    widget::container(
+-                                        widget::image(icon_handle)
+-                                            .width(Length::Fixed(78.0))
+-                                            .height(Length::Fixed(78.0))
+-                                            .content_fit(iced::ContentFit::Fill),
+-                                    )
+-                                    .padding(0.0)
+-                                    .width(Length::Fill)
+-                                    .height(Length::Fixed(78.0))
+-                                    .align_x(Alignment::Center),
+-                                );
+-                            } else {
+-                                // Empty transparent box for users without icons
+-                                column = column.push(
+-                                    widget::container(
+-                                        widget::space::horizontal().width(Length::Fixed(78.0)),
+-                                    )
+-                                    .padding(0.0)
+-                                    .width(Length::Fill)
+-                                    .height(Length::Fixed(78.0))
+-                                    .align_x(Alignment::Center),
+-                                );
+-                            }
+-                            column = column.push(
+-                                widget::container(widget::text::title4(&user_data.full_name))
+-                                    .width(Length::Fill)
+-                                    .align_x(Alignment::Center),
+-                            );
+-                        }
+-                    }
+-                    if self.entering_name {
+-                        column = column.push(
+-                            widget::text_input(
+-                                fl!("type-username"),
+-                                self.selected_username.username.as_str(),
++        let top_bar = widget::row::with_capacity(3)
++            .padding([12.0, 24.0])
++            .align_y(Alignment::Center)
++            .push(brand)
++            .push(widget::space::horizontal().width(Length::Fill))
++            .push(status_row);
++
++        // Top centre: the date and a large clock. The clock scales with the
++        // screen, as in the mock (about 9% of the width).
++        let clock_size =
++            (window_width * 0.085).clamp(72.0, 176.0) * if military_time { 1.0 } else { 0.8 };
++        let date_time = widget::column::with_capacity(2)
++            .spacing(0.0)
++            .align_x(Alignment::Center)
++            .width(Length::Fill)
++            .push(
++                widget::text::title3(self.common.time.format_date()).font(cosmic::font::semibold()),
++            )
++            .push(
++                widget::text(self.common.time.format_time(military_time))
++                    .size(clock_size)
++                    .font(cosmic::font::semibold()),
++            );
++
++        // The centre: the user, the password field and the lines under it.
++        let mut column = widget::column::with_capacity(8)
++            .spacing(12.0)
++            .align_x(Alignment::Center)
++            .width(Length::Fixed(320.0));
++
++        match &self.socket_state {
++            SocketState::Pending => {
++                column = column.push(widget::text("Opening GREETD_SOCK"));
++            }
++            SocketState::Open => {
++                for (user_data, user_icon) in self
++                    .flags
++                    .user_datas
++                    .iter()
++                    .zip(self.flags.user_icons.iter())
++                {
++                    if !self.entering_name && user_data.name == self.selected_username.username {
++                        // The user's picture in a circle, or their initial.
++                        let avatar: Element<'_, Message> = if let Some(icon_handle) = user_icon {
++                            widget::image(icon_handle)
++                                .width(Length::Fixed(88.0))
++                                .height(Length::Fixed(88.0))
++                                .content_fit(iced::ContentFit::Cover)
++                                .border_radius(44.0)
++                                .into()
++                        } else {
++                            let initial = user_data
++                                .full_name
++                                .chars()
++                                .chain(user_data.name.chars())
++                                .find(|c| c.is_alphanumeric())
++                                .map(|c| c.to_uppercase().to_string())
++                                .unwrap_or_default();
++                            widget::container(
++                                widget::text(initial)
++                                    .size(36.0)
++                                    .font(cosmic::font::semibold()),
+                             )
+-                            .id(USERNAME_ID.clone())
+-                            .on_input(|input| Message::EnterUser(false, input))
+-                            .on_submit(Message::Username),
+-                        )
++                            .center(Length::Fixed(88.0))
++                            .class(theme::Container::custom(|theme| {
++                                let cosmic = theme.cosmic();
++                                let mut border: iced::Color =
++                                    cosmic.background(theme.transparent).on.into();
++                                border.a = 0.14;
++                                widget::container::Style {
++                                    icon_color: Some(
++                                        cosmic.background(theme.transparent).component.on.into(),
++                                    ),
++                                    text_color: Some(
++                                        cosmic.background(theme.transparent).component.on.into(),
++                                    ),
++                                    background: Some(Background::Color(
++                                        cosmic.background(theme.transparent).component.base.into(),
++                                    )),
++                                    border: Border {
++                                        radius: 44.0.into(),
++                                        width: 1.0,
++                                        color: border,
++                                    },
++                                    ..Default::default()
++                                }
++                            }))
++                            .into()
++                        };
++                        column = column.push(avatar);
++                        column = column.push(
++                            widget::text::title4(&user_data.full_name)
++                                .font(cosmic::font::semibold()),
++                        );
+                     }
+-                    if let Some((prompt, secret, value_opt)) = &self.common.prompt_opt {
+-                        match value_opt {
+-                            Some(value) => {
+-                                // Only show password input when not authenticating
+-                                if !self.authenticating {
+-                                    let text_input_id = self
+-                                        .common
+-                                        .surface_names
+-                                        .get(&id)
+-                                        .and_then(|id| self.common.text_input_ids.get(id))
+-                                        .cloned()
+-                                        .unwrap_or_else(|| cosmic::widget::Id::new("text_input"));
+-                                    let mut text_input = widget::secure_input(
+-                                        prompt.clone(),
+-                                        value.as_str(),
+-                                        Some(
+-                                            common::Message::Prompt(
+-                                                prompt.clone(),
+-                                                !*secret,
+-                                                Some(value.clone()),
+-                                            )
+-                                            .into(),
+-                                        ),
+-                                        *secret,
+-                                    )
+-                                    .id(text_input_id)
+-                                    .on_input(|input| {
++                }
++                if self.entering_name {
++                    column = column.push(
++                        widget::text_input(
++                            fl!("type-username"),
++                            self.selected_username.username.as_str(),
++                        )
++                        .id(USERNAME_ID.clone())
++                        .style(pill_input())
++                        .on_input(|input| Message::EnterUser(false, input))
++                        .on_submit(Message::Username),
++                    )
++                }
++                if let Some((prompt, secret, value_opt)) = &self.common.prompt_opt {
++                    match value_opt {
++                        Some(value) => {
++                            // Only show password input when not authenticating
++                            if !self.authenticating {
++                                let text_input_id = self
++                                    .common
++                                    .surface_names
++                                    .get(&id)
++                                    .and_then(|id| self.common.text_input_ids.get(id))
++                                    .cloned()
++                                    .unwrap_or_else(|| cosmic::widget::Id::new("text_input"));
++                                let mut text_input = widget::secure_input(
++                                    prompt.clone(),
++                                    value.as_str(),
++                                    Some(
+                                         common::Message::Prompt(
+                                             prompt.clone(),
+-                                            *secret,
+-                                            Some(input),
++                                            !*secret,
++                                            Some(value.clone()),
+                                         )
++                                        .into(),
++                                    ),
++                                    *secret,
++                                )
++                                .id(text_input_id)
++                                .style(pill_input())
++                                .on_input(|input| {
++                                    common::Message::Prompt(prompt.clone(), *secret, Some(input))
+                                         .into()
+-                                    })
+-                                    .on_submit(|v| Message::Auth(Some(v)));
++                                })
++                                .on_submit(|v| Message::Auth(Some(v)));
+ 
+-                                    if let Some(text_input_id) = self
+-                                        .common
+-                                        .surface_names
+-                                        .get(&id)
+-                                        .and_then(|id| self.common.text_input_ids.get(id))
+-                                    {
+-                                        text_input = text_input.id(text_input_id.clone());
+-                                    }
++                                if let Some(text_input_id) = self
++                                    .common
++                                    .surface_names
++                                    .get(&id)
++                                    .and_then(|id| self.common.text_input_ids.get(id))
++                                {
++                                    text_input = text_input.id(text_input_id.clone());
++                                }
+ 
+-                                    if *secret {
+-                                        text_input = text_input.password()
+-                                    }
++                                if *secret {
++                                    text_input = text_input.password()
++                                }
+ 
+-                                    column = column.push(text_input);
++                                // The field is the blurred region of the
++                                // surface (Common::blur_rects).
++                                let field = widget::container(text_input).width(Length::Fill);
++                                column = column.push(
++                                    if let Some(t) = self.common.rectangle_tracker.as_ref() {
++                                        Element::from(t.container((id, false), field))
++                                    } else {
++                                        field.into()
++                                    },
++                                );
+ 
+-                                    if self.common.caps_lock {
+-                                        column = column.push(widget::text(fl!("caps-lock")));
+-                                    } else if self.common.error_opt.is_none() {
+-                                        column = column.push(widget::text(""));
+-                                    }
++                                if self.common.caps_lock {
++                                    column = column.push(widget::text(fl!("caps-lock")));
++                                } else if self.common.error_opt.is_none() {
++                                    column = column.push(widget::text(""));
+                                 }
+                             }
+-                            None => {
+-                                // `value_opt == None` is used for non-interactive auth messages
+-                                // (e.g. PAM_TEXT_INFO via greetd). This is where fingerprint
+-                                // prompts typically come through, so show the message to the user.
+-                                column = column.push(widget::text(prompt));
+-                            }
++                        }
++                        None => {
++                            // `value_opt == None` is used for non-interactive auth messages
++                            // (e.g. PAM_TEXT_INFO via greetd). This is where fingerprint
++                            // prompts typically come through, so show the message to the user.
++                            column = column.push(widget::text(prompt).center());
+                         }
+                     }
+                 }
+-                SocketState::NotSet => {
+-                    column = column.push(widget::text("GREETD_SOCK variable not set"));
+-                }
+-                SocketState::Error(err) => {
+-                    column = column.push(widget::text(format!(
+-                        "Failed to open GREETD_SOCK: {:?}",
+-                        err
+-                    )))
+-                }
+             }
+-
+-            // Show either authenticating message or error message in the same location
+-            if self.authenticating {
+-                column = column.push(
+-                    widget::container(
+-                        widget::row::with_capacity(2)
+-                            .spacing(8.0)
+-                            .align_y(Alignment::Center)
+-                            .push(widget::indeterminate_circular().size(16.0).bar_height(2.0))
+-                            .push(widget::text(fl!("authenticating"))),
+-                    )
+-                    .width(Length::Fill)
+-                    .align_x(Alignment::Center),
+-                );
+-            } else if let Some(error) = &self.common.error_opt {
+-                column = column.push(
+-                    widget::text(error)
+-                        .class(theme::Text::Color(iced::Color::from_rgb(1.0, 0.0, 0.0))),
+-                );
+-                if !self.common.caps_lock {
+-                    column = column.push(widget::text(""));
+-                }
+-            } else {
+-                column = column.push(widget::text(""));
++            SocketState::NotSet => {
++                column = column.push(widget::text("GREETD_SOCK variable not set"));
+             }
++            SocketState::Error(err) => {
++                column = column.push(widget::text(format!(
++                    "Failed to open GREETD_SOCK: {:?}",
++                    err
++                )))
++            }
++        }
+ 
+-            id_container(
+-                widget::container(column)
+-                    .align_x(Alignment::Center)
+-                    .width(Length::Fill),
+-                if self.entering_name {
+-                    iced::id::Id::new("entering_name")
+-                } else {
+-                    iced::id::Id::new("main_menu")
++        // Show either authenticating message or error message in the same location
++        if self.authenticating {
++            column = column.push(
++                widget::row::with_capacity(2)
++                    .spacing(8.0)
++                    .align_y(Alignment::Center)
++                    .push(widget::indeterminate_circular().size(16.0).bar_height(2.0))
++                    .push(widget::text(fl!("authenticating"))),
++            );
++        } else if let Some(error) = &self.common.error_opt {
++            column = column.push(widget::text(error).center().class(theme::Text::Custom(
++                |theme| iced::widget::text::Style {
++                    color: Some(theme.cosmic().destructive_text_color().into()),
++                    ..Default::default()
+                 },
+-            )
+-        };
++            )));
++            if !self.common.caps_lock {
++                column = column.push(widget::text(""));
++            }
++        } else {
++            column = column.push(widget::text(""));
++        }
+ 
+-        let menu = widget::layer_container(
+-            iced::widget::row![left_element, right_element].align_y(Alignment::Start),
++        // "Other users ›": the user list, and typing a name.
++        let mut user_button = widget::popover(
++            widget::button::custom(widget::text(fl!("other-users")))
++                .padding([4.0, 8.0])
++                .class(theme::Button::Link)
++                .on_press(Message::DropdownToggle(Dropdown::User)),
+         )
+-        .layer(cosmic::cosmic_theme::Layer::Background)
+-        .padding(16)
+-        .class(cosmic::theme::Container::Custom(Box::new(
+-            |theme: &cosmic::Theme| {
+-                // Use background appearance as the base
+-                let mut appearance =
+-                    widget::container::Catalog::style(theme, &cosmic::theme::Container::Background);
+-                appearance.background = Some(iced::Background::Color(
+-                    // TODO if we can use popups instead of subsurfaces for the greeter and the lockscreen
+-                    // then we can allow transparency
+-                    theme.cosmic().background(theme.transparent).base.into(),
++        .position(widget::popover::Position::Top);
++        if matches!(self.dropdown_opt, Some(Dropdown::User)) {
++            let mut items = Vec::with_capacity(self.usernames.len());
++            for (name, full_name) in self.usernames.iter() {
++                items.push(menu_checklist(
++                    full_name,
++                    name == &self.selected_username.username,
++                    Message::Username(name.clone()),
+                 ));
+-                appearance.border = iced::Border::default().rounded(16);
+-                appearance
++            }
++            let item_cnt = items.len();
++            let menu_button = widget::menu::menu_button(vec![
++                Element::from(widget::space::horizontal().width(Length::Fixed(10.0))),
++                widget::text(fl!("enter-user"))
++                    .align_x(iced::alignment::Horizontal::Left)
++                    .into(),
++            ])
++            .on_press(Message::EnterUser(true, String::new()))
++            .into();
++            let items = if item_cnt >= 6 {
++                dropdown_menu(vec![
++                    widget::scrollable(widget::column::with_children(items))
++                        .height(Length::Fixed(DEFAULT_MENU_ITEM_HEIGHT * 6.))
++                        .into(),
++                    widget::divider::horizontal::light().into(),
++                    menu_button,
++                ])
++            } else {
++                items.push(menu_button);
++                dropdown_menu(items)
++            };
++
++            user_button = user_button.popup(items);
++        }
++        column = column.push(user_button);
++
++        let who = id_container(
++            column,
++            if self.entering_name {
++                iced::id::Id::new("entering_name")
++            } else {
++                iced::id::Id::new("main_menu")
+             },
+-        )))
+-        .width(Length::Fixed(MAX_WIDTH));
+-        let menu = if let Some(t) = self.common.rectangle_tracker.as_ref() {
+-            Element::from(t.container((id, false), menu))
+-        } else {
+-            menu.into()
+-        };
+-        let menu = widget::container(widget::column::with_children(vec![
+-            widget::space::vertical()
+-                .height(Length::FillPortion(1))
+-                .into(),
+-            menu,
+-            widget::space::vertical()
+-                .height(Length::FillPortion(4))
+-                .into(),
+-        ]))
++        );
++
++        // The bottom: accessibility and the power actions.
++        let mut accessibility_dropdown = widget::popover(
++            glass_button("applications-accessibility-symbolic")
++                .on_press(Message::DropdownToggle(Dropdown::Accessibility)),
++        )
++        .position(widget::popover::Position::Top);
++        if matches!(self.dropdown_opt, Some(Dropdown::Accessibility)) {
++            let mut items = Vec::new();
++            items.push(menu_checklist(
++                fl!("accessibility", "screen-reader"),
++                self.accessibility.screen_reader.is_some(),
++                Message::ScreenReader(self.accessibility.screen_reader.is_none()),
++            ));
++            items.push(menu_checklist(
++                fl!("accessibility", "magnifier"),
++                self.accessibility.magnifier,
++                Message::Magnifier(!self.accessibility.magnifier),
++            ));
++            items.push(menu_checklist(
++                fl!("accessibility", "high-contrast"),
++                self.accessibility.high_contrast,
++                Message::HighContrast(!self.accessibility.high_contrast),
++            ));
++            items.push(menu_checklist(
++                fl!("accessibility", "invert-colors"),
++                self.accessibility.invert_colors,
++                Message::InvertColors(!self.accessibility.invert_colors),
++            ));
++            accessibility_dropdown = accessibility_dropdown.popup(dropdown_menu(items));
++        }
++
++        let mut actions = widget::row::with_capacity(4)
++            .spacing(24.0)
++            .push(glass_action(accessibility_dropdown, fl!("accessibility")));
++        if self.flags.logind_available {
++            actions = actions
++                .push(glass_action(
++                    glass_button("system-suspend-symbolic").on_press(Message::Suspend),
++                    fl!("suspend"),
++                ))
++                .push(glass_action(
++                    glass_button("system-reboot-symbolic").on_press(Message::Restart),
++                    fl!("restart"),
++                ))
++                .push(glass_action(
++                    glass_button("system-shutdown-symbolic").on_press(Message::Shutdown),
++                    fl!("shutdown"),
++                ));
++        }
++
++        let menu = widget::container(
++            widget::column::with_capacity(8)
++                .push(top_bar)
++                .push(widget::space::vertical().height(Length::FillPortion(2)))
++                .push(date_time)
++                .push(widget::space::vertical().height(Length::FillPortion(5)))
++                .push(
++                    widget::container(who)
++                        .width(Length::Fill)
++                        .align_x(Alignment::Center),
++                )
++                .push(widget::space::vertical().height(Length::FillPortion(2)))
++                .push(
++                    widget::container(actions)
++                        .width(Length::Fill)
++                        .align_x(Alignment::Center),
++                )
++                .push(widget::space::vertical().height(Length::Fixed(32.0))),
++        )
+         .width(Length::Fill)
+         .height(Length::Fill)
+-        .align_x(Alignment::Center);
++        // The text and icons over the wallpaper take the theme's colour on
++        // its background, as the desktop does.
++        .class(theme::Container::custom(|theme| {
++            let on: iced::Color = theme.cosmic().background(theme.transparent).on.into();
++            widget::container::Style {
++                icon_color: Some(on),
++                text_color: Some(on),
++                ..Default::default()
++            }
++        }));
+ 
+         // TODO make these opaque?
+         let popover = widget::popover(menu).modal(true);
+@@ -1077,6 +1146,50 @@
+         }
+     }
+ 
++    /// Isotope: the picture for an output the user has no wallpaper for (a
++    /// user who has never logged in has no cosmic-bg state) and for every
++    /// output before a user is chosen: the system default wallpaper
++    /// (src/greeter/background.rs), soft, for the theme's mode. The built-in
++    /// picture stays, under the scrim, when there is none or it cannot be read.
++    fn load_fallback_background(&mut self, is_dark: bool) {
++        if self.fallback_is_dark == Some(is_dark) {
++            return;
++        }
++        self.fallback_is_dark = Some(is_dark);
++        let config = std::fs::read_to_string(background::SYSTEM_BACKGROUND_CONFIG)
++            .inspect_err(|err| {
++                tracing::warn!(
++                    "failed to read {}: {}",
++                    background::SYSTEM_BACKGROUND_CONFIG,
++                    err
++                )
++            })
++            .ok();
++        let Some((shown, scrim)) = background::fallback_background(config.as_deref(), is_dark)
++        else {
++            return;
++        };
++        // The sharp picture, under the scrim, when the soft copy is missing.
++        let source = background::config_source(config.as_deref().unwrap_or_default())
++            .and_then(|p| background::default_wallpaper(Some(&p), is_dark));
++        let loaded = std::fs::read(&shown)
++            .map(|bytes| (bytes, scrim))
++            .or_else(|err| {
++                tracing::warn!("failed to read {:?}: {}", shown, err);
++                match source {
++                    Some(source) if source != shown => std::fs::read(&source).map(|b| (b, true)),
++                    _ => Err(err),
++                }
++            });
++        match loaded {
++            Ok((bytes, scrim)) => {
++                self.common.fallback_background = widget::image::Handle::from_bytes(bytes);
++                self.common.fallback_scrim = scrim;
++            }
++            Err(err) => tracing::warn!("no fallback background: {}", err),
++        }
++    }
++
+     fn update_user_data(&mut self) -> Task<Message> {
+         let user_data = match self
+             .selected_username
+@@ -1094,6 +1207,10 @@
+         if let Some(builder) = &user_data.theme_builder_opt {
+             self.theme_builder = builder.clone();
+         }
++        let is_dark = user_data
++            .theme_builder_opt
++            .as_ref()
++            .is_none_or(|builder| builder.palette.is_dark());
+ 
+         let mut tasks = Vec::new();
+         self.accessibility.magnifier = user_data.accessibility_zoom.start_on_login;
+@@ -1111,6 +1228,9 @@
+             ))));
+         }
+ 
++        // Isotope: the picture for outputs this user has no wallpaper for.
++        self.load_fallback_background(is_dark);
++
+         Task::batch(tasks)
+     }
+ }
+@@ -1145,6 +1265,8 @@
+         common.on_output_event = Some(Box::new(|output_event, output| {
+             Message::OutputEvent(output_event, output)
+         }));
++        // Isotope: the soft wallpaper, or a scrim (src/greeter/background.rs).
++        common.background_rule = Some(background::greeter_background);
+         tasks.push(common_task);
+ 
+         //TODO: use full_name?
+@@ -1194,7 +1316,7 @@
+             ..Default::default()
+         };
+ 
+-        let app = App {
++        let mut app = App {
+             common,
+             flags,
+             greetd_sender: None,
+@@ -1209,10 +1331,17 @@
+             entering_name: false,
+             accessibility,
+             theme_builder: Default::default(),
++            fallback_is_dark: None,
+             randr_list: None,
+             surface_id_pairs: Vec::new(),
+             authenticating: false,
+         };
++        // Isotope: the picture before a user is chosen, and with no users.
++        let is_dark = data_idx
++            .and_then(|i| app.flags.user_datas.get(i))
++            .and_then(|user_data| user_data.theme_builder_opt.as_ref())
++            .is_none_or(|builder| builder.palette.is_dark());
++        app.load_fallback_background(is_dark);
+         (app, Task::batch(tasks))
+     }
+ 
+@@ -1291,21 +1420,14 @@
+                         let unwrapped_size = size
+                             .map(|s| (s.0.unwrap_or(1920), s.1.unwrap_or(1080)))
+                             .unwrap_or((1920, 1080));
+-                        let (loc, sub_size) = if unwrapped_size.0 as f32 > MAX_WIDTH {
+-                            (
+-                                Point::new((unwrapped_size.0 as f32 - MAX_WIDTH) / 2., 32.),
+-                                Size::new(MAX_WIDTH, unwrapped_size.1 as f32 - 32.),
+-                            )
+-                        } else {
+-                            (
+-                                Point::new(0., 32.),
+-                                Size::new(unwrapped_size.0 as f32, unwrapped_size.1 as f32 - 32.),
+-                            )
+-                        };
+-                        self.common.window_size.insert(
+-                            surface_id,
++                        // Isotope: the menu covers the whole output; its
++                        // layout centres the clock, the user and the actions.
++                        let (loc, sub_size) = (
++                            Point::new(0., 0.),
+                             Size::new(unwrapped_size.0 as f32, unwrapped_size.1 as f32),
+                         );
++                        self.common.window_size.insert(surface_id, sub_size);
++                        self.common.window_size.insert(subsurface_id, sub_size);
+                         self.common
+                             .subsurface_rects
+                             .insert(output.clone(), Rectangle::new(loc, sub_size));
+@@ -1372,7 +1494,13 @@
+                         match self.common.surface_ids.remove(&output) {
+                             Some(surface_id) => {
+                                 self.common.surface_images.remove(&surface_id);
++                                self.common.surface_scrims.remove(&surface_id);
+                                 self.common.window_size.remove(&surface_id);
++                                if let Some((_, subsurface_id)) =
++                                    self.surface_id_pairs.iter().find(|(p, _)| *p == surface_id)
++                                {
++                                    self.common.window_size.remove(subsurface_id);
++                                }
+                                 if let Some(n) = self.common.surface_names.remove(&surface_id) {
+                                     self.common.text_input_ids.remove(&n);
+                                 }
+@@ -1915,12 +2043,9 @@
+                     tracing::error!("Failed to find subsurface menu id");
+                     return Task::none();
+                 };
+-                let loc = if size.width > MAX_WIDTH {
+-                    Point::new((size.width - MAX_WIDTH) / 2., 32.)
+-                } else {
+-                    Point::new(0., 32.)
+-                };
+-                return reposition_subsurface(*subsurface_id, loc.x as i32, loc.y as i32);
++                // Isotope: the menu covers the output from its top left.
++                self.common.window_size.insert(*subsurface_id, size);
++                return reposition_subsurface(*subsurface_id, 0, 0);
+             }
+         }
+         Task::none()
+@@ -1938,11 +2063,37 @@
+             .surface_images
+             .get(&surface_id)
+             .unwrap_or(&self.common.fallback_background);
+-        widget::image(img)
++        let image = widget::image(img)
+             .content_fit(iced::ContentFit::Cover)
+             .width(Length::Fill)
+-            .height(Length::Fill)
+-            .into()
++            .height(Length::Fill);
++        // Isotope: a picture without a soft copy (not one of Isotope's
++        // wallpapers, or the built-in one) gets a scrim of the theme's background
++        // colour, so the clock and the password field read on it.
++        let scrim = if self.common.surface_images.contains_key(&surface_id) {
++            self.common.surface_scrims.contains(&surface_id)
++        } else {
++            self.common.fallback_scrim
++        };
++        if !scrim {
++            return image.into();
++        }
++        iced::widget::stack![
++            image,
++            widget::container(widget::space::horizontal())
++                .width(Length::Fill)
++                .height(Length::Fill)
++                .class(theme::Container::custom(|theme| {
++                    let mut color: iced::Color =
++                        theme.cosmic().background(theme.transparent).base.into();
++                    color.a = background::SCRIM_ALPHA;
++                    widget::container::Style {
++                        background: Some(Background::Color(color)),
++                        ..Default::default()
++                    }
++                })),
++        ]
++        .into()
+     }
+ 
+     fn subscription(&self) -> Subscription<Self::Message> {
+@@ -1961,6 +2112,50 @@
+     }
+ }
+ 
++/// Isotope: the password and user name fields as glass pills (COSMIC's
++/// search field look, fully rounded).
++fn pill_input() -> theme::TextInput {
++    use cosmic::widget::text_input::{Appearance, StyleSheet};
++    fn pill(appearance: Appearance) -> Appearance {
++        Appearance {
++            border_radius: 999.0.into(),
++            ..appearance
++        }
++    }
++    theme::TextInput::Custom {
++        active: Box::new(|t| {
++            pill(<cosmic::Theme as StyleSheet>::active(
++                t,
++                &theme::TextInput::Search,
++            ))
++        }),
++        error: Box::new(|t| {
++            pill(<cosmic::Theme as StyleSheet>::error(
++                t,
++                &theme::TextInput::Search,
++            ))
++        }),
++        hovered: Box::new(|t| {
++            pill(<cosmic::Theme as StyleSheet>::hovered(
++                t,
++                &theme::TextInput::Search,
++            ))
++        }),
++        focused: Box::new(|t| {
++            pill(<cosmic::Theme as StyleSheet>::focused(
++                t,
++                &theme::TextInput::Search,
++            ))
++        }),
++        disabled: Box::new(|t| {
++            pill(<cosmic::Theme as StyleSheet>::disabled(
++                t,
++                &theme::TextInput::Search,
++            ))
++        }),
++    }
++}
++
+ pub fn apply_hc_theme(
+     builder: cosmic_theme::ThemeBuilder,
+     enabled: bool,

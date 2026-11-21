@@ -1,0 +1,7 @@
+# Isotope on COSMIC: GTK's window buttons on the left, as the patched libcosmic
+# puts COSMIC's (patches/cosmic/libcosmic). Not on sway, i3 or niri.
+# Known limit: this is a default for host GTK apps only. Flatpak GTK apps read
+# button-layout and icon-theme through the Settings portal, and
+# xdg-desktop-portal-cosmic does not serve those keys, so they ignore this.
+[org.gnome.desktop.wm.preferences]
+button-layout='close,minimize,maximize:'

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Isotope wallpaper
+Comment=Switches the Isotope wallpaper with light and dark
+Exec=isotope wallpaper-follow
+NoDisplay=true
+OnlyShowIn=COSMIC;
+X-GNOME-Autostart-enabled=true

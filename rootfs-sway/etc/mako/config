@@ -1,6 +1,8 @@
 # mako notifications for the Sway variant: the Isotope palette.
 # Colours: generated from theme/palette.toml by tools/gen-theme.py.
 font=Inter Variable 10.5
+# Icons come from Conflux (the Isotope icon theme). mako globs <path>/*/<size>/<name>.*.
+icon-path=/usr/share/icons/Conflux:/usr/share/icons/hicolor
 background-color=#141411f2
 text-color=#f4f5f2
 border-color=#e9e7c1

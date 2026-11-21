@@ -1,0 +1,3 @@
+# The applets workspace build dir (cargo in the cosmic-build container):
+# never part of the image build context.
+applets/target

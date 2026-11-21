@@ -62,16 +62,16 @@ The baseline:
 | First-login welcome | Isotope Welcome (`isotope-welcome`: `welcome/`, Gio over `guikit/`), a graphical first-login flow: Welcome, Language, Network, Appearance, on COSMIC also Layout, Workflow and Launcher, Accessibility, Apps (a browser and essentials from Flathub, listed in `/usr/share/isotope/first-run-apps.list`, installed with `flatpak --user install`), Shortcuts, Ready. The session starts `isotope-welcome --login`: `exec` in the sway and i3 configs, `spawn-at-startup` on niri, `/etc/xdg/autostart/isotope-welcome.desktop` on COSMIC; a window rule floats it (app ID and X11 class `isotope-welcome`) on sway, i3 and niri. Once per user: the stamp `$XDG_STATE_HOME/isotope/welcome` is written on Finish, or as `skipped` when the window is closed (`apps-pending` when the apps are not done: Apps skipped offline or while it checks the network, or still installing), and the old stamps (`isotope/first-run-apps`, `isotope/welcomed` and their `hadron/` copies) also count as done; an Apps page skipped for want of a network (or setup left with the apps not done) sends one reminder at the next login. A bare `isotope-welcome` is the same stamp-gated login hook as `--login`, because configs copied before Isotope Welcome still start it; `isotope welcome` (the whole flow again, `isotope-welcome all`) or `isotope welcome PAGE` opens it without the gate; the Isotope menu's "Welcome" and "Install apps" (`isotope welcome apps`) entries use it. `isotope-first-run-apps`, the old picker's name, runs `isotope-welcome --login` with `--login` (old configs) and `isotope welcome apps` without. Built twice in the Dockerfile `welcome-build` stage: `-tags nox11,novulkan` for sway, COSMIC and niri (no libX11), `-tags novulkan` with X11 for i3; `welcome-${DESKTOP}` picks one. COSMIC does not install cosmic-initial-setup, only its panel layouts (`/usr/share/cosmic-layouts`), which the Layout page reads. See `docs/superpowers/specs/2026-11-20-isotope-welcome-design.md`. Go and screenshot tests in `welcome/` (CI); `test/welcome/check-welcome-image.sh` on the built images. Not on the server; not on agent: Dockerfile.agent removes it, its app list and its i3 lines |
 | Keyboard habits (tiling variants) | Super+Enter terminal, Super+D launcher (`isotope-apps` on i3, which lists .desktop and Flatpak apps; Super+Shift+D keeps `dmenu_run`), Super+Shift+Q close, Super+Shift+E power menu, Super+F1 shortcut sheet (`isotope-help`) |
 | Notification keys | Super+BackSpace closes the newest notification, Super+Shift+BackSpace closes all, Super+Ctrl+BackSpace shows the last closed (the history panel on niri), Super+Alt+BackSpace turns do not disturb on and off. `isotope-notify-key` sends them to mako, dunst or Noctalia. COSMIC binds only do not disturb, because its notification server has no command interface; its notifications close with a click |
-| Network, audio, power menus | `isotope-wifi-menu`, `isotope-audio-menu`, `isotope-power-menu`, or the shell's own panels |
+| Network, audio, power menus | `isotope-wifi-menu`, `isotope-audio-menu`, `isotope-power-menu`, or the shell's own panels. On COSMIC, Isotope's quick settings (`isotope-applet-quick`, panel ID `io.kairos.Isotope.QuickSettings`, in `applets/isotope-quick`): Wi-Fi, Bluetooth, keyboard layout, dark style, do not disturb, brightness, volume, Settings and power in one popup, which open COSMIC Settings' pages and cosmic-osd for the details. It replaces the stock network, Bluetooth, audio and power applets in the top bar; they stay installed |
 | Audio | PipeWire and WirePlumber started with the session, media keys work |
 | Battery and power profiles | UPower (`upowerd`) and power-profiles-daemon on the system bus, built in the Dockerfile `upower` and `power-profiles-daemon` stages, copied in `desktop-default` and linked into `multi-user.target` (their `WantedBy=graphical.target` is never reached on Kairos). COSMIC's battery applet and Noctalia read the battery and the profile from them; waybar's `battery` module (sway) and `isotope-status` (i3) read `/sys/class/power_supply`. `test/boot-ux/check-boot-units.sh`. No `powerprofilesctl`: it needs PyGObject. Not on the server |
 | Removable disks | udisks2 2.12 (`udisksd` on the system bus, `udisksctl`) with libblockdev (plugins: fs, loop, mdraid, part, swap, crypto, nvme), built in the Dockerfile `udisks2` and `libblockdev` stages, copied in `desktop-default` and linked into `multi-user.target` (its `WantedBy=graphical.target` is never reached on Kairos). `50-isotope-udisks.rules` lets an active local session mount, eject and power off removable disks without a password (not `filesystem-mount-system`); `90-isotope-udisks-ignore.rules` hides the Kairos partitions (`COS_*`, `*_LUKS`, fixed LUKS volumes) from it. Mounts land in `/run/media/<user>/<label>`. `test/boot-ux/check-boot-units.sh`. Not on the server; the agent image removes it |
 | Screenshots and screen lock | a key binding for each. Lockers: swaylock (sway, niri), i3lock (i3), COSMIC's own; sway (swayidle) and i3 (xss-lock) also lock on idle and before suspend. i3 takes screenshots with `isotope-screenshot`. The agent overlay starts no locker |
 | Flatpak apps with working file dialogs and dark mode | flatpak, xdg-desktop-portal and a backend reporting `color-scheme`: the GTK backend with its Settings interface (plus xdg-desktop-portal-wlr on sway) on sway, i3 and niri, reading the `prefer-dark` override in gsettings-desktop-schemas; COSMIC's own portal |
 | Hardware keys | volume, mute, brightness, play/pause/next, with an on-screen level. `isotope-media-key` on sway and i3 (wpctl, logind `SetBrightness`, MPRIS, and a mako or dunst progress pop-up); Noctalia and COSMIC (cosmic-settings-daemon, cosmic-osd) handle the keys themselves, except that COSMIC's playback keys call `isotope-media-key` because Hadron has no playerctl |
-| Isotope menu on Super+Escape | one menu for apps, installing apps (Isotope Welcome's Apps page), Wi-Fi, Bluetooth, audio, capture, clipboard history, update, extensions, backup, recovery key (on an encrypted disk), Isotope Welcome again, help and power: `isotope-menu` through `isotope-pick` (fuzzel on sway, niri and COSMIC; dmenu on i3). Each entry opens what the variant uses: the `isotope-*` menus, Noctalia's panels, COSMIC Settings and cosmic-osd. COSMIC's own Super+Escape lock moves to Super+Alt+L, niri's shortcut-inhibit toggle to Super+Shift+Escape |
+| Isotope menu on Super+Escape | one menu for apps, installing apps (Isotope Welcome's Apps page), Wi-Fi, Bluetooth, audio, capture, clipboard history, update, extensions, backup, recovery key (on an encrypted disk), Isotope Welcome again, help and power: `isotope-menu` through `isotope-pick` (fuzzel on sway, niri and COSMIC; dmenu on i3). Each entry opens what the variant uses: the `isotope-*` menus, Noctalia's panels, COSMIC Settings and cosmic-osd. COSMIC's own Super+Escape lock moves to Super+Alt+L, niri's shortcut-inhibit toggle to Super+Shift+Escape. On COSMIC the Isotope mark at the left of the top bar opens it too (`isotope-applet-mark`, panel ID `io.kairos.Isotope.Mark`, with the focused app's name beside it): Isotope's own applets are the Cargo workspace `applets/`, built by the Dockerfile `isotope-applets` stage through `cosmic-build`'s directory mode |
 | Clipboard history on Super+Ctrl+V | `isotope-clipboard`, also in the Isotope menu: the last 200 copies, kept in memory for the session, without the copies a password manager marks `x-kde-passwordManagerHint`. cliphist fed by `wl-paste --watch` on sway and COSMIC (cosmic-comp offers data-control to unsandboxed clients, no setting), clipnotify + xsel on i3 (text only), Noctalia's clipboard panel on niri. Super+V stays split (sway, i3) and float (niri). Not on agent: an AI-driven appliance must not keep the secrets it copies; Dockerfile.agent removes it |
-| Bluetooth menu | pair, connect, disconnect, forget, power. `isotope-bluetooth-menu` (bluetoothctl through `isotope-pick`) on sway and i3, Super+Shift+B and the waybar module; the Noctalia control center and COSMIC's Bluetooth applet |
+| Bluetooth menu | pair, connect, disconnect, forget, power. `isotope-bluetooth-menu` (bluetoothctl through `isotope-pick`) on sway and i3, Super+Shift+B and the waybar module; the Noctalia control center, and on COSMIC the quick settings' Bluetooth row (on/off; its detail is COSMIC Settings' Bluetooth page) |
 | Graphical installer | `isotope-install-gui` (`install-gui/`, Gio over `install-ui/core`, so the same questions, checks, cloud-config and install as the text one) in `cage`, both built in the Dockerfile (`install-gui-build`, `cage` with wlroots linked in) and copied into `desktop-default`, so the four variants have it; i3 gets the Wayland libraries and a Wayland-capable `mesa-x11` for it. `isotope-install-ui` starts it unless the install is unattended or the kernel command line has `isotope.installer=text` (the live menu's "isotope (text installer)" entry), and falls back to the text installer when cage exits before the first frame. A new keyboard layout restarts cage (state in `/run/isotope-install/state.json`, never a secret). Its look (palette, fonts, widgets, the window with the step list) is `guikit/`, a module shared with the other graphical tools; a change there changes them all. Screenshot tests in `install-gui/testdata/`. See `docs/superpowers/specs/2026-11-17-graphical-installer-design.md`. Not on the server (text installer only) and not on agent: Dockerfile.agent removes cage and the GUI, and the appliance installs unattended with `--progress-only` |
 | Keyboard layout and timezone from the installer | the installer's cloud-config writes `/etc/isotope/keyboard`, `/etc/X11/xorg.conf.d/00-keyboard.conf`, the `KEYMAP` in `/etc/vconsole.conf` and the `/etc/localtime` link in an initramfs stage, so every boot gets them again. sway (`start-desktop`), niri (`niri-session`) and COSMIC (`start-cosmic`, greetd) read the layout as `XKB_DEFAULT_LAYOUT`/`XKB_DEFAULT_VARIANT` from `/etc/profile.d/isotope-keyboard.sh`; i3's XLibre reads the xorg.conf.d file. `systemd-localed` is on the image (`localectl status` works on COSMIC); Isotope does not depend on it, because localed's `/etc/locale.conf` is lost at every boot. The Welcome page's Language step calls `SetLocale` on `isotope-updated` (polkit `io.kairos.isotope-update.settings`: admin only, no Flatpak callers), which writes `/etc/locale.conf` and `/oem/91_isotope_locale.yaml` (an initramfs stage that writes it again each boot); `/etc/profile.d/isotope-locale.sh` exports `LANG` from it for login shells (sway's and i3's `start-desktop` source it too); sway's and i3's portal lines (`dbus-update-activation-environment --systemd ... LANG`) push it to the user's systemd and D-Bus activation environment, which niri and COSMIC already import whole |
 | Saved-password store | gnome-keyring (Secret Service and its portal) on all four variants, so Electron and Chromium Flatpaks do not store secrets in plain text. `pam_gnome_keyring` in ly's and greetd's PAM services unlocks the login keyring with the login password; `gnome-keyring-daemon.socket` is enabled for every user. The agent removes it (autologin, nothing can unlock it) |
@@ -104,6 +104,64 @@ needs (boot, installer, update service, polkit) must be added there too. A
 server installs only server images and a desktop never installs one
 (`Classify` in update/policy.go); `isotope switch` refuses on a server.
 `test/server/check-server.sh` checks a built image.
+
+## The Isotope look
+
+Every colour starts in `theme/palette.toml` (roles: base, text, accent,
+dim, ..., with `day.*` copies). `tools/gen-theme.py` writes the palette
+into every config that has colours, including `theme/cosmic-theme.json`
+(COSMIC's theme overlay, from `COSMIC_LOOK` in the script) and the
+login screen's two marks. After a palette change, run it, commit the
+result, and rebuild. CI runs `--check` and fails on drift or on a
+contrast floor.
+
+On COSMIC, `tools/isotope-cosmic-theme` (Rust, the `cosmic-theme` stage)
+puts the overlay on libcosmic's own `ThemeBuilder` and writes the dark
+and light themes and `Mode` (dark) under `/usr/share/cosmic`. So COSMIC
+computes the derived colours itself. Do not hand-edit the theme entries
+in the image. Users who already have a theme keep it. To get the new
+look they remove `~/.config/cosmic/com.system76.CosmicTheme.Dark*` and
+`~/.config/cosmic/com.system76.CosmicTheme.Light*` (the theme and its
+builder directories), then log out and in. Do not tell them to use Reset to
+default in COSMIC Settings > Appearance: it writes libcosmic's stock theme
+into `~/.config/cosmic` and so replaces the Isotope look with stock COSMIC.
+
+The left window buttons come from a libcosmic patch and the CosmicTk key
+`window_controls_left`. To turn them off, put `false` in
+`~/.config/cosmic/com.system76.CosmicTk/v1/window_controls_left`.
+
+Known limit: on COSMIC, Flatpak GTK apps get neither the left window buttons
+nor the Conflux icon theme through the portal, because
+xdg-desktop-portal-cosmic does not serve those keys. The gsettings override
+(`91_isotope-cosmic.gschema.override`) is only the default for host GTK apps.
+`check-look.sh` and the Dockerfile assertion prove that the default is
+compiled, not that an app follows it.
+
+`patches/cosmic/` holds Isotope's changes to COSMIC sources:
+`<repo>/*.patch` per repo and `libcosmic/*.patch` for every libcosmic
+checkout. `tools/cosmic-build.sh` applies them. Its README lists the
+libcosmic revisions each component pins. A new COSMIC epoch must re-check
+that table and the patches against the new revisions.
+
+`applets/` is a cargo workspace of Isotope's own panel applets:
+`isotope-mark` (the mark that opens the Isotope menu) and
+`isotope-quick` (quick settings). It is built by `cosmic-build.sh` in
+directory mode, so the libcosmic patches apply to it. Its `Cargo.lock`
+must stay on the libcosmic revision that cosmic-applets pins (see the
+comment in `applets/Cargo.toml`). The panel layout is
+`rootfs-cosmic/usr/share/cosmic-layouts/isotope`, which is also the
+system default. Isotope Welcome applies it as "Isotope". `applets/` is
+GPL-3.0-only (as the greeter patch is), because it builds on COSMIC's GPL
+code; the rest of the repository is Apache-2.0.
+
+The icon theme is Conflux, installed whole from its pinned upstream
+commit in the `icon-themes` stage, with its GPL licence in
+`/usr/share/licenses/conflux`. Do not copy its SVGs into the tree.
+`theme/conflux-links.txt` adds aliases for app IDs that Conflux names
+differently. `theme/conflux-missing.txt` lists the apps that have no
+fitting icon. A dock or first-run app in neither list fails
+`test/look/check-look.sh`. CI runs that script on every image and it
+checks the whole look in a built image.
 
 ## The shortcut sheet is generated
 

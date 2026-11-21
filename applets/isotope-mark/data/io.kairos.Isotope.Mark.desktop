@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Isotope Menu
+Comment=The Isotope mark, which opens the Isotope menu, and the name of the focused app
+Type=Application
+Exec=isotope-applet-mark
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Isotope;Menu;
+Icon=io.kairos.Isotope.Mark-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-HostWaylandDisplay=true

@@ -1573,6 +1573,19 @@ COPY tools/gen-wallpaper.py /build/tools/gen-wallpaper.py
 RUN python3 /build/tools/gen-wallpaper.py /isotope-wallpapers-day/usr/share/backgrounds/isotope \
       isotope-tiles-day-3840x2160
 
+# The COSMIC login screen's soft wallpapers: isotope-desktop-{night,day}-blur.png,
+# a Gaussian blur (sigma 40 px at 4K) of the two desktop wallpapers at a
+# quarter of their size, which the cosmic-greeter patch shows in place of the
+# sharp picture (patches/cosmic/cosmic-greeter). gen-wallpaper.py --blur, stdlib
+# only, about 3 s each. A development build makes its own in build-wallpaper.
+FROM toolchain AS isotope-wallpapers-blur
+COPY tools/gen-wallpaper.py /build/tools/gen-wallpaper.py
+COPY rootfs/usr/share/backgrounds/isotope/ /build/wallpapers/
+RUN for mode in night day; do \
+      python3 /build/tools/gen-wallpaper.py --blur /build/wallpapers/isotope-desktop-$mode.png \
+        /isotope-wallpapers-blur/usr/share/backgrounds/isotope/isotope-desktop-$mode-blur.png || exit 1; \
+    done
+
 # --- docker (static bundle) — rootful OCI containers ------------------------
 # Docker's daemon + CLI + containerd + runc ship as fully-static Go binaries in
 # the official static bundle (a musl-friendly, no-libc-dependency pattern).
@@ -3478,6 +3491,7 @@ ARG JUST_VERSION=1.43.0
 RUN --mount=type=cache,id=cosmic-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     cargo install just --version ${JUST_VERSION} --locked --root /usr/local
 COPY tools/cosmic-build.sh /usr/local/bin/cosmic-build
+COPY patches/cosmic /usr/share/isotope-patches
 WORKDIR /build
 
 # greetd, the login daemon cosmic-greeter runs under, and pop-launcher, the
@@ -3528,13 +3542,11 @@ RUN --mount=type=cache,id=cosmic-cargo-registry,target=/usr/local/cargo/registry
 RUN --mount=type=cache,id=cosmic-cargo-registry,target=/usr/local/cargo/registry,sharing=locked --mount=type=cache,id=cosmic-target,target=/cargo-target,sharing=locked cosmic-build cosmic-notifications && rm -rf /cargo-target/*
 RUN --mount=type=cache,id=cosmic-cargo-registry,target=/usr/local/cargo/registry,sharing=locked --mount=type=cache,id=cosmic-target,target=/cargo-target,sharing=locked cosmic-build cosmic-launcher && rm -rf /cargo-target/*
 RUN --mount=type=cache,id=cosmic-cargo-registry,target=/usr/local/cargo/registry,sharing=locked --mount=type=cache,id=cosmic-target,target=/cargo-target,sharing=locked cosmic-build cosmic-app-library && rm -rf /cargo-target/*
-# cosmic-workspaces installs with make, not just.
+# cosmic-workspaces installs with make, not just, and builds only its binary.
 RUN --mount=type=cache,id=cosmic-cargo-registry,target=/usr/local/cargo/registry,sharing=locked --mount=type=cache,id=cosmic-target,target=/cargo-target,sharing=locked \
-    mkdir -p /build/ws && curl --retry-all-errors -fsSL --retry 5 https://github.com/pop-os/cosmic-workspaces-epoch/archive/refs/tags/epoch-${COSMIC_VERSION}.tar.gz | tar -xz --strip-components=1 -C /build/ws && \
-    cd /build/ws && cargo build --release --locked --bin cosmic-workspaces && \
-    make install DESTDIR=/cosmic CARGO_TARGET_DIR=/cargo-target && \
-    ! ldd /cosmic/usr/bin/cosmic-workspaces | grep 'not found' && \
-    cd /build && rm -rf /build/ws /cargo-target/*
+    COSMIC_CARGO_ARGS="--bin cosmic-workspaces" \
+    COSMIC_INSTALL_CMD='make install DESTDIR="$COSMIC_OUT" CARGO_TARGET_DIR="$CARGO_TARGET_DIR"' \
+    cosmic-build cosmic-workspaces-epoch && rm -rf /cargo-target/*
 RUN --mount=type=cache,id=cosmic-cargo-registry,target=/usr/local/cargo/registry,sharing=locked --mount=type=cache,id=cosmic-target,target=/cargo-target,sharing=locked cosmic-build cosmic-idle && rm -rf /cargo-target/*
 RUN --mount=type=cache,id=cosmic-cargo-registry,target=/usr/local/cargo/registry,sharing=locked --mount=type=cache,id=cosmic-target,target=/cargo-target,sharing=locked cosmic-build cosmic-randr && rm -rf /cargo-target/*
 RUN --mount=type=cache,id=cosmic-cargo-registry,target=/usr/local/cargo/registry,sharing=locked --mount=type=cache,id=cosmic-target,target=/cargo-target,sharing=locked cosmic-build cosmic-screenshot && rm -rf /cargo-target/*
@@ -3628,6 +3640,73 @@ RUN curl --retry-all-errors -fsSL --retry 5 https://icon-theme.freedesktop.org/r
     cd hicolor-icon-theme-${HICOLOR_VERSION} && pip3 install meson ninja && \
     meson setup build --prefix=/usr && DESTDIR=/hicolor-icon-theme ninja -C build install && \
     test -f /hicolor-icon-theme/usr/share/icons/hicolor/index.theme
+
+# Conflux, the Isotope icon theme (GPL-3.0 icons, data only), on every variant.
+# Only what its index.theme lists is installed (index.theme and the directories
+# in Directories= that exist, with the @2x links of ScaledDirectories=), not the whole
+# repo: no Workspace/, images/, preview.png, update.sh or .github/. Its LICENSE
+# and CREDITS.md go to /usr/share/licenses/conflux with a SOURCE file (upstream
+# URL and pinned commit). The icons are unmodified; Isotope adds alias symlinks
+# (theme/conflux-links.txt, installed to /usr/share/isotope), the apps/48 link,
+# and rewrites the Inherits line of index.theme.
+# That Inherits line names Adwaita and breeze, which the image does not have, so
+# it inherits Cosmic (pop-os/cosmic-icons, installed here the way its justfile
+# does, as the toolchain has no `just`) and hicolor. Conflux names few Flathub
+# and COSMIC app IDs: theme/conflux-links.txt links those IDs to the Conflux
+# icon that fits. Apps with none are in theme/conflux-missing.txt.
+# Conflux ships a few dangling links (ProtonVPN status icons); they are removed.
+# mako globs <icon-path>/*/<number>/<name>.*, so apps/48 points at apps/scalable.
+# `find -L -type l` lists only broken links, and BusyBox find lacks -xtype.
+FROM toolchain AS icon-themes
+# Conflux has no release tags.
+ARG CONFLUX_COMMIT=85b0ef6dc59e4d459364337a92a14f604a2baa82
+# renovate: datasource=github-tags depName=pop-os/cosmic-session extractVersion=^epoch-(?<version>\d+(\.\d+)*)$
+ARG COSMIC_VERSION=1.11.0
+COPY theme/conflux-links.txt theme/conflux-missing.txt /build/
+RUN i=/icon-themes/usr/share/icons && c=$i/Conflux && s=/build/conflux && l=/icon-themes/usr/share/licenses/conflux && \
+    mkdir -p $c $s $l $i/Cosmic /build/cosmic-icons /icon-themes/usr/share/isotope && \
+    curl --retry-all-errors -fsSL --retry 5 https://github.com/MoshiurRahmanAdib/Conflux-Icon-Theme/archive/${CONFLUX_COMMIT}.tar.gz | tar -xz --strip-components=1 -C $s && \
+    install -m0644 $s/index.theme $c/index.theme && \
+    for d in $(sed -n 's/^Directories=//p' $s/index.theme | tr ',' ' '); do \
+      [ -d $s/$d ] || continue; mkdir -p $c/$(dirname $d) && cp -a $s/$d $c/$d || exit 1; \
+    done && \
+    for x in $(sed -n 's/^ScaledDirectories=//p' $s/index.theme | tr ',' ' ' | tr ' ' '\n' | cut -d/ -f1 | sort -u); do \
+      test -d $c/${x%@2x} && ln -s ${x%@2x} $c/$x || exit 1; \
+    done && \
+    rm -f $c/apps/scalable/optimize.sh && \
+    install -m0644 $s/LICENSE $s/CREDITS.md $l/ && \
+    printf '%s\n' \
+      'Conflux icon theme, by MoshiurRahmanAdib, licensed GPL-3.0 (see LICENSE; credits in CREDITS.md).' \
+      'Upstream: https://github.com/MoshiurRahmanAdib/Conflux-Icon-Theme' \
+      "Commit:   ${CONFLUX_COMMIT}" \
+      'The icons are installed unmodified. Isotope adds alias symlinks only (listed in' \
+      '/usr/share/isotope/conflux-links.txt), the apps/48 link, and sets the Inherits line' \
+      'of index.theme to Cosmic,hicolor. Dangling upstream links and the helper script' \
+      'apps/scalable/optimize.sh are not installed.' > $l/SOURCE && \
+    rm -rf $s && \
+    sed -i 's/^Inherits=.*/Inherits=Cosmic,hicolor/' $c/index.theme && \
+    curl --retry-all-errors -fsSL --retry 5 https://github.com/pop-os/cosmic-icons/archive/refs/tags/epoch-${COSMIC_VERSION}.tar.gz | tar -xz --strip-components=1 -C /build/cosmic-icons && \
+    (cd /build/cosmic-icons && \
+     for d in freedesktop extra; do (cd $d && find ./scalable -type f -exec install -Dm0644 '{}' "$i/Cosmic/{}" \;); done; \
+     install -Dm0644 index.theme $i/Cosmic/index.theme) && \
+    grep -v '^#' /build/conflux-links.txt | while read -r id name; do \
+      [ -n "$id" ] || continue; n=0; \
+      for d in apps/scalable apps@2x/scalable; do \
+        if [ -e "$c/$d/$name.svg" ]; then ln -sf "$name.svg" "$c/$d/$id.svg"; n=$((n+1)); fi; \
+      done; \
+      [ $n -gt 0 ] || { echo "conflux-links.txt: no $name.svg in Conflux for $id" >&2; exit 1; }; \
+    done && \
+    ln -s scalable $c/apps/48 && \
+    install -Dm0644 /build/conflux-links.txt /build/conflux-missing.txt /icon-themes/usr/share/isotope/ && \
+    rm -rf /build/cosmic-icons && \
+    find -L $c -type l -exec rm -f {} + && \
+    grep -qx 'Inherits=Cosmic,hicolor' $c/index.theme && \
+    test -f $i/Cosmic/index.theme && \
+    grep -q 'GNU GENERAL PUBLIC LICENSE' $l/LICENSE && grep -q "$CONFLUX_COMMIT" $l/SOURCE && \
+    for n in Workspace images preview.png update.sh .github README.md CONTRIBUTING.md .gitignore; do test ! -e $c/$n || exit 1; done && \
+    test -e $c/apps/scalable/org.videolan.VLC.svg && \
+    test -e $c/apps/48/org.videolan.VLC.svg && \
+    test -z "$(find -L $c -type l)"
 
 # The UI fonts libcosmic defaults to (Open Sans, Noto Sans Mono), installed
 # system-wide so Flatpak and Xwayland apps match the shell. Pinned commits.
@@ -4198,13 +4277,17 @@ RUN d=/adwaita-cursors/usr/share/icons && mkdir -p $d/Adwaita $d/default && \
 # (the isotope-fonts stage) by their real family names, because a Flatpak sees
 # the host's font files but not its fontconfig aliases. GTK3 has the dark
 # Adwaita built in only as a variant, so the theme named Adwaita-dark is a
-# one-line stylesheet that imports it.
+# one-line stylesheet that imports it. COSMIC adds its own override
+# (rootfs-cosmic/usr/share/glib-2.0/schemas/91_isotope-cosmic.gschema.override)
+# that puts GTK's window buttons on the left, as its patched libcosmic does.
 #
 # No dconf: without it GLib uses its in-memory backend, which still reads the
 # compiled schemas with this override, so every app and portal sees the dark
 # defaults. dconf would only add per-user changes saved across logins, for a
 # daemon, a GIO module and its cache in every image. The default stage
 # compiles the schemas (glib-compile-schemas); installs under DESTDIR skip it.
+# Adding dconf would also let cosmic-settings-daemon's `gsettings set ...
+# button-layout` (run at its start) override Isotope's COSMIC default.
 FROM toolchain AS gsettings-desktop-schemas
 COPY --from=glib2 /glib2 /
 COPY --from=pcre2 /pcre2 /
@@ -4220,7 +4303,7 @@ RUN meson setup buildDir ${COMMON_MESON_FLAGS} -Dintrospection=false && \
 RUN d=/gsettings-desktop-schemas/usr/share && \
     printf '%s\n' '# Isotope defaults: dark apps and the Isotope fonts, including Flatpak apps through the portal.' \
       '[org.gnome.desktop.interface]' "color-scheme='prefer-dark'" "gtk-theme='Adwaita-dark'" \
-      "font-name='Inter Variable 10.5'" "document-font-name='Inter Variable 10.5'" \
+      "font-name='Inter Variable 10.5'" "icon-theme='Conflux'" "document-font-name='Inter Variable 10.5'" \
       "monospace-font-name='JetBrains Mono 10.5'" \
       > $d/glib-2.0/schemas/90_isotope.gschema.override && \
     mkdir -p $d/themes/Adwaita-dark/gtk-3.0 && \
@@ -4229,6 +4312,7 @@ RUN d=/gsettings-desktop-schemas/usr/share && \
     cp -a $d/glib-2.0/schemas /tmp/schemas && glib-compile-schemas --strict /tmp/schemas && \
     test "$(gsettings --schemadir /tmp/schemas get org.gnome.desktop.interface color-scheme 2>/dev/null)" = "'prefer-dark'" && \
     test "$(gsettings --schemadir /tmp/schemas get org.gnome.desktop.interface font-name 2>/dev/null)" = "'Inter Variable 10.5'" && \
+    test "$(gsettings --schemadir /tmp/schemas get org.gnome.desktop.interface icon-theme 2>/dev/null)" = "'Conflux'" && \
     rm -rf /tmp/schemas
 
 # xdg-desktop-portal-gtk: the file chooser (and app chooser, print, settings)
@@ -4752,6 +4836,7 @@ COPY --from=isotope-wallpapers /isotope-wallpapers /
 # Fallback icon theme and the Adwaita cursors (system default via
 # /usr/share/icons/default), as on niri.
 COPY --from=hicolor-icon-theme /hicolor-icon-theme /
+COPY --from=icon-themes /icon-themes /
 COPY --from=adwaita-cursors /adwaita-cursors /
 # Login manager (ly) + its X protocol libs
 COPY --from=libxau /libxau /
@@ -4836,6 +4921,7 @@ COPY --from=isotope-fonts /isotope-fonts /
 COPY --from=emoji /emoji /
 COPY --from=isotope-wallpapers /isotope-wallpapers /
 COPY --from=hicolor-icon-theme /hicolor-icon-theme /
+COPY --from=icon-themes /icon-themes /
 COPY --from=adwaita-cursors /adwaita-cursors /
 COPY --from=ly /ly /
 # Portals, so Flatpak apps get file dialogs and the dark colour scheme. The GTK
@@ -4929,7 +5015,11 @@ COPY --from=fuzzel /fuzzel /
 COPY --from=wl-clipboard /wl-clipboard /
 COPY --from=cliphist /cliphist /
 COPY --from=cosmic-fonts /cosmic-fonts /
+# gsettings-desktop-schemas, for the GTK window-button override in
+# rootfs-cosmic/usr/share/glib-2.0/schemas (and Isotope's shared override).
+COPY --from=gsettings-desktop-schemas /gsettings-desktop-schemas /
 COPY --from=hicolor-icon-theme /hicolor-icon-theme /
+COPY --from=icon-themes /icon-themes /
 COPY --from=musl-locales /musl-locales /
 COPY --from=nerdfont /nerdfont /
 COPY --from=isotope-fonts /isotope-fonts /
@@ -5031,6 +5121,7 @@ COPY --from=emoji /emoji /
 COPY --from=isotope-wallpapers /isotope-wallpapers /
 COPY --from=isotope-wallpapers-day /isotope-wallpapers-day /
 COPY --from=hicolor-icon-theme /hicolor-icon-theme /
+COPY --from=icon-themes /icon-themes /
 COPY --from=adwaita-cursors /adwaita-cursors /
 COPY --from=ly /ly /
 
@@ -5047,8 +5138,72 @@ COPY rootfs-sway/ /
 FROM common-config AS i3-config
 COPY rootfs-i3/ /
 
+# The Isotope theme as COSMIC's system defaults: the builder and the computed
+# theme, dark and light, written by libcosmic's own cosmic-theme crate from
+# theme/cosmic-theme.json, so the numbers are COSMIC's and not ours. The crate
+# sits at tools/isotope-cosmic-theme because its tests include_str the JSON as
+# ../../theme/cosmic-theme.json. The build fails if the computed accent differs
+# from the one in the JSON.
+FROM cosmic-build AS cosmic-theme
+WORKDIR /src
+COPY tools/isotope-cosmic-theme tools/isotope-cosmic-theme
+COPY theme/cosmic-theme.json theme/cosmic-theme.json
+RUN --mount=type=cache,id=cosmic-cargo-registry,target=/usr/local/cargo/registry,sharing=locked --mount=type=cache,id=cosmic-theme-target,target=/cargo-target,sharing=locked \
+    cd tools/isotope-cosmic-theme && export CARGO_TARGET_DIR=/cargo-target && \
+    cargo test --locked && \
+    cargo run --release --locked -- ../../theme/cosmic-theme.json /cosmic-theme/usr/share/cosmic && \
+    test -s /cosmic-theme/usr/share/cosmic/com.system76.CosmicTheme.Dark/v2/accent && \
+    test -s /cosmic-theme/usr/share/cosmic/com.system76.CosmicTheme.Light/v2/accent && \
+    test "$(cat /cosmic-theme/usr/share/cosmic/com.system76.CosmicTheme.Mode/v1/is_dark)" = true
+
+# Isotope's own COSMIC panel applets: applets/, a Cargo workspace (see
+# applets/Cargo.toml and applets/justfile): the Isotope mark and the focused
+# app at the left of the top bar (isotope-applet-mark, panel ID
+# io.kairos.Isotope.Mark) and the quick settings at the right
+# (isotope-applet-quick, io.kairos.Isotope.QuickSettings). Built like a stock
+# COSMIC component, through cosmic-build's directory mode, so the libcosmic
+# patches apply to them and every installed ELF is ldd-checked. Their
+# libcosmic is the rev cosmic-applets pins (test/cosmic-build/
+# test-cosmic-build-patches.sh checks that rev is one the patches are kept
+# for). It builds its dependency graph itself: in release CI
+# the COSMIC halves come prebuilt, and locally the neighbouring stages empty
+# the shared cosmic-target cache after each component.
+# The unit tests run first, in their own target dir; one of them compares the
+# mark's icon with docs/assets/isotope-mark.svg at its path in the repo, so
+# that file is copied to the same place relative to applets/.
+FROM cosmic-build AS isotope-applets
+# renovate: datasource=github-tags depName=pop-os/cosmic-session extractVersion=^epoch-(?<version>\d+(\.\d+)*)$
+ARG COSMIC_VERSION=1.11.0
+ENV COSMIC_VERSION=${COSMIC_VERSION} COSMIC_OUT=/cosmic
+ENV CARGO_TARGET_DIR=/cargo-target
+COPY applets /src/applets
+COPY docs/assets/isotope-mark.svg /src/docs/assets/isotope-mark.svg
+RUN --mount=type=cache,id=cosmic-cargo-registry,target=/usr/local/cargo/registry,sharing=locked --mount=type=cache,id=cosmic-target,target=/cargo-target,sharing=locked \
+    (cd /src/applets && CARGO_TARGET_DIR=/cargo-target/applets-test cargo test --locked) && \
+    cosmic-build /src/applets && rm -rf /cargo-target/* && \
+    test -x /cosmic/usr/bin/isotope-applet-mark && \
+    grep -qa window_controls_left /cosmic/usr/bin/isotope-applet-mark && \
+    test -f /cosmic/usr/share/applications/io.kairos.Isotope.Mark.desktop && \
+    test -f /cosmic/usr/share/icons/hicolor/scalable/apps/io.kairos.Isotope.Mark-symbolic.svg && \
+    test -x /cosmic/usr/bin/isotope-applet-quick && \
+    grep -qa window_controls_left /cosmic/usr/bin/isotope-applet-quick && \
+    test -f /cosmic/usr/share/applications/io.kairos.Isotope.QuickSettings.desktop && \
+    test -f /cosmic/usr/share/icons/hicolor/scalable/apps/io.kairos.Isotope.QuickSettings-symbolic.svg
+
 FROM common-config AS cosmic-config
 COPY rootfs-cosmic/ /
+# Isotope's own applets (the isotope-applets stage), next to COSMIC's.
+COPY --from=isotope-applets /cosmic/ /
+# The Isotope panel defaults live once, in the Isotope layout (the Layout page
+# installs that dir into a user's config); the system defaults are a copy of
+# it, so the two cannot drift. No RUN: this stage has no shell. Each COPY
+# below is one config dir of the layout (a new one needs a line here);
+# test/look/check-look.sh diffs them against the layout.
+COPY rootfs-cosmic/usr/share/cosmic-layouts/isotope/com.system76.CosmicPanel /usr/share/cosmic/com.system76.CosmicPanel
+COPY rootfs-cosmic/usr/share/cosmic-layouts/isotope/com.system76.CosmicPanel.Panel /usr/share/cosmic/com.system76.CosmicPanel.Panel
+COPY rootfs-cosmic/usr/share/cosmic-layouts/isotope/com.system76.CosmicPanel.Dock /usr/share/cosmic/com.system76.CosmicPanel.Dock
+COPY --from=cosmic-theme /cosmic-theme/ /
+COPY --from=isotope-wallpapers-blur /isotope-wallpapers-blur/ /
 
 FROM common-config AS niri-config
 COPY rootfs-niri/ /
@@ -5390,8 +5545,9 @@ RUN chmod 1777 /tmp; \
     ldconfig 2>/dev/null || true; \
     # Register the bundled fonts for the selected bar, terminal, and launcher.
     fc-cache -f 2>/dev/null || true; \
-    # Compile the GSettings schemas the variant ships (GTK's, and on Sway, i3
-    # and niri gsettings-desktop-schemas with Isotope's dark override): the
+    # Compile the GSettings schemas the variant ships (GTK's, and
+    # gsettings-desktop-schemas with Isotope's dark override; COSMIC adds its
+    # window-button override from rootfs-cosmic): the
     # stages install them under DESTDIR, where meson skips this, and GLib
     # aborts a GTK app that opens a file chooser with no compiled schemas. On
     # i3 the AT-SPI bus launcher, which GTK starts for snixembed, aborts too.
@@ -5656,6 +5812,10 @@ RUN systemctl enable isotope-backup.timer isotope-restore-finish.service && \
 FROM desktop-default AS sway-default
 FROM desktop-default AS i3-default
 FROM desktop-default AS cosmic-default
+# The compiled schemas carry COSMIC's own override (GTK's window buttons on the
+# left). This proves the default is compiled, not that any app follows it:
+# Flatpak GTK apps do not read it on COSMIC (see AGENTS.md, The Isotope look).
+RUN test "$(gsettings get org.gnome.desktop.wm.preferences button-layout)" = "'close,minimize,maximize:'"
 FROM desktop-default AS niri-default
 FROM ${DESKTOP}-default AS default
 
@@ -5670,13 +5830,15 @@ FROM ${DESKTOP}-default AS default
 FROM python:3.12-slim-bookworm AS build-wallpaper
 ARG WALLPAPER_COMMIT=
 COPY tools/wallpapers /w
+COPY tools/gen-wallpaper.py /w/gen-wallpaper.py
 RUN mkdir -p /out/usr/share/backgrounds/isotope && \
     if [ -n "${WALLPAPER_COMMIT}" ]; then \
       pip install --no-cache-dir -r /w/requirements.txt && \
       d=/out/usr/share/backgrounds/isotope && short="$(printf %s "${WALLPAPER_COMMIT}" | cut -c1-12)" && \
       for mode in night day; do \
         python3 /w/build_wallpaper.py --seed "${WALLPAPER_COMMIT}" --mode "$mode" --out "$d" && \
-        ln -sf "isotope-build-${short}-${mode}-3840x2160.png" "$d/isotope-desktop-${mode}.png"; \
+        ln -sf "isotope-build-${short}-${mode}-3840x2160.png" "$d/isotope-desktop-${mode}.png" && \
+        python3 /w/gen-wallpaper.py --blur "$d/isotope-desktop-${mode}.png" "$d/isotope-desktop-${mode}-blur.png"; \
       done && ls -l "$d"; \
     fi
 

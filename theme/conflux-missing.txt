@@ -1,0 +1,11 @@
+# <app-id> <reason>
+# App IDs Isotope shows that have no fitting Conflux icon. They keep the icon
+# they ship (Cosmic or hicolor). test/look/check-look.sh reads this file.
+com.system76.CosmicEdit Conflux has no text editor icon
+com.system76.CosmicScreenshot Conflux has no screenshot icon
+com.brave.Browser Conflux has no Brave icon
+io.gitlab.librewolf-community Conflux has no LibreWolf icon
+org.gnome.Loupe Conflux has no image viewer icon
+org.gnome.TextEditor Conflux has no text editor icon
+org.gnome.Papers Conflux has no PDF viewer icon
+com.github.tchx84.Flatseal Conflux has no Flatseal icon

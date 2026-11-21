@@ -26,3 +26,5 @@
 # satisfy Go's internal-import rule, then removed on exit).
 /agent/cmd/mcp-smoke/
 __pycache__/
+# The applets workspace build dir (cargo in the cosmic-build container)
+/applets/target/

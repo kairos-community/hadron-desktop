@@ -1,0 +1,16 @@
+[package]
+name = "isotope-mark"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "isotope-applet-mark"
+path = "src/main.rs"
+
+[dependencies]
+libcosmic.workspace = true
+rustix.workspace = true
+tracing.workspace = true
+tracing-log.workspace = true
+tracing-subscriber.workspace = true

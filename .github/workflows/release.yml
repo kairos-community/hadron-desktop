@@ -391,6 +391,12 @@ jobs:
         shell: bash
         run: test/welcome/check-welcome-image.sh "${DESKTOP}-desktop:dev" "$DESKTOP"
 
+      # The Isotope look: theme, icons, window buttons, panel and applets.
+      - name: Check the look
+        if: matrix.desktop != 'server'
+        shell: bash
+        run: test/look/check-look.sh "${DESKTOP}-desktop:dev" "$DESKTOP"
+
       # The server edition must have no desktop and must have its network
       # stack, update service and network card firmware.
       - name: Check the server image

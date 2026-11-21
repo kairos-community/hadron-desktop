@@ -65,6 +65,7 @@ Commands:
   help              this text
 
 Started by the desktop session and by systemd, not by hand:
+  wallpaper-follow  on COSMIC, switch the Isotope wallpaper with light and dark
   tray              the update icon in the panel, with notifications
       --no-icon          the same, without the icon
   notify            the same as tray --no-icon
@@ -130,6 +131,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return cmdRestore(args, stdin, stdout, stderr)
 	case "welcome":
 		return cmdWelcome(args, stderr)
+	case "wallpaper-follow":
+		return cmdWallpaperFollow(stderr)
 	case "daemon":
 		return cmdDaemon(args, stderr)
 	case "efi-boot-entry":

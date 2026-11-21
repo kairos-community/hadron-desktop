@@ -1,0 +1,159 @@
+Isotope: window controls on the left of the header bar, as round buttons.
+
+What: a new CosmicTk key, `window_controls_left` (bool, false when the key is
+not set, so upstream's layout stays the default). When it is true, the header
+bar packs close, minimize and maximize, in that order, at the very start
+instead of at the end, as round 12 px buttons filled with the theme's neutral
+button colour, outlined with the divider colour, that show their glyph only
+under the pointer. Changes src/config/mod.rs (the field, its default, a
+`config::window_controls_left()` getter) and src/widget/header_bar.rs.
+
+Why: Isotope's look puts the window buttons on the left (the "lights" of
+docs/superpowers/specs/assets/isotope-look/mock.html), and Isotope ships
+/usr/share/cosmic/com.system76.CosmicTk/v1/window_controls_left = true. Every
+COSMIC app draws its header with this widget, and cosmic-comp draws the
+server-side title bars with it (src/shell/element/window.rs,
+DefaultDecorations), so one patch covers apps and SSD windows. A user turns it
+off with `false` in ~/.config/cosmic/com.system76.CosmicTk/v1/window_controls_left.
+
+Made against libcosmic 430f3d48a97d (COSMIC epoch-1.11.0). src/config/mod.rs
+and src/widget/header_bar.rs are the same at d922ac380134 (cosmic-comp) and
+8cb10bf6e24b (cosmic-workspaces), and the patch applies to all three.
+
+--- a/src/config/mod.rs
++++ b/src/config/mod.rs
+@@ -55,6 +55,12 @@
+     COSMIC_TK.read().unwrap().show_maximize
+ }
+ 
++/// Put the window controls at the start of the header bar, as round buttons.
++#[allow(clippy::missing_panics_doc)]
++pub fn window_controls_left() -> bool {
++    COSMIC_TK.read().unwrap().window_controls_left
++}
++
+ /// Preferred icon theme.
+ #[allow(clippy::missing_panics_doc)]
+ pub fn icon_theme() -> String {
+@@ -95,6 +101,10 @@
+     /// Show maximize button in window header.
+     pub show_maximize: bool,
+ 
++    /// Put the window controls (close, minimize, maximize) at the start of
++    /// the window header, as round buttons. Off when the key is not set.
++    pub window_controls_left: bool,
++
+     /// Preferred icon theme.
+     pub icon_theme: String,
+ 
+@@ -117,6 +127,7 @@
+             apply_theme_global: false,
+             show_minimize: true,
+             show_maximize: true,
++            window_controls_left: false,
+             icon_theme: String::from("Cosmic"),
+             header_size: Density::Standard,
+             interface_density: Density::Standard,
+--- a/src/widget/header_bar.rs
++++ b/src/widget/header_bar.rs
+@@ -370,12 +370,20 @@
+         let is_ssd = self.is_ssd;
+ 
+         // Take ownership of the regions to be packed.
+-        let start = std::mem::take(&mut self.start);
++        let mut start = std::mem::take(&mut self.start);
+         let center = std::mem::take(&mut self.center);
+         let mut end = std::mem::take(&mut self.end);
+ 
+-        // Also packs the window controls at the very end.
+-        end.push(self.window_controls(space_xxs));
++        if crate::config::window_controls_left() {
++            // Packs the window controls at the very start.
++            if self.on_close.is_some() || self.on_minimize.is_some() || self.on_maximize.is_some()
++            {
++                start.insert(0, self.window_controls_left());
++            }
++        } else {
++            // Also packs the window controls at the very end.
++            end.push(self.window_controls(space_xxs));
++        }
+ 
+         let padding = if is_ssd {
+             [2, 8, 2, 8]
+@@ -480,6 +488,76 @@
+             .align_y(iced::Alignment::Center)
+             .into()
+     }
++
++    /// Creates the window controls for the start of the header bar: close,
++    /// minimize and maximize, as round 12 px buttons in a neutral colour that
++    /// show their glyph only while the pointer is over them.
++    fn window_controls_left(&mut self) -> Element<'a, Message> {
++        let light = |name: &'static str, on_press: Message| {
++            widget::button::custom(widget::icon::from_name(name).icon().size(8))
++                .width(Length::Fixed(12.0))
++                .height(Length::Fixed(12.0))
++                .padding(2)
++                .class(theme::Button::Custom {
++                    active: Box::new(|_, theme| window_light_style(theme, Light::Active)),
++                    disabled: Box::new(|theme| window_light_style(theme, Light::Active)),
++                    hovered: Box::new(|_, theme| window_light_style(theme, Light::Hovered)),
++                    pressed: Box::new(|_, theme| window_light_style(theme, Light::Pressed)),
++                })
++                .on_press(on_press)
++        };
++
++        widget::row::with_capacity(3)
++            .push_maybe(
++                self.on_close
++                    .take()
++                    .map(|m| light("window-close-symbolic", m)),
++            )
++            .push_maybe(
++                self.on_minimize
++                    .take()
++                    .map(|m| light("window-minimize-symbolic", m)),
++            )
++            .push_maybe(self.on_maximize.take().map(|m| {
++                if self.maximized {
++                    light("window-restore-symbolic", m)
++                } else {
++                    light("window-maximize-symbolic", m)
++                }
++            }))
++            .spacing(6)
++            .padding([0, 6])
++            .align_y(iced::Alignment::Center)
++            .into()
++    }
++}
++
++#[derive(Clone, Copy)]
++enum Light {
++    Active,
++    Hovered,
++    Pressed,
++}
++
++/// The look of a window control made by `window_controls_left`: a circle
++/// filled with the theme's neutral button colour and outlined with the
++/// divider colour; the glyph is transparent until hovered.
++fn window_light_style(theme: &crate::Theme, light: Light) -> widget::button::Style {
++    let cosmic = theme.cosmic();
++    let component = &cosmic.button;
++    let mut style = widget::button::Style::new();
++    let (background, glyph) = match light {
++        Light::Active => (component.base, iced_core::Color::TRANSPARENT),
++        Light::Hovered => (component.hover, component.on.into()),
++        Light::Pressed => (component.pressed, component.on.into()),
++    };
++    style.background = Some(iced_core::Background::Color(background.into()));
++    style.border_radius = 6.0_f32.into();
++    style.border_width = 1.0;
++    style.border_color = theme.current_container().component.divider.into();
++    style.icon_color = Some(glyph);
++    style.text_color = Some(glyph);
++    style
+ }
+ 
+ impl<'a, Message: Clone + 'static> From<HeaderBar<'a, Message>> for Element<'a, Message> {

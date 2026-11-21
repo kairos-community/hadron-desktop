@@ -148,3 +148,81 @@ func TestCurrentLayout(t *testing.T) {
 		t.Fatalf("edited: %q", got)
 	}
 }
+
+// isotopeLayout builds a layout with the shipped isotope id and the panel
+// directories Task 4 ships, in a temp dir.
+func isotopeLayout(t *testing.T) Layout {
+	t.Helper()
+	d := filepath.Join(t.TempDir(), SystemLayoutID)
+	for _, n := range []string{"com.system76.CosmicPanel", "com.system76.CosmicPanel.Panel", "com.system76.CosmicPanel.Dock"} {
+		os.MkdirAll(filepath.Join(d, n, "v1"), 0o755)
+		os.WriteFile(filepath.Join(d, n, "v1", "k"), []byte("v"), 0o644)
+	}
+	return Layout{ID: SystemLayoutID, Name: "Isotope", Dir: d}
+}
+
+func TestApplySystemLayoutRemovesUserPanelDirs(t *testing.T) {
+	home := t.TempDir()
+	cfg := filepath.Join(home, ".config", "cosmic")
+	panel := filepath.Join(cfg, "com.system76.CosmicPanel.Panel")
+	os.MkdirAll(filepath.Join(panel, "v1"), 0o755)
+	os.WriteFile(filepath.Join(panel, "v1", "size"), []byte("XS"), 0o644)
+	tk := filepath.Join(cfg, "com.system76.CosmicTk", "v1")
+	os.MkdirAll(tk, 0o755)
+	os.WriteFile(filepath.Join(tk, "k"), []byte("v"), 0o644)
+
+	r := &fakeRunner{}
+	if err := ApplyLayout(r, home, isotopeLayout(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(panel); err == nil {
+		t.Error("the user's panel dir survived the system layout")
+	}
+	if _, err := os.Stat(filepath.Join(tk, "k")); err != nil {
+		t.Errorf("an unrelated cosmic dir was touched: %v", err)
+	}
+	if c := r.called(); len(c) != 1 || c[0] != "pkill -x cosmic-panel" {
+		t.Fatalf("commands %q, want pkill -x cosmic-panel", c)
+	}
+}
+
+func TestCurrentLayoutIsSystemWhenUserHasNoPanelDirs(t *testing.T) {
+	ls, _ := Layouts(layoutFixtures)
+	ls = append([]Layout{isotopeLayout(t)}, ls...)
+	home := t.TempDir()
+	if got := CurrentLayout(home, ls); got != SystemLayoutID {
+		t.Fatalf("empty home: %q", got)
+	}
+	// Non-panel config does not count as a panel edit.
+	os.MkdirAll(filepath.Join(home, ".config/cosmic/com.system76.CosmicTk/v1"), 0o755)
+	if got := CurrentLayout(home, ls); got != SystemLayoutID {
+		t.Fatalf("unrelated dir: %q", got)
+	}
+}
+
+func TestCurrentLayoutNotSystemWhenUserHasPanelDirs(t *testing.T) {
+	ls, _ := Layouts(layoutFixtures)
+	ls = append([]Layout{isotopeLayout(t)}, ls...)
+	home := t.TempDir()
+	ApplyLayout(&fakeRunner{}, home, fixtureLayout(t, "bottom-panel"))
+	if got := CurrentLayout(home, ls); got != "bottom-panel" {
+		t.Fatalf("bottom-panel files: %q", got)
+	}
+	os.WriteFile(filepath.Join(home, ".config/cosmic/com.system76.CosmicPanel.Panel/v1/anchor"), []byte("Top"), 0o644)
+	if got := CurrentLayout(home, ls); got != "" {
+		t.Fatalf("other panel edit: %q", got)
+	}
+}
+
+func TestApplyOtherLayoutStillCopies(t *testing.T) {
+	home := t.TempDir()
+	if err := ApplyLayout(&fakeRunner{}, home, fixtureLayout(t, "bottom-panel")); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(home, ".config/cosmic/com.system76.CosmicPanel.Panel/v1/anchor")); got != "Bottom" {
+		t.Errorf("anchor = %q", got)
+	}
+	if fixtureLayout(t, "bottom-panel").IsSystem() {
+		t.Error("bottom-panel reported as the system layout")
+	}
+}

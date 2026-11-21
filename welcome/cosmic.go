@@ -31,6 +31,14 @@ type Layout struct {
 	order int // the id of layout.kdl; layouts are listed by it
 }
 
+// SystemLayoutID is the layout that is the image's own panel defaults
+// (/usr/share/cosmic): applying it removes the user's overrides instead of
+// copying files.
+const SystemLayoutID = "isotope"
+
+// IsSystem reports whether l is the Isotope layout, the system default.
+func (l Layout) IsSystem() bool { return l.ID == SystemLayoutID }
+
 var kdlName = regexp.MustCompile(`(?:(\w+)=)?"([^"]*)"`)
 
 // parseLayoutKDL reads the two nodes layout.rs reads (layout.rs:101-120):
@@ -179,6 +187,9 @@ func ApplyLayout(r Runner, home string, l Layout) error {
 		if err := os.RemoveAll(dst); err != nil {
 			return err
 		}
+		if l.IsSystem() {
+			continue
+		}
 		if err := copyDir(filepath.Join(l.Dir, name), dst); err != nil {
 			return fmt.Errorf("copy %s: %w", name, err)
 		}
@@ -192,8 +203,8 @@ func ApplyLayout(r Runner, home string, l Layout) error {
 }
 
 // CurrentLayout is the id of the layout whose every file is what
-// ~/.config/cosmic holds now, "" when none is (the image's default, or
-// edits in COSMIC Settings).
+// ~/.config/cosmic holds now, "" when none is (edits in COSMIC Settings).
+// The system layout matches when the user has none of its directories.
 func CurrentLayout(home string, ls []Layout) string {
 	for _, l := range ls {
 		if l.installedIn(home) {
@@ -207,6 +218,14 @@ func (l Layout) installedIn(home string) bool {
 	dirs, err := l.configDirs()
 	if err != nil || len(dirs) == 0 {
 		return false
+	}
+	if l.IsSystem() {
+		for _, name := range dirs {
+			if _, err := os.Stat(filepath.Join(home, ".config", "cosmic", name)); err == nil {
+				return false
+			}
+		}
+		return true
 	}
 	for _, name := range dirs {
 		same := true

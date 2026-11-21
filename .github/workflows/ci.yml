@@ -183,6 +183,8 @@ jobs:
           done
           cmp "$RUNNER_TEMP/a/isotope-tiles-night-480x270.png" "$RUNNER_TEMP/b/isotope-tiles-night-480x270.png"
           cmp "$RUNNER_TEMP/a/isotope-plain-day-480x270.png" "$RUNNER_TEMP/b/isotope-plain-day-480x270.png"
+          # The login screen's soft wallpapers (--blur), made the same way.
+          python3 tools/test_gen_wallpaper.py
           make -C splash isotope-splash
           mkdir -p "$RUNNER_TEMP/grub"
           python3 tools/gen-grub-bg.py "$RUNNER_TEMP/grub"
@@ -210,6 +212,9 @@ jobs:
         run: |
           python3 tools/test_gen_shortcuts.py
           python3 tools/gen-shortcuts.py --check
+
+      - name: COSMIC theme overlay
+        run: python3 tools/test_gen_theme.py
 
       - name: Notification keys
         run: test/notify/check-notify-keys.sh
@@ -257,3 +262,5 @@ jobs:
         run: test/extensions/check-extensions-menu.sh
       - name: Extension catalog from the registry tags
         run: test/extensions/check-extensions-catalog.sh
+      - name: COSMIC build patches (repo, libcosmic, target dir hash)
+        run: test/cosmic-build/test-cosmic-build-patches.sh

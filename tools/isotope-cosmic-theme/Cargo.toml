@@ -1,0 +1,12 @@
+[package]
+name = "isotope-cosmic-theme"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Overlay theme/cosmic-theme.json on COSMIC's ThemeBuilder and write the cosmic-config system defaults"
+
+# The revision is the one pop-os/cosmic-settings tag epoch-1.11.0 locks in its Cargo.lock.
+[dependencies]
+cosmic-theme = { git = "https://github.com/pop-os/libcosmic", rev = "430f3d48a97d8779f9c1985473912e594ccca1ae" }
+cosmic-config = { git = "https://github.com/pop-os/libcosmic", rev = "430f3d48a97d8779f9c1985473912e594ccca1ae", default-features = false }
+serde_json = "1"
